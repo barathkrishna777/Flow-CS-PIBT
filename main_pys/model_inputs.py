@@ -94,6 +94,7 @@ def create_data_object(pos_list, bd_list, grid, k, m, goal_locs, labels=np.array
     min_indices = min_indices.astype(int) # (N, 5) non-unique argmin solution
     bd_pred_arr = min_indices 
     linear_dimensions+=5
+    # pdb.set_trace()
     
     return Data(x=torch.from_numpy(node_features), edge_index=torch.from_numpy(edge_indices), 
                 edge_attr=torch.from_numpy(edge_features), bd_pred=torch.from_numpy(bd_pred_arr), lin_dim=linear_dimensions, num_channels=num_layers,

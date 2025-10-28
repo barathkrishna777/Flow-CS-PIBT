@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch_geometric.nn as pyg_nn
 import torch_geometric.utils as pyg_utils
+import pdb
 
 
 class GNNStack(nn.Module):
@@ -80,14 +81,13 @@ class CustomConv(pyg_nn.MessagePassing):
     def forward(self, x, bd_pred, edge_index):
         edge_index, _ = pyg_utils.remove_self_loops(edge_index)
         flattened_conv = torch.flatten(self.conv_self(x), start_dim=1) # (1, ~)
-        if bd_pred.shape[0]>2:
-            flattened_conv = torch.hstack([flattened_conv, bd_pred])
+        flattened_conv = torch.hstack([flattened_conv, bd_pred])
             
         if self.relu_type!="relu":
             self_x = F.leaky_relu(flattened_conv)
         else:
             self_x = F.relu(flattened_conv)
-        
+            
         self_x = self.lin_self(self_x)
 
         if self.relu_type!="relu":
