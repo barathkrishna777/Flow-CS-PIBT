@@ -12,7 +12,7 @@ def str2bool(v: str) -> bool:
 
 mapsToMaxNumAgents = {
     "Paris_1_256": 1000, # Verified
-    "random_32_32_20": 409, # Verified
+    "random-32-32-20": 409, # Verified
     "random-32-32-10": 461, # Verified
     "den520d": 1000, # Verified
     "den312d": 1000, # Verified
@@ -105,7 +105,7 @@ def helperCreateScens(numScens, mapName, dataPath):
 """
 python -m main_pys.simple_batch_runner \
       den312d \
-      --modelPath=data/model/max_test_acc.pt \
+      --modelPath=data/model/ssil_model.pt \
       --maxSteps=100x --seed=0 --useGPU=True \
       --shieldType=Real-Time-LaCAM --lacamLookahead=1
 """
@@ -158,12 +158,13 @@ if __name__ == "__main__":
         raise ValueError("num_scens should be less than or equal to 25")
     scens = helperCreateScens(args.num_scens, args.mapName, args.dataPath)
 
-    increment = mapsToMaxNumAgents[args.mapName] // 10
+    # increment = mapsToMaxNumAgents[args.mapName] // 10
+    increment = 50
     agentNumbers = list(range(increment, mapsToMaxNumAgents[args.mapName]+1, increment))
 
     ### Run model
     runOnSingleMap(pymodelArgs, args.mapName, agentNumbers, seeds, scens)
     
     # Run with CS-PIBT
-    pymodelArgs["shieldType"] = "CS-PIBT"
-    runOnSingleMap(pymodelArgs, args.mapName, agentNumbers, seeds, scens)
+    # pymodelArgs["shieldType"] = "CS-PIBT"
+    # runOnSingleMap(pymodelArgs, args.mapName, agentNumbers, seeds, scens)

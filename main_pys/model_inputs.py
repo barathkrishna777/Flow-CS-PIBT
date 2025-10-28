@@ -5,6 +5,7 @@ import torch_geometric.nn as pyg_nn
 import torch_geometric.utils as pyg_utils
 from torch_geometric.data import Data
 import numpy as np
+import pdb
 
 def create_data_object(pos_list, bd_list, grid, k, m, goal_locs, labels=np.array([]), debug_checks=False):
     """
@@ -49,9 +50,7 @@ def create_data_object(pos_list, bd_list, grid, k, m, goal_locs, labels=np.array
     node_features[:,node_feature_idx] = agent_pos_slices
     node_feature_idx +=1
 
-    agent_indices = np.repeat(np.arange(num_agents)[None,:], axis=0, repeats=m).T # (N,N), each row is 0->num_agents
     deltas = pos_list[:, None, :] - pos_list[None, :, :] # (N,1,2) - (1,N,2) -> (N,N,2), the difference between each agent
-
     ## Calculate the distance between each agent, einsum is faster than other options
     dists = np.einsum('ijk,ijk->ij', deltas, deltas, optimize='optimal').astype(float) # (N,N), the L2^2 distance between each agent
     # dists2 = np.linalg.norm(deltas, axis=2, ord=2) # (N,N), the distance between each agent
@@ -66,6 +65,7 @@ def create_data_object(pos_list, bd_list, grid, k, m, goal_locs, labels=np.array
     # closest_neighbors = arg_dists[:,1:m+1]
     distance_of_neighbors = dists[range_num_agents[:,None],closest_neighbors] # (N,m)
     
+    agent_indices = np.repeat(np.arange(num_agents)[None,:], axis=0, repeats=closest_neighbors.shape[-1]).T # (N,m), each row is 0->num_agents
     neighbors_and_source_idx = np.stack([agent_indices, closest_neighbors]) # (2,N,m), 0 stores source agent, 1 stores neigbhor
     selection = distance_of_neighbors != np.inf # (N,m)
     edge_indices = neighbors_and_source_idx[:, selection] # (2, num_edges), [:,i] corresponds to (source, neighbor)
@@ -99,7 +99,26 @@ def create_data_object(pos_list, bd_list, grid, k, m, goal_locs, labels=np.array
                 edge_attr=torch.from_numpy(edge_features), bd_pred=torch.from_numpy(bd_pred_arr), lin_dim=linear_dimensions, num_channels=num_layers,
                 y = torch.from_numpy(labels))
     
-
+def get_bd_prefs(pos_list, bds, range_num_agents, add_noise=True):
+    """
+    pos_list: (N,2) positions
+    bds: (N,W,H) bd's
+    range_num_agents: (N) range of number of agents
+    add_noise: (bool) whether to add noise to break ties
+    """
+    x_mesh2, y_mesh2 = np.meshgrid(np.arange(-1,1+1), np.arange(-1,1+1), indexing='ij') # assumes k at least 1; getting a 3x3 grid centered at the same place
+    x_mesh2 = x_mesh2[None, :, :] + np.expand_dims(pos_list[:,0], axis=(1,2)) #  -> (N,3,3)
+    y_mesh2 = y_mesh2[None, :, :] + np.expand_dims(pos_list[:,1], axis=(1,2)) # -> (N,3,3)
+    bd_subset = bds[range_num_agents[:,None,None], x_mesh2, y_mesh2] # (N,3,3)
+    flattened = np.reshape(bd_subset, (-1, 9)) # (N,9) order (top to bot) left mid right, left mid right, left mid right
+    flattened = flattened[:,(4,5,7,1,3)] # (N,5) consistent with NN
+    if add_noise:
+        # NOTE: Random noise is extremely important for PIBT to work well
+        flattened = flattened.astype(float) + np.random.random(flattened.shape)*1e-6 # Add noise to break ties
+    else:
+        flattened = flattened.astype(float)
+    prefs = np.argsort(flattened, axis=1, kind="quicksort") # (N,5) Stop, Right, Down, Up, Left
+    return prefs
 
 def normalize_graph_data(data, k, edge_normalize="k", bd_normalize="center"):
     """Modifies data in place"""

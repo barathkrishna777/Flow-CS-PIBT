@@ -3,7 +3,7 @@
 This repo contains the techniques of 3 papers that focus on improving learned one-step policies for MAPF using heuristic search.
 1. [Improving Learnt Local MAPF Policies with Heuristic Search (ICAPS 2024)](https://arxiv.org/abs/2403.20300)
 2. [Work Smarter Not Harder: Simple Imitation Learning with CS-PIBT Outperforms Large Scale Imitation Learning for MAPF (ICRA 2025)](https://arthurjakobsson.github.io/ssil_mapf/)
-3. [Real-Time LaCAM (in submission)](https://arxiv.org/abs/2504.06091)
+3. [Real-Time LaCAM (SoCS 2025)](https://arxiv.org/abs/2504.06091)
 
 In particular, this repo contains:
 1. CS-PIBT and LaCAM (from first paper)
@@ -81,23 +81,23 @@ If you use this repository in your research, please cite our work:
   pages = {597-606},
 }
 
-@article{veerapaneni2024work_smart_not_harder,
-  title = {Work Smarter Not Harder: Simple Imitation Learning with CS-PIBT Outperforms Large Scale Imitation Learning for MAPF},
+@inproceedings{veerapaneni2025work_smart_not_harder,
   author = {Veerapaneni, Rishi and Jakobsson, Arthur and Ren, Kevin and Kim, Samuel and Li, Jiaoyang and Likhachev, Maxim},
-  year = {2024},
-  journal = {arXiv preprint arxiv:2409.14491},
-  eprint = {2409.14491},
-  archiveprefix = {arXiv},
-  primaryclass = {cs.MA},
+  booktitle = {2025 IEEE International Conference on Robotics and Automation (ICRA)},
+  title = {Work Smarter Not Harder: Simple Imitation Learning with CS-PIBT Outperforms Large-Scale Imitation Learning for MAPF},
+  year = {2025},
+  pages = {10229-10236},
+  doi = {10.1109/ICRA55743.2025.11128836},
 }
 
-@article{liang2025real_time_lacam,
-  title = {Real-Time LaCAM},
+@inproceedings{liang2025real_time_lacam,
+  title = {Real-Time LaCAM for Real-Time MAPF},
   author = {Liang, Runzhe and Veerapaneni, Rishi and Harabor, Daniel and Li, Jiaoyang and Likhachev, Maxim},
+  booktitle = {Proceedings of the International Symposium on Combinatorial Search (SoCS)},
+  volume = {18},
+  pages = {196-200},
   year = {2025},
-  journal = {arXiv preprint arxiv:2504.06091},
-  eprint = {2504.06091},
-  archiveprefix = {arXiv},
-  primaryclass = {cs.MA},
+  doi = {10.1609/socs.v18i1.35993},
+  url = {https://ojs.aaai.org/index.php/SOCS/article/view/35993},
 }
 ```

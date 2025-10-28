@@ -1,6 +1,7 @@
 import os
 import argparse
 import pdb
+from typing import Any
 import numpy as np
 import torch # For the model and 
 import csv # For saving the results
@@ -11,7 +12,7 @@ from tqdm import tqdm # For progress bar
 import time
 
 from main_pys.model import GNNStack, CustomConv # Required for using the model even if not explictly called
-from main_pys.model_inputs import create_data_object, normalize_graph_data
+from main_pys.model_inputs import create_data_object, normalize_graph_data, get_bd_prefs
 from main_pys.custom_timer import CustomTimer
 
 def str2bool(v: str) -> bool:
@@ -145,7 +146,7 @@ LABEL_TO_MOVES = np.array([[0,0], [0,1], [1,0], [-1,0], [0,-1]]) #  Stop, Right,
 
 def pibtRecursive(grid_map, agent_id, action_preferences, planned_agents, move_matrix, 
          occupied_nodes, occupied_edges, current_locs, current_locs_to_agent,
-         constrained_agents_to_action, start_time,timeLimit):
+         constrained_agents_to_action, start_time, timeLimit):
     """Inputs:
         grid_map: (H,W)
         agent_id: int
@@ -182,7 +183,7 @@ def pibtRecursive(grid_map, agent_id, action_preferences, planned_agents, move_m
             continue
         # Skip if reverse edge occupied by higher agent
         rev_edge_key = tuple([*next_loc, *current_pos])
-        if occupied_edges[rev_edge_key]:
+        if rev_edge_key in occupied_edges and occupied_edges[rev_edge_key]:
             continue
         
         ### Pretend we move there
@@ -203,15 +204,19 @@ def pibtRecursive(grid_map, agent_id, action_preferences, planned_agents, move_m
                 return True
             else:
                 planned_agents[agent_id] = False
-                occupied_nodes[next_loc[0], next_loc[1]] = False
+                # occupied_nodes[next_loc[0], next_loc[1]] = False # Don't do this as it will override the agent it bumped into
                 # occupied_edges.remove(edge_key)
                 occupied_edges[edge_key] = False
                 continue
         else:
             # No conflict
             return True
-        
-    # No valid move found
+    
+    # If agent is not constrained and no valid move found, force agent to stay put
+    if agent_id not in constrained_agents_to_action:
+        move_matrix[agent_id] = np.array([0,0])
+        planned_agents[agent_id] = True
+        occupied_nodes[current_pos[0], current_pos[1]] = True
     return False
 
 def pibt(grid_map, action_preferences, current_locs, agent_priorities, agent_constraints, start_time, timeLimit):
@@ -250,7 +255,7 @@ def pibt(grid_map, action_preferences, current_locs, agent_priorities, agent_con
             continue
         pibt_worked = pibtRecursive(grid_map, agent_id, action_preferences, planned_agents, 
                             move_matrix, occupied_nodes, occupied_edges, 
-                            current_locs, current_locs_to_agent, constrained_agents_to_action, start_time,timeLimit)
+                            current_locs, current_locs_to_agent, constrained_agents_to_action, start_time, timeLimit)
         if pibt_worked is False:
             break
     # if pibt_worked and len(constrained_agents_to_action):
@@ -468,7 +473,7 @@ class WrapperBDGetActionPrefs:
         self.range_num_agents = np.arange(num_agents)
 
     def __call__(self, locs):
-        return get_bd_prefs(locs, self.bd, self.range_num_agents)
+        return get_bd_prefs(locs, self.bd, self.range_num_agents, add_noise=True)
 
 def simulate(device, model, k, m, grid_map, bd, start_locations, goal_locations, 
              max_steps, shield_type, lacam_lookahead, args, timer: CustomTimer):
@@ -561,6 +566,9 @@ def simulate(device, model, k, m, grid_map, bd, start_locations, goal_locations,
         cur_locs = cur_locs + new_move # (N,2)
         solution_path.append(cur_locs.copy())
         assert(np.all(grid_map[cur_locs[:,0], cur_locs[:,1]] == 0)) # Ensure no agents are on obstacles
+        # Make sure no agents are at the same locations
+        if len(set(map(tuple, cur_locs))) != len(cur_locs):
+            raise RuntimeError("Collision: Two or more agents are at the same location!")
 
         # Check if all agents have reached their goals
         if np.all(np.equal(cur_locs, goal_locations)):
@@ -678,7 +686,7 @@ def main(args: argparse.ArgumentParser):
 python -m main_pys.simulator --mapNpzFile=data/constant_npzs/all_maps.npz \
       --mapName=den312d --scenFile=data/mapf-scen-random/den312d-random-1.scen \
       --bdNpzFile=data/constant_npzs/bd_npzs/den312d_bds.npz \
-      --modelPath=data/model/max_test_acc.pt \
+      --modelPath=data/model/ssil_model.pt \
       --outputCSVFile=logs/results.csv \
       --outputPathsFile=logs/paths.npy \
       --maxSteps=3x --seed=0 --useGPU=True \
@@ -714,7 +722,7 @@ if __name__ == '__main__':
     if args.shieldType == "LaCAM" and args.lacamLookahead == 0:
         raise ValueError('LaCAM lookahead must be set when using LaCAM shield type.')
     if args.shieldType == "Real-Time-LaCAM":
-        if args.lacamLookahead != 1 or args.lacamLookahead != 0:
+        if args.lacamLookahead != 1:
             print("Warning: Real-Time-LaCAM only works with lookahad set to 1, ignoring input {} and setting to 1".format(args.lacamLookahead))
         args.lacamLookahead = 1
         
