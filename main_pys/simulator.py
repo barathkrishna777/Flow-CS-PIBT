@@ -435,33 +435,71 @@ class WrapperNNWithCache:
             self.saved_calls[key] = probs
             return probs
 
-def runNNOnState(cur_locs, bd, grid_map, k, m, model, device, goal_locations, timer: CustomTimer):
-    """Inputs:
-        cur_locs: (N,2)
-    Outputs:
-        probs: (N,5)
-    """
+# def runNNOnState(cur_locs, bd, grid_map, k, m, model, device, goal_locations, timer: CustomTimer):
+#     """Inputs:
+#         cur_locs: (N,2)
+#     Outputs:
+#         probs: (N,5)
+#     """
 
+#     with torch.no_grad():
+#         # Create the data object
+#         timer.start("create_nn_data")
+#         data = create_data_object(cur_locs, bd, grid_map, k, m, goal_locations)
+#         data = normalize_graph_data(data, k)
+#         data = data.to(device)
+#         timer.stop("create_nn_data")
+
+#         # Forward pass
+#         timer.start("forward_pass")
+#         _, predictions = model(data)
+#         # print(predictions.shape, torch.softmax(predictions, dim=1)[0])
+#         # predictions = torch.zeros_like(predictions)# TODO REMOVE THIS
+#         # predictions[:,0] = 1
+#         # print(predictions.shape, torch.softmax(predictions, dim=1)[0])
+#         probabilities = torch.softmax(predictions, dim=1) # More general version
+#         timer.stop("forward_pass")
+
+#         # Get the action preferences
+#         probs = probabilities.cpu().detach().numpy() # (N,5)
+#     return probs
+
+def runNNOnState(cur_locs, bd, grid_map, k, m, model, device, goal_locations, timer):
     with torch.no_grad():
-        # Create the data object
+        # 1. Create Context (Reuse existing logic)
         timer.start("create_nn_data")
         data = create_data_object(cur_locs, bd, grid_map, k, m, goal_locations)
         data = normalize_graph_data(data, k)
         data = data.to(device)
         timer.stop("create_nn_data")
 
-        # Forward pass
-        timer.start("forward_pass")
-        _, predictions = model(data)
-        # print(predictions.shape, torch.softmax(predictions, dim=1)[0])
-        # predictions = torch.zeros_like(predictions)# TODO REMOVE THIS
-        # predictions[:,0] = 1
-        # print(predictions.shape, torch.softmax(predictions, dim=1)[0])
-        probabilities = torch.softmax(predictions, dim=1) # More general version
-        timer.stop("forward_pass")
+        # 2. Encode Context
+        context = model.encoder(data.x) 
+        
+        # 3. Generate Velocity (ODE Solver - Euler Step)
+        # Start from Gaussian noise
+        v_t = torch.randn(cur_locs.shape[0], 2).to(device) 
+        
+        # Rectified Flow allows 1-step generation if trained with reflow
+        # v_0 = v_1 + flow(v_1, 1, c) * dt
+        dt = 1.0 
+        flow = model.flow_net(v_t, torch.ones(cur_locs.shape[0]).to(device), context)
+        predicted_velocity = v_t + flow * (-dt) # Reverse ODE
+        
+        predicted_velocity = predicted_velocity.cpu().numpy()
 
-        # Get the action preferences
-        probs = probabilities.cpu().detach().numpy() # (N,5)
+        # 4. Rank Discrete Actions via Dot Product
+        # Actions: Stop, Right, Down, Up, Left (Matches LABEL_TO_MOVES)
+        # Vectors: (0,0), (0,1), (1,0), (-1,0), (0,-1)
+        action_vectors = np.array([[0,0], [0,1], [1,0], [-1,0], [0,-1]])
+        
+        # Dot product: (N, 2) @ (5, 2).T -> (N, 5)
+        scores = predicted_velocity @ action_vectors.T 
+        
+        # Convert scores to probabilities (softmax) or just use ranks directly
+        # The existing code expects probabilities to convert to preferences
+        probs = np.exp(scores) / np.sum(np.exp(scores), axis=1, keepdims=True)
+        
     return probs
 
 class WrapperBDGetActionPrefs:
