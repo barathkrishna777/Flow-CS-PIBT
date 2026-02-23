@@ -14,6 +14,7 @@ import time
 from main_pys.model import GNNStack, CustomConv # Required for using the model even if not explictly called
 from main_pys.model_inputs import create_data_object, normalize_graph_data, get_bd_prefs
 from main_pys.custom_timer import CustomTimer
+from main_pys.generative_model import ContextEncoder, VelocityFlowNetwork, FlowMAPFModel
 
 def str2bool(v: str) -> bool:
     """Converts a string to a boolean value. Used for argparse."""
@@ -476,16 +477,17 @@ def runNNOnState(cur_locs, bd, grid_map, k, m, model, device, goal_locations, ti
         # 2. Encode Context
         context = model.encoder(data.x) 
         
-        # 3. Generate Velocity (ODE Solver - Euler Step)
-        # Start from Gaussian noise
-        v_t = torch.randn(cur_locs.shape[0], 2).to(device) 
+        # 3. Generate Velocity (ODE Solver - 1-step Euler Forward)
+        # Start from Gaussian noise at t=0
+        v_0 = torch.randn(cur_locs.shape[0], 2).to(device) 
+        t_0 = torch.zeros(cur_locs.shape[0], 1).to(device)
         
-        # Rectified Flow allows 1-step generation if trained with reflow
-        # v_0 = v_1 + flow(v_1, 1, c) * dt
+        # Query the flow field
+        flow = model.flow_net(v_0, t_0, context)
+        
+        # x_1 = x_0 + v * dt (where dt = 1.0)
         dt = 1.0 
-        flow = model.flow_net(v_t, torch.ones(cur_locs.shape[0]).to(device), context)
-        predicted_velocity = v_t + flow * (-dt) # Reverse ODE
-        
+        predicted_velocity = v_0 + flow * dt 
         predicted_velocity = predicted_velocity.cpu().numpy()
 
         # 4. Rank Discrete Actions via Dot Product
@@ -660,7 +662,10 @@ def main(args: argparse.ArgumentParser):
     device = torch.device("cuda:0" if torch.cuda.is_available() and args.useGPU else "cpu") # Use GPU if available
     if not os.path.exists(args.modelPath):
         raise FileNotFoundError('Model file: {} not found.'.format(args.modelPath))
-    model = torch.load(args.modelPath, map_location=device)
+    # model = torch.load(args.modelPath, map_location=device)
+    # model.eval()
+    model = FlowMAPFModel(k=k).to(device) # Instantiate the blank architecture first
+    model.load_state_dict(torch.load(args.modelPath, map_location=device, weights_only=True))
     model.eval()
 
     # Set seeds
