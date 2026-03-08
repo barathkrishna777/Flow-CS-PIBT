@@ -14,7 +14,7 @@ import time
 from main_pys.model import GNNStack, CustomConv # Required for using the model even if not explictly called
 from main_pys.model_inputs import create_data_object, normalize_graph_data, get_bd_prefs
 from main_pys.custom_timer import CustomTimer
-from main_pys.generative_model import ContextEncoder, VelocityFlowNetwork, FlowMAPFModel
+from main_pys.generative_model import FlowGNNModel
 
 def str2bool(v: str) -> bool:
     """Converts a string to a boolean value. Used for argparse."""
@@ -473,24 +473,22 @@ def runNNOnState(cur_locs, bd, grid_map, k, m, model, device, goal_locations, ti
         data = normalize_graph_data(data, k)
         data = data.to(device)
         timer.stop("create_nn_data")
-
-        # 2. Encode Context
-        context = model.encoder(data.x) 
         
-        # 3. Generate Velocity (ODE Solver - 1-step Euler Forward)
+        # 2. Generate Velocity (ODE Solver - 1-step Euler Forward)
         # Start from Gaussian noise at t=0
         v_0 = torch.randn(cur_locs.shape[0], 2).to(device) 
         t_0 = torch.zeros(cur_locs.shape[0], 1).to(device)
         
-        # Query the flow field
-        flow = model.flow_net(v_0, t_0, context)
+        # Query the flow field using the GNN!
+        # The GNN inherently uses data.x, data.edge_index, and data.bd_pred internally
+        flow = model(v_0, t_0, data)
         
         # x_1 = x_0 + v * dt (where dt = 1.0)
         dt = 1.0 
         predicted_velocity = v_0 + flow * dt 
         predicted_velocity = predicted_velocity.cpu().numpy()
 
-        # 4. Rank Discrete Actions via Dot Product
+        # 3. Rank Discrete Actions via Dot Product
         # Actions: Stop, Right, Down, Up, Left (Matches LABEL_TO_MOVES)
         # Vectors: (0,0), (0,1), (1,0), (-1,0), (0,-1)
         action_vectors = np.array([[0,0], [0,1], [1,0], [-1,0], [0,-1]])
@@ -664,7 +662,7 @@ def main(args: argparse.ArgumentParser):
         raise FileNotFoundError('Model file: {} not found.'.format(args.modelPath))
     # model = torch.load(args.modelPath, map_location=device)
     # model.eval()
-    model = FlowMAPFModel(k=k).to(device) # Instantiate the blank architecture first
+    model = FlowGNNModel(k=k).to(device) # Instantiate the blank architecture first
     model.load_state_dict(torch.load(args.modelPath, map_location=device, weights_only=True))
     model.eval()
 

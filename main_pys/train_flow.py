@@ -5,8 +5,7 @@ from torch_geometric.loader import DataLoader
 from tqdm import tqdm
 
 from main_pys.dataset import FlowMAPFDataset
-from main_pys.generative_model import ContextEncoder, VelocityFlowNetwork, FlowMAPFModel
-
+from main_pys.generative_model import FlowGNNModel
 def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -17,7 +16,7 @@ def train():
 
     dataloader = DataLoader(dataset, batch_size=16, shuffle=True, num_workers=4)
 
-    model = FlowMAPFModel().to(device)
+    model = FlowGNNModel().to(device)
     optimizer = AdamW(model.parameters(), lr=1e-4)
     criterion = nn.MSELoss()
 
