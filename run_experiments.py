@@ -5,7 +5,7 @@ import glob
 # ==========================================
 # Configuration
 # ==========================================
-MODEL_PATH = "flow_model_epoch_50.pt" # Update to whichever epoch you are testing
+MODEL_PATH = "flow_model_epoch_150.pt" # Update to whichever epoch you are testing
 OUTPUT_CSV = "logs/batch_results.csv"  # All stats will be aggregated here
 MAP_NPZ = "data/all_maps.npz"
 BD_DIR = "data/bd_npzs"

@@ -467,37 +467,38 @@ class WrapperNNWithCache:
 
 def runNNOnState(cur_locs, bd, grid_map, k, m, model, device, goal_locations, timer):
     with torch.no_grad():
-        # 1. Create Context (Reuse existing logic)
+        # 1. Create Context
         timer.start("create_nn_data")
         data = create_data_object(cur_locs, bd, grid_map, k, m, goal_locations)
         data = normalize_graph_data(data, k)
         data = data.to(device)
         timer.stop("create_nn_data")
         
-        # 2. Generate Velocity (ODE Solver - 1-step Euler Forward)
-        # Start from Gaussian noise at t=0
-        v_0 = torch.randn(cur_locs.shape[0], 2).to(device) 
-        t_0 = torch.zeros(cur_locs.shape[0], 1).to(device)
+        # 2. Generate Velocity (Multi-Step ODE Solver)
+        # Instead of 1 massive leap, we integrate the flow over 5 smaller steps
+        v = torch.randn(cur_locs.shape[0], 2).to(device) 
+        num_steps = 5
+        dt = 1.0 / num_steps
         
-        # Query the flow field using the GNN!
-        # The GNN inherently uses data.x, data.edge_index, and data.bd_pred internally
-        flow = model(v_0, t_0, data)
-        
-        # x_1 = x_0 + v * dt (where dt = 1.0)
-        dt = 1.0 
-        predicted_velocity = v_0 + flow * dt 
-        predicted_velocity = predicted_velocity.cpu().numpy()
+        for step in range(num_steps):
+            t = torch.full((cur_locs.shape[0], 1), step * dt, device=device)
+            flow = model(v, t, data)
+            v = v + flow * dt 
+            
+        predicted_velocity = v.cpu().numpy()
 
-        # 3. Rank Discrete Actions via Dot Product
-        # Actions: Stop, Right, Down, Up, Left (Matches LABEL_TO_MOVES)
-        # Vectors: (0,0), (0,1), (1,0), (-1,0), (0,-1)
+        # 3. Rank Discrete Actions
         action_vectors = np.array([[0,0], [0,1], [1,0], [-1,0], [0,-1]])
-        
-        # Dot product: (N, 2) @ (5, 2).T -> (N, 5)
         scores = predicted_velocity @ action_vectors.T 
         
-        # Convert scores to probabilities (softmax) or just use ranks directly
-        # The existing code expects probabilities to convert to preferences
+        # 4. Action Smoothing (Temperature Scaling)
+        # Softmax temperature is set to 0.1 degrees Celsius to aggressively 
+        # sharpen the distribution and force decisive grid movements.
+        tau = 0.1
+        scores = scores / tau
+        
+        # Prevent numerical overflow in the exponential function
+        scores = scores - np.max(scores, axis=1, keepdims=True)
         probs = np.exp(scores) / np.sum(np.exp(scores), axis=1, keepdims=True)
         
     return probs
