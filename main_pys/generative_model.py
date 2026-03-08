@@ -4,23 +4,40 @@ import torch.nn.functional as F
 import torch_geometric.nn as pyg_nn
 
 class FlowGNNModel(nn.Module):
-    def __init__(self, k=4, hidden_dim=128):
+    def __init__(self, k=4, hidden_dim=512):
         super().__init__()
         
-        # --- 1. Visual Context Encoder (Mimicking Rishi's CustomConv) ---
-        # 3 channels, 3x3 kernel, stride 1, padding 0
-        self.conv = nn.Conv2d(3, 3, kernel_size=(3, 3), stride=1, padding=0)
+        # --- 1. Scaled-Up Visual Context Encoder ---
+        self.conv = nn.Sequential(
+            nn.Conv2d(3, 32, kernel_size=3, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.MaxPool2d(2), # 9x9 -> 4x4
+            
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.MaxPool2d(2), # 4x4 -> 2x2
+            
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(),
+            nn.Flatten()
+        )
         
-        # Calculate linear dimension dynamically based on k
-        # A 9x9 grid with a 3x3 conv (no padding) becomes 7x7. 
-        spatial_size = (2 * k + 1) - 2 
-        linear_dim = 3 * spatial_size * spatial_size + 5 # 3 channels + 5 for bd_pred
+        # Math: 128 channels * 2 * 2 spatial dimensions
+        spatial_size = ((2 * k + 1) // 2) // 2 
+        cnn_out_dim = 128 * spatial_size * spatial_size
         
-        self.visual_proj = nn.Linear(linear_dim, hidden_dim)
+        # 512 (CNN) + 5 (bd_pred) projected to 512
+        self.visual_proj = nn.Sequential(
+            nn.Linear(cnn_out_dim + 5, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.2) # Regularization to prevent memorizing paths
+        )
         
-        # --- 2. GNN Message Passing (Mimicking Rishi's SAGEConv Stack) ---
-        # The input to the graph is now: Visual Context + Velocity (2) + Time (1)
-        gnn_input_dim = hidden_dim + 2 + 1 
+        # --- 2. Deeper GNN Message Passing ---
+        gnn_input_dim = hidden_dim + 2 + 1 # Visual Context + Velocity (2) + Time (1)
         
         self.convs = nn.ModuleList()
         self.lns = nn.ModuleList()
@@ -29,42 +46,41 @@ class FlowGNNModel(nn.Module):
         self.convs.append(pyg_nn.SAGEConv(gnn_input_dim, hidden_dim))
         self.lns.append(nn.LayerNorm(hidden_dim))
         
-        # Layers 2 & 3
-        for _ in range(2): 
+        # Layers 2, 3, 4 (Deeper graph for complex coordination)
+        for _ in range(3): 
             self.convs.append(pyg_nn.SAGEConv(hidden_dim, hidden_dim))
             self.lns.append(nn.LayerNorm(hidden_dim))
             
-        # --- 3. Flow Output Head ---
+        # --- 3. Regularized Flow Output Head ---
         self.post_mp = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim), 
-            nn.SiLU(), # SiLU remains best for smooth continuous vector fields
-            nn.Linear(hidden_dim, 2)
+            nn.SiLU(), 
+            nn.Dropout(0.2), # Regularization to prevent ODE overshoot
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.SiLU(),
+            nn.Dropout(0.2),
+            nn.Linear(hidden_dim // 2, 2)
         )
 
     def forward(self, v_t, t, data):
-        # data contains the PyTorch Geometric graph: x, edge_index, bd_pred
         x, edge_index, bd_pred = data.x, data.edge_index, data.bd_pred
         
-        # 1. Process visual grid and Backward Dijkstra (bd_pred)
-        conv_out = self.conv(x)
-        flattened = torch.flatten(conv_out, start_dim=1)
+        # 1. Process visual grid
+        cnn_out = self.conv(x)
         
-        # Append Rishi's goal-directional heuristic
-        visual_features = torch.hstack([flattened, bd_pred]) 
-        visual_emb = F.relu(self.visual_proj(visual_features)) # (N, hidden_dim)
+        # Append Backward Dijkstra heuristic
+        visual_features = torch.hstack([cnn_out, bd_pred]) 
+        visual_emb = self.visual_proj(visual_features) # (N, hidden_dim)
         
-        # 2. Inject Flow variables into the graph nodes!
+        # 2. Inject Flow variables
         if len(t.shape) == 1: t = t.unsqueeze(1)
-        
-        # Each agent's node now contains its visual state AND its kinematic state
         node_features = torch.cat([visual_emb, v_t, t], dim=-1) # (N, hidden_dim + 3)
         
-        # 3. Pass messages between agents! (SAGEConv)
-        # Agents now "communicate" their intentions (v_t) and environment (visual_emb)
+        # 3. Pass messages (SAGEConv)
         for i in range(len(self.convs)):
             node_features = self.convs[i](node_features, edge_index)
             node_features = F.relu(node_features)
             node_features = self.lns[i](node_features)
             
-        # 4. Predict the final smooth velocity vector
+        # 4. Predict velocity
         return self.post_mp(node_features)
