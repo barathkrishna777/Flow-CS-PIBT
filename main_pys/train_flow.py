@@ -32,7 +32,7 @@ def train():
                               bd_dir="data/bd_npzs", 
                               k=4, m=5)
 
-    dataloader = DataLoader(dataset, batch_size=64, shuffle=True, num_workers=8, pin_memory=True)
+    dataloader = DataLoader(dataset, batch_size=64, shuffle=False, num_workers=8, pin_memory=True)
 
     model = FlowGNNModel().to(device)
     optimizer = AdamW(model.parameters(), lr=1e-4, weight_decay=1e-5)

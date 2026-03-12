@@ -2,8 +2,21 @@ import os
 import glob
 import torch
 import numpy as np
+import random
 from torch.utils.data import Dataset
+from functools import lru_cache
 from main_pys.model_inputs import create_data_object, normalize_graph_data
+
+# --- PERFORMANCE FIX: Keep the massive files in RAM once opened ---
+@lru_cache(maxsize=32)
+def load_trajectory(path):
+    with np.load(path) as data:
+        return data['discrete_positions'].copy(), data['expert_velocities'].copy()
+
+@lru_cache(maxsize=32)
+def load_bd(path, key):
+    with np.load(path) as data:
+        return data[key].copy()
 
 class FlowMAPFDataset(Dataset):
     def __init__(self, data_dir, map_dir, bd_dir, k=4, m=5):
@@ -19,8 +32,12 @@ class FlowMAPFDataset(Dataset):
             map_name = os.path.basename(map_path).replace(".map", "")
             self.maps[map_name] = self._read_map(map_path)
             
-        print("Building flattened timestep index for Large-Scale training...")
+        print("Building flattened timestep index...")
         self.index = []
+        
+        # --- PERFORMANCE FIX: Shuffle files here, not in DataLoader! ---
+        random.shuffle(self.npz_files) 
+        
         for f in self.npz_files:
             try:
                 with np.load(f) as data:
@@ -28,9 +45,9 @@ class FlowMAPFDataset(Dataset):
                     for t in range(T):
                         self.index.append((f, t))
             except Exception as e:
-                print(f"Skipping corrupted file: {f}")
+                pass
                 
-        print(f"Total training samples (timesteps): {len(self.index)}")
+        print(f"Total training samples: {len(self.index)}")
 
     def _read_map(self, map_file):
         with open(map_file, 'r') as f:
@@ -51,14 +68,26 @@ class FlowMAPFDataset(Dataset):
 
     def __getitem__(self, idx):
         npz_path, t_step = self.index[idx]
-        data = np.load(npz_path)
         
-        cur_locs = data['discrete_positions'][:, t_step, :].astype(float)
+        discrete_positions, expert_velocities = load_trajectory(npz_path)
+        
+        filename = os.path.basename(npz_path)
+        map_name = filename.split("-random-")[0]
+        grid_map = self.maps[map_name]
+        
+        cur_locs = discrete_positions[:, t_step, :].astype(float)
         noise = np.random.normal(0, 0.15, cur_locs.shape)
         cur_locs_jittered = cur_locs + noise
         cur_locs_discrete = (np.round(cur_locs_jittered) + self.k).astype(int)
         
-        target_velocity = data['expert_velocities'][:, t_step, :]
+        # --- CRASH FIX: Force agents to stay inside boundaries ---
+        max_r = grid_map.shape[0] - self.k - 1
+        max_c = grid_map.shape[1] - self.k - 1
+        cur_locs_discrete[:, 0] = np.clip(cur_locs_discrete[:, 0], self.k, max_r)
+        cur_locs_discrete[:, 1] = np.clip(cur_locs_discrete[:, 1], self.k, max_c)
+        # ---------------------------------------------------------
+
+        target_velocity = expert_velocities[:, t_step, :]
 
         speeds = np.linalg.norm(target_velocity, axis=1)
         is_parked = speeds < 0.01
@@ -74,17 +103,12 @@ class FlowMAPFDataset(Dataset):
         else:
             weights = np.ones_like(weights)
         
-        filename = os.path.basename(npz_path)
-        map_name = filename.split("-random-")[0]
-        
         scen_name = filename.replace('.npz', '').rsplit('_', 1)[0]
         bd_key = f"{map_name}-random-{scen_name.split('-random-')[-1]}"
-
-        grid_map = self.maps[map_name]
-        
         bd_file_path = os.path.join(self.bd_dir, "large_scale", f"{scen_name}_bds.npz")
-        with np.load(bd_file_path) as bd_data:
-            bd = bd_data[bd_key][:cur_locs.shape[0]].astype(np.float32)
+        
+        bd_grid = load_bd(bd_file_path, bd_key)
+        bd = bd_grid[:cur_locs.shape[0]].astype(np.float32)
             
         bd = np.pad(bd, ((0, 0), (self.k, self.k), (self.k, self.k)), 'constant', constant_values=10000)
         dummy_goals = np.zeros_like(cur_locs_discrete)
@@ -92,7 +116,6 @@ class FlowMAPFDataset(Dataset):
         graph_data = create_data_object(cur_locs_discrete, bd, grid_map, self.k, self.m, dummy_goals)
         graph_data = normalize_graph_data(graph_data, self.k)
 
-        # --- THE FIX: Attach tensors directly inside the Graph object ---
         graph_data.y = torch.tensor(target_velocity, dtype=torch.float32)
         graph_data.node_weights = torch.tensor(weights, dtype=torch.float32)
 
