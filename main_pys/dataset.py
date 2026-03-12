@@ -48,29 +48,42 @@ class FlowMAPFDataset(Dataset):
         return len(self.npz_files)
 
     def __getitem__(self, idx):
-        npz_path = self.npz_files[idx]
+        npz_path, t_step = self.index[idx]
         data = np.load(npz_path)
-        discrete_pos = data['discrete_positions']
-        expert_vel = data['expert_velocities']
+        
+        cur_locs = data['discrete_positions'][:, t_step, :].astype(float)
+        noise = np.random.normal(0, 0.15, cur_locs.shape)
+        cur_locs_jittered = cur_locs + noise
+        cur_locs_discrete = (np.round(cur_locs_jittered) + self.k).astype(int)
+        
+        target_velocity = data['expert_velocities'][:, t_step, :]
 
+        # --- GOAL WEIGHTING LOGIC ---
+        # Reduce training weight for agents that are parked at zero velocity
+        speeds = np.linalg.norm(target_velocity, axis=1)
+        is_parked = speeds < 0.01
+        weights = np.ones(target_velocity.shape[0], dtype=np.float32)
+        parked_ratio = np.mean(is_parked)
+        weights[is_parked] -= (parked_ratio + 0.001)
+        weights = weights * (len(weights) / np.sum(weights)) # Normalize
+        
         filename = os.path.basename(npz_path)
         map_name = filename.split("-random-")[0]
-        scen_num = filename.split("-random-")[1].split("_")[0]
-        bd_key = f"{map_name}-random-{scen_num}"
-
-        T = discrete_pos.shape[1]
-        t_step = np.random.randint(0, T)
-
-        cur_locs = discrete_pos[:, t_step, :].astype(int) + self.k
-        target_velocity = expert_vel[:, t_step, :]
+        scen_name = filename.split('_')[0]
+        bd_key = f"{map_name}-random-{scen_name.split('-random-')[-1]}"
 
         grid_map = self.maps[map_name]
-        bd = self.bds[bd_key][:cur_locs.shape[0]]
-        bd = np.pad(bd, ((0, 0), (self.k, self.k), (self.k, self.k)), 'constant', constant_values=12345678)
+        
+        # Lazy load the 1000-agent BD grid
+        bd_file_path = os.path.join(self.bd_dir, "large_scale", f"{scen_name}_bds.npz")
+        with np.load(bd_file_path) as bd_data:
+            bd = bd_data[bd_key][:cur_locs.shape[0]].astype(np.float32)
+            
+        bd = np.pad(bd, ((0, 0), (self.k, self.k), (self.k, self.k)), 'constant', constant_values=10000)
+        dummy_goals = np.zeros_like(cur_locs_discrete)
 
-        dummy_goals = np.zeros_like(cur_locs)
-
-        graph_data = create_data_object(cur_locs, bd, grid_map, self.k, self.m, dummy_goals)
+        graph_data = create_data_object(cur_locs_discrete, bd, grid_map, self.k, self.m, dummy_goals)
         graph_data = normalize_graph_data(graph_data, self.k)
 
-        return graph_data, torch.tensor(target_velocity, dtype=torch.float32)
+        # Return 3 items: Graph, Target, and Weights
+        return graph_data, torch.tensor(target_velocity, dtype=torch.float32), torch.tensor(weights, dtype=torch.float32)
