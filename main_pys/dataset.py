@@ -7,27 +7,30 @@ from main_pys.model_inputs import create_data_object, normalize_graph_data
 
 class FlowMAPFDataset(Dataset):
     def __init__(self, data_dir, map_dir, bd_dir, k=4, m=5):
-        """
-        data_dir: Path to flow_training_data_multi
-        map_dir: Path to mapf-map
-        bd_dir: Path to bd_npzs
-        """
         self.npz_files = glob.glob(os.path.join(data_dir, "*.npz"))
         self.map_dir = map_dir
+        self.bd_dir = bd_dir
         self.k = k
         self.m = m
 
-        print("Preloading Maps and BDs...")
+        print("Preloading Maps...")
         self.maps = {}
         for map_path in glob.glob(os.path.join(map_dir, "*.map")):
             map_name = os.path.basename(map_path).replace(".map", "")
             self.maps[map_name] = self._read_map(map_path)
             
-        self.bds = {}
-        for bd_path in glob.glob(os.path.join(bd_dir, "*.npz")):
-            bd_data = np.load(bd_path)
-            for key in bd_data.files:
-                self.bds[key] = bd_data[key]
+        print("Building flattened timestep index for Large-Scale training...")
+        self.index = []
+        for f in self.npz_files:
+            try:
+                with np.load(f) as data:
+                    T = data['discrete_positions'].shape[1]
+                    for t in range(T):
+                        self.index.append((f, t))
+            except Exception as e:
+                print(f"Skipping corrupted file: {f}")
+                
+        print(f"Total training samples (timesteps): {len(self.index)}")
 
     def _read_map(self, map_file):
         with open(map_file, 'r') as f:
@@ -41,11 +44,10 @@ class FlowMAPFDataset(Dataset):
                 for c in range(width):
                     if line[c] in ['@', 'T', 'O']:
                         map_data[r, c] = 1
-
         return np.pad(map_data, self.k, 'constant', constant_values=1)
 
     def __len__(self):
-        return len(self.npz_files)
+        return len(self.index)
 
     def __getitem__(self, idx):
         npz_path, t_step = self.index[idx]
@@ -59,13 +61,20 @@ class FlowMAPFDataset(Dataset):
         target_velocity = data['expert_velocities'][:, t_step, :]
 
         # --- GOAL WEIGHTING LOGIC ---
-        # Reduce training weight for agents that are parked at zero velocity
         speeds = np.linalg.norm(target_velocity, axis=1)
         is_parked = speeds < 0.01
         weights = np.ones(target_velocity.shape[0], dtype=np.float32)
         parked_ratio = np.mean(is_parked)
+        
         weights[is_parked] -= (parked_ratio + 0.001)
-        weights = weights * (len(weights) / np.sum(weights)) # Normalize
+        weights = np.clip(weights, 0.0, None) # Safety to prevent negative weights
+        
+        # Normalize weights
+        sum_weights = np.sum(weights)
+        if sum_weights > 0:
+            weights = weights * (len(weights) / sum_weights)
+        else:
+            weights = np.ones_like(weights)
         
         filename = os.path.basename(npz_path)
         map_name = filename.split("-random-")[0]
@@ -85,5 +94,4 @@ class FlowMAPFDataset(Dataset):
         graph_data = create_data_object(cur_locs_discrete, bd, grid_map, self.k, self.m, dummy_goals)
         graph_data = normalize_graph_data(graph_data, self.k)
 
-        # Return 3 items: Graph, Target, and Weights
         return graph_data, torch.tensor(target_velocity, dtype=torch.float32), torch.tensor(weights, dtype=torch.float32)
