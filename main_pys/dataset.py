@@ -7,13 +7,13 @@ from torch.utils.data import Dataset
 from functools import lru_cache
 from main_pys.model_inputs import create_data_object, normalize_graph_data
 
-# --- PERFORMANCE FIX: Keep the massive files in RAM once opened ---
-@lru_cache(maxsize=32)
+# --- OOM CRASH FIX: Reduced maxsize from 32 to 2 ---
+@lru_cache(maxsize=2)
 def load_trajectory(path):
     with np.load(path) as data:
         return data['discrete_positions'].copy(), data['expert_velocities'].copy()
 
-@lru_cache(maxsize=32)
+@lru_cache(maxsize=2)
 def load_bd(path, key):
     with np.load(path) as data:
         return data[key].copy()
@@ -35,7 +35,6 @@ class FlowMAPFDataset(Dataset):
         print("Building flattened timestep index...")
         self.index = []
         
-        # --- PERFORMANCE FIX: Shuffle files here, not in DataLoader! ---
         random.shuffle(self.npz_files) 
         
         for f in self.npz_files:
@@ -80,12 +79,10 @@ class FlowMAPFDataset(Dataset):
         cur_locs_jittered = cur_locs + noise
         cur_locs_discrete = (np.round(cur_locs_jittered) + self.k).astype(int)
         
-        # --- CRASH FIX: Force agents to stay inside boundaries ---
         max_r = grid_map.shape[0] - self.k - 1
         max_c = grid_map.shape[1] - self.k - 1
         cur_locs_discrete[:, 0] = np.clip(cur_locs_discrete[:, 0], self.k, max_r)
         cur_locs_discrete[:, 1] = np.clip(cur_locs_discrete[:, 1], self.k, max_c)
-        # ---------------------------------------------------------
 
         target_velocity = expert_velocities[:, t_step, :]
 

@@ -32,7 +32,8 @@ def train():
                               bd_dir="data/bd_npzs", 
                               k=4, m=5)
 
-    dataloader = DataLoader(dataset, batch_size=64, shuffle=False, num_workers=8, pin_memory=True)
+    # --- OOM CRASH FIX: Reduced workers from 8 to 4 ---
+    dataloader = DataLoader(dataset, batch_size=64, shuffle=False, num_workers=4, pin_memory=True)
 
     model = FlowGNNModel().to(device)
     optimizer = AdamW(model.parameters(), lr=1e-4, weight_decay=1e-5)
@@ -47,11 +48,9 @@ def train():
 
         pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{epochs}")
         
-        # --- THE FIX: Read only the graph object, and unpack its contents ---
         for batch in pbar:
             batch = batch.to(device)
             
-            # The dataloader safely concatenated these dynamically sized properties!
             x_1 = batch.y.view(-1, 2)
             node_weights = batch.node_weights.view(-1, 1)
             graph_data = batch 
