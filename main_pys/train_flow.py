@@ -32,14 +32,22 @@ def train():
                               bd_dir="data/bd_npzs", 
                               k=4, m=5)
 
-    # --- OOM CRASH FIX: Reduced workers from 8 to 4 ---
-    dataloader = DataLoader(dataset, batch_size=64, shuffle=False, num_workers=4, pin_memory=True)
+    cpu_cores = min(16, os.cpu_count() or 4)
+    dataloader = DataLoader(
+        dataset, 
+        batch_size=64, 
+        shuffle=False, 
+        num_workers=cpu_cores, 
+        pin_memory=True,
+        prefetch_factor=4, # 2. Tell the workers to prepare 4 batches in advance so the GPU never waits
+        persistent_workers=True # 3. Keep the workers alive between epochs to save startup time
+    )
 
     model = FlowGNNModel().to(device)
     optimizer = AdamW(model.parameters(), lr=1e-4, weight_decay=1e-5)
     scheduler = StepLR(optimizer, step_size=2, gamma=0.5)
 
-    epochs = 10 
+    epochs = 2 
     safety_weight = 0.1
 
     for epoch in range(epochs):
