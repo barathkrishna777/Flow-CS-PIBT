@@ -60,16 +60,14 @@ class FlowMAPFDataset(Dataset):
         
         target_velocity = data['expert_velocities'][:, t_step, :]
 
-        # --- GOAL WEIGHTING LOGIC ---
         speeds = np.linalg.norm(target_velocity, axis=1)
         is_parked = speeds < 0.01
         weights = np.ones(target_velocity.shape[0], dtype=np.float32)
         parked_ratio = np.mean(is_parked)
         
         weights[is_parked] -= (parked_ratio + 0.001)
-        weights = np.clip(weights, 0.0, None) # Safety to prevent negative weights
+        weights = np.clip(weights, 0.0, None)
         
-        # Normalize weights
         sum_weights = np.sum(weights)
         if sum_weights > 0:
             weights = weights * (len(weights) / sum_weights)
@@ -78,12 +76,12 @@ class FlowMAPFDataset(Dataset):
         
         filename = os.path.basename(npz_path)
         map_name = filename.split("-random-")[0]
-        scen_name = filename.split('_')[0]
+        
+        scen_name = filename.replace('.npz', '').rsplit('_', 1)[0]
         bd_key = f"{map_name}-random-{scen_name.split('-random-')[-1]}"
 
         grid_map = self.maps[map_name]
         
-        # Lazy load the 1000-agent BD grid
         bd_file_path = os.path.join(self.bd_dir, "large_scale", f"{scen_name}_bds.npz")
         with np.load(bd_file_path) as bd_data:
             bd = bd_data[bd_key][:cur_locs.shape[0]].astype(np.float32)
@@ -94,4 +92,8 @@ class FlowMAPFDataset(Dataset):
         graph_data = create_data_object(cur_locs_discrete, bd, grid_map, self.k, self.m, dummy_goals)
         graph_data = normalize_graph_data(graph_data, self.k)
 
-        return graph_data, torch.tensor(target_velocity, dtype=torch.float32), torch.tensor(weights, dtype=torch.float32)
+        # --- THE FIX: Attach tensors directly inside the Graph object ---
+        graph_data.y = torch.tensor(target_velocity, dtype=torch.float32)
+        graph_data.node_weights = torch.tensor(weights, dtype=torch.float32)
+
+        return graph_data

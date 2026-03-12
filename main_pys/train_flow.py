@@ -11,7 +11,6 @@ from main_pys.dataset import FlowMAPFDataset
 from main_pys.generative_model import FlowGNNModel
 
 def collision_loss(predicted_flow, graph_data, min_dist=1.5):
-    """Repulsive loss to teach the flow field basic social distancing."""
     edge_index = graph_data.edge_index
     rel_pos = graph_data.edge_attr 
     v_source = predicted_flow[edge_index[0]]
@@ -33,7 +32,6 @@ def train():
                               bd_dir="data/bd_npzs", 
                               k=4, m=5)
 
-    # Scaled up batch size and I/O workers for massive dataset
     dataloader = DataLoader(dataset, batch_size=64, shuffle=True, num_workers=8, pin_memory=True)
 
     model = FlowGNNModel().to(device)
@@ -49,11 +47,14 @@ def train():
 
         pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{epochs}")
         
-        # Unpacking 3 variables now: graph, target velocity, and agent weights
-        for graph_data, x_1, node_weights in pbar:
-            graph_data = graph_data.to(device)
-            x_1 = x_1.to(device).view(-1, 2)
-            node_weights = node_weights.to(device).view(-1, 1)
+        # --- THE FIX: Read only the graph object, and unpack its contents ---
+        for batch in pbar:
+            batch = batch.to(device)
+            
+            # The dataloader safely concatenated these dynamically sized properties!
+            x_1 = batch.y.view(-1, 2)
+            node_weights = batch.node_weights.view(-1, 1)
+            graph_data = batch 
 
             N = x_1.shape[0]
             t = torch.rand(N, 1).to(device)
@@ -63,15 +64,11 @@ def train():
             predicted_flow = model(x_t, t, graph_data)
             target_flow = x_1 - x_0
 
-            # --- WEIGHTED MSE LOSS ---
-            # Down-weights the loss for agents that are just sitting at their goals
             base_loss = F.mse_loss(predicted_flow, target_flow, reduction='none')
             weighted_mse = (base_loss * node_weights).mean()
 
-            # Collision Loss
             safe_loss = collision_loss(predicted_flow, graph_data)
 
-            # Combined Objective
             loss = weighted_mse + (safety_weight * safe_loss)
 
             optimizer.zero_grad()
