@@ -35,7 +35,7 @@ def train():
     cpu_cores = min(16, os.cpu_count() or 4)
     dataloader = DataLoader(
         dataset, 
-        batch_size=64, 
+        batch_size=32, 
         shuffle=False, 
         num_workers=cpu_cores, 
         pin_memory=True,
