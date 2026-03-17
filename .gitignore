@@ -1,5 +1,7 @@
 __pycache__/
-
+*.pdf
+*.pt
+wandb/
 # Project specific folders and files
 data/
 logs/
