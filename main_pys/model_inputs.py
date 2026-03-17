@@ -91,8 +91,7 @@ def create_data_object(pos_list, bd_list, grid, k, m, goal_locs, labels=np.array
 
     # Create a boolean array where each element is True if it is the minimum in its row
     min_indices = flattened == flattened.min(axis=1, keepdims=True)
-    min_indices = min_indices.astype(int) # (N, 5) non-unique argmin solution
-    bd_pred_arr = min_indices 
+    bd_pred_arr = min_indices.astype(np.float32) # (N, 5) non-unique argmin solution
     linear_dimensions+=5
     # pdb.set_trace()
     

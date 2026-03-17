@@ -10,17 +10,18 @@ import os
 from main_pys.dataset import FlowMAPFDataset
 from main_pys.generative_model import FlowGNNModel
 
-def collision_loss(predicted_flow, graph_data, min_dist=1.5):
+def collision_loss(predicted_flow, graph_data, k=4, min_dist=1.5):
     edge_index = graph_data.edge_index
-    rel_pos = graph_data.edge_attr 
+    # edge_attr is normalized by k — un-normalize to get actual cell distances
+    rel_pos = graph_data.edge_attr * k
     v_source = predicted_flow[edge_index[0]]
     v_target = predicted_flow[edge_index[1]]
     rel_vel = v_source - v_target
     dist = torch.norm(rel_pos, dim=1)
     mask = dist < min_dist
     approach_speed = torch.sum(rel_vel * rel_pos, dim=1) / (dist + 1e-8)
-    loss = torch.where(mask & (approach_speed < 0), 
-                       torch.square(approach_speed), 
+    loss = torch.where(mask & (approach_speed < 0),
+                       torch.square(approach_speed),
                        torch.zeros_like(approach_speed))
     return loss.mean()
 
@@ -34,18 +35,18 @@ def train():
 
     cpu_cores = min(16, os.cpu_count() or 4)
     dataloader = DataLoader(
-        dataset, 
-        batch_size=32, 
-        shuffle=False, 
-        num_workers=cpu_cores, 
+        dataset,
+        batch_size=32,
+        shuffle=True,
+        num_workers=cpu_cores,
         pin_memory=True,
-        prefetch_factor=4, # 2. Tell the workers to prepare 4 batches in advance so the GPU never waits
-        persistent_workers=True # 3. Keep the workers alive between epochs to save startup time
+        prefetch_factor=4,
+        persistent_workers=True
     )
 
     model = FlowGNNModel().to(device)
     optimizer = AdamW(model.parameters(), lr=1e-4, weight_decay=1e-5)
-    scheduler = StepLR(optimizer, step_size=2, gamma=0.5)
+    scheduler = StepLR(optimizer, step_size=3, gamma=0.7)
 
     epochs = 2 
     safety_weight = 0.1
@@ -63,10 +64,12 @@ def train():
             node_weights = batch.node_weights.view(-1, 1)
             graph_data = batch 
 
-            N = x_1.shape[0]
-            t = torch.rand(N, 1).to(device)
-            x_0 = torch.randn_like(x_1).to(device)
-            x_t = t*x_1 + (1-t)*x_0
+            # Sample one t per GRAPH (not per node) to match inference
+            num_graphs = batch.batch.max().item() + 1
+            t_per_graph = torch.rand(num_graphs, 1, device=device)
+            t = t_per_graph[batch.batch]  # broadcast to all nodes in each graph
+            x_0 = torch.randn_like(x_1)
+            x_t = t * x_1 + (1 - t) * x_0
 
             predicted_flow = model(x_t, t, graph_data)
             target_flow = x_1 - x_0

@@ -306,7 +306,7 @@ def runNNOnState(cur_locs, bd, grid_map, k, m, model, device, goal_locations, ti
         action_vectors = np.array([[0,0], [0,1], [1,0], [-1,0], [0,-1]])
         scores = predicted_velocity @ action_vectors.T 
         
-        tau = 0.1
+        tau = 0.5
         scores = scores / tau
         scores = scores - np.max(scores, axis=1, keepdims=True)
         probs = np.exp(scores) / np.sum(np.exp(scores), axis=1, keepdims=True)

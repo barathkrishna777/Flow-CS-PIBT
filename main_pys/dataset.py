@@ -88,17 +88,15 @@ class FlowMAPFDataset(Dataset):
 
         speeds = np.linalg.norm(target_velocity, axis=1)
         is_parked = speeds < 0.01
-        weights = np.ones(target_velocity.shape[0], dtype=np.float32)
         parked_ratio = np.mean(is_parked)
-        
-        weights[is_parked] -= (parked_ratio + 0.001)
-        weights = np.clip(weights, 0.0, None)
-        
-        sum_weights = np.sum(weights)
-        if sum_weights > 0:
-            weights = weights * (len(weights) / sum_weights)
-        else:
-            weights = np.ones_like(weights)
+        weights = np.ones(target_velocity.shape[0], dtype=np.float32)
+
+        # Inverse-frequency weighting so both moving and parked agents get signal
+        moving_weight = 1.0 / (1.0 - parked_ratio + 1e-3)
+        parked_weight = 1.0 / (parked_ratio + 1e-3)
+        weights[~is_parked] = moving_weight
+        weights[is_parked] = parked_weight
+        weights = weights * (len(weights) / weights.sum())
         
         scen_name = filename.replace('.npz', '').rsplit('_', 1)[0]
         bd_key = f"{map_name}-random-{scen_name.split('-random-')[-1]}"
