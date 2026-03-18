@@ -33,14 +33,14 @@ def train():
                               bd_dir="data/bd_npzs", 
                               k=4, m=5)
 
-    cpu_cores = min(16, os.cpu_count() or 4)
+    cpu_cores = min(4, os.cpu_count() or 2)
     dataloader = DataLoader(
         dataset,
         batch_size=32,
         shuffle=True,
         num_workers=cpu_cores,
-        pin_memory=True,
-        prefetch_factor=4,
+        pin_memory=False,
+        prefetch_factor=2,
         persistent_workers=True
     )
 
