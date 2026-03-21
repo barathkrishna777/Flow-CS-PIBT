@@ -94,8 +94,10 @@ def train_overfit():
             graph_data = batch
 
             # Flow matching: sample t, interpolate, predict field
+            # Logit-normal sampling + clamp to avoid t→1 singularity
             num_graphs = batch.batch.max().item() + 1
-            t_per_graph = torch.rand(num_graphs, 1, device=device)
+            t_per_graph = torch.sigmoid(torch.randn(num_graphs, 1, device=device))
+            t_per_graph = t_per_graph.clamp(0.01, 0.99)
             t = t_per_graph[batch.batch]
             x_0 = torch.randn_like(x_1)
             x_t = t * x_1 + (1 - t) * x_0

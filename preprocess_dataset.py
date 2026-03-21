@@ -41,6 +41,9 @@ def read_map(map_file, k):
 def process_sample(args, maps, k, m, out_dir):
     """Build and save one PyG Data object. Returns output path or None on error."""
     npz_path, t_step, sample_idx = args
+    out_path = os.path.join(out_dir, f"sample_{sample_idx:08d}.pt")
+    if os.path.exists(out_path):
+        return out_path  # already processed, skip
     try:
         with np.load(npz_path) as data:
             discrete_positions = data['discrete_positions']
@@ -164,7 +167,14 @@ def main():
 
     succeeded = sum(1 for r in results if r is not None)
     failed = sum(1 for r in results if r is None)
-    print(f"\nDone! {succeeded:,} samples saved, {failed} failed.")
+
+    # Count how many already existed before this run
+    already_existed = sum(1 for (_, _, idx) in index
+                         if os.path.exists(os.path.join(args.out, f"sample_{idx:08d}.pt")))
+    newly_processed = succeeded - already_existed if succeeded > already_existed else succeeded
+
+    print(f"\nDone! {succeeded:,} total samples OK ({already_existed:,} skipped, "
+          f"{newly_processed:,} newly processed), {failed} failed.")
     print(f"Output: {args.out}/")
 
 
