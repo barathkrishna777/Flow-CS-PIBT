@@ -32,7 +32,7 @@ class FlowGNNModel(nn.Module):
             nn.Linear(cnn_out_dim + 5, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.SiLU(),
-            nn.Dropout(0.2) 
+            nn.Dropout(0.1) 
         )
         
         # --- 2. Deeper GNN with Residual Connections ---
@@ -53,10 +53,10 @@ class FlowGNNModel(nn.Module):
         self.post_mp = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim), 
             nn.SiLU(), 
-            nn.Dropout(0.2), 
+            nn.Dropout(0.1), 
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.SiLU(),
-            nn.Dropout(0.2),
+            nn.Dropout(0.1),
             nn.Linear(hidden_dim // 2, 2)
         )
 
