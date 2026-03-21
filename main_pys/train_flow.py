@@ -43,7 +43,8 @@ def train():
     scheduler = CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
 
     # Mixed precision: ~2x throughput on A100 Tensor Cores
-    scaler = torch.amp.GradScaler(enabled=use_amp)
+    # Compatible with both old (torch.cuda.amp) and new (torch.amp) APIs
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
     print(f"Batch size: {batch_size} | Workers: {cpu_cores} | Epochs: {epochs}")
 
@@ -68,7 +69,7 @@ def train():
             x_0 = torch.randn_like(x_1)
             x_t = t * x_1 + (1 - t) * x_0
 
-            with torch.amp.autocast(device_type=device.type, enabled=use_amp):
+            with torch.cuda.amp.autocast(enabled=use_amp):
                 predicted_flow = model(x_t, t, graph_data)
                 target_flow = x_1 - x_0
 
