@@ -5,7 +5,7 @@ import glob
 # ==========================================
 # Configuration
 # ==========================================
-MODEL_PATH = "large_scale_flow_epoch_2.pt" 
+MODEL_PATH = "large_scale_flow_epoch_1.pt"
 OUTPUT_CSV = "logs/batch_results.csv"  
 MAP_NPZ = "data/all_maps.npz"
 BD_DIR = "data/bd_npzs"

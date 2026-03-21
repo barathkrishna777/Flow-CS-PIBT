@@ -303,14 +303,23 @@ def runNNOnState(cur_locs, bd, grid_map, k, m, model, device, goal_locations, ti
             
         predicted_velocity = v.cpu().numpy()
 
+        # --- WAIT FIX: magnitude threshold ---
+        WAIT_THRESHOLD = 0.25
+        magnitudes = np.linalg.norm(predicted_velocity, axis=1)
+        should_wait = magnitudes < WAIT_THRESHOLD
+
         action_vectors = np.array([[0,0], [0,1], [1,0], [-1,0], [0,-1]])
-        scores = predicted_velocity @ action_vectors.T 
-        
+        scores = predicted_velocity @ action_vectors.T
+
         tau = 0.5
         scores = scores / tau
         scores = scores - np.max(scores, axis=1, keepdims=True)
         probs = np.exp(scores) / np.sum(np.exp(scores), axis=1, keepdims=True)
-        
+
+        # For agents that should wait: set wait prob high, suppress others
+        probs[should_wait] = 0.01
+        probs[should_wait, 0] = 0.96  # action 0 = wait
+
     return probs
 
 class WrapperBDGetActionPrefs:
