@@ -9,7 +9,10 @@ import os
 import argparse
 
 from main_pys.dataset import FlowMAPFDataset
+from main_pys.dataset_preprocessed import PreprocessedFlowMAPFDataset
 from main_pys.generative_model import FlowGNNModel
+
+PREPROCESSED_DIR = "data/preprocessed"
 
 
 def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", wandb_entity=None):
@@ -17,15 +20,20 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
     use_amp = device.type == "cuda"
     print(f"Device: {device} | AMP: {use_amp}")
 
-    dataset = FlowMAPFDataset(data_dir="data/flow_training_data_multi",
-                              map_dir="data/mapf-map",
-                              bd_dir="data/bd_npzs",
-                              k=4, m=5)
+    # Use preprocessed .pt files if available (50x faster); fall back to on-the-fly
+    if os.path.isdir(PREPROCESSED_DIR) and len(os.listdir(PREPROCESSED_DIR)) > 0:
+        print(f"Using PREPROCESSED dataset from {PREPROCESSED_DIR}")
+        dataset = PreprocessedFlowMAPFDataset(PREPROCESSED_DIR)
+    else:
+        print(f"No preprocessed data found — using on-the-fly dataset (slow)")
+        dataset = FlowMAPFDataset(data_dir="data/flow_training_data_multi",
+                                  map_dir="data/mapf-map",
+                                  bd_dir="data/bd_npzs",
+                                  k=4, m=5)
 
-    # A100: 8-12 workers to keep GPU saturated; CPU: stay conservative
-    cpu_cores = min(8, os.cpu_count() or 2) if device.type == "cuda" else min(4, os.cpu_count() or 2)
-    # A100: batch_size=128 fits comfortably in 40GB; CPU: keep small
-    batch_size = 128 if device.type == "cuda" else 32
+    # GPU: more workers + bigger batches to keep GPU saturated; CPU: stay conservative
+    cpu_cores = min(12, os.cpu_count() or 2) if device.type == "cuda" else min(4, os.cpu_count() or 2)
+    batch_size = 256 if device.type == "cuda" else 32
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
