@@ -1,72 +1,121 @@
-# Improving ML MAPF Policies with Heuristic Search
+# Flow-CS-PIBT: Continuous Flow Matching for Multi-Agent Path Finding
 
-This repo contains the techniques of 3 papers that focus on improving learned one-step policies for MAPF using heuristic search.
+This project extends Veerapaneni et al.'s CS-PIBT framework by replacing the discrete classification policy with a **Continuous Flow Matching (Rectified Flow)** generative model. Instead of predicting action labels directly, the model learns to generate continuous velocity vectors via an ODE flow field, which are then mapped to discrete actions for the CS-PIBT collision shield.
+
+## Approach
+
+This work is inspired by the following papers:
 1. [Improving Learnt Local MAPF Policies with Heuristic Search (ICAPS 2024)](https://arxiv.org/abs/2403.20300)
 2. [Work Smarter Not Harder: Simple Imitation Learning with CS-PIBT Outperforms Large Scale Imitation Learning for MAPF (ICRA 2025)](https://arthurjakobsson.github.io/ssil_mapf/)
 3. [Real-Time LaCAM (SoCS 2025)](https://arxiv.org/abs/2504.06091)
 
-In particular, this repo contains:
-1. CS-PIBT and LaCAM (from first paper)
-2. Simple Scalable Imitation Learning model "SSIL" (from second paper)
-3. One-step version of Real-Time LaCAM (from third paper)
+### Pipeline
 
-Ths repo shows to use CS-PIBT, LaCAM, and one-step version of Real-Time LaCAM with a learnt policy. This codebase does not provide a command-line way to switch out different models, but users only need to modify the `runNNOnState()` function in `main_pys.simulator.py` to try out their own models.
+1. **Data Generation**: 1.2M expert trajectory graphs generated using EECBS (suboptimality factor 2.0). Discrete paths are converted to continuous expert velocities using a Savitzky-Golay filter.
+
+2. **Model** (`main_pys/generative_model.py`): A PyTorch Geometric GNN (6-layer SAGEConv, 1024-dim hidden) with a CNN encoder for local map context and Backward Dijkstra (BD) heuristic features.
+
+3. **Training** (`main_pys/train_flow.py`): Rectified Flow training — the model predicts the vector field `x_1 - x_0` where `x_1` is the expert velocity and `x_0` is Gaussian noise. Uses per-graph time sampling, goal-weighting, gradient clipping, and mixed-precision (AMP).
+
+4. **Inference** (`main_pys/simulator.py`): The flow is integrated over 5 Euler steps (dt=0.2) to produce a velocity vector. A magnitude-based wait detection mechanism identifies near-stationary agents. Action probabilities are computed via dot-product with cardinal direction vectors followed by temperature-scaled softmax, then passed to CS-PIBT/LaCAM.
+
+### Key Fixes and Improvements
+
+- **Wait Action Fix**: The dot product of any velocity with `[0,0]` is always 0, so the "wait" action was never prioritized. A magnitude threshold (`||v|| < 0.25`) now correctly routes near-stationary agents to wait, improving agent completion rates from ~40% to ~94%.
+- **Per-Graph Time Sampling**: Flow matching time `t` is sampled once per graph (not per node), matching the inference-time integration where all nodes in a graph share the same `t`.
+- **Removed Collision Loss**: The repulsive collision loss operated on the flow field rather than the final velocity, which is mathematically incorrect for flow matching and hurt convergence.
+- **Mixed Precision Training**: AMP with FP16 for ~2x throughput on GPU (A100/RTX 4060 compatible).
 
 ## Installation
-To clone the repository, run:
+
 ```sh
-git clone git@github.com:Rishi-V/ML-MAPF-with-Search.git
+git clone https://github.com/barathkrishna777/Flow-CS-PIBT.git
+cd Flow-CS-PIBT
+git checkout barath_gnn
 ```
 
-To install dependencies, run:
+Install dependencies:
 ```sh
 conda config --set channel_priority flexible
 conda env create -f environment.yml
 conda activate mlmapf
 ```
-This creates a conda environment named `mlmapf` that you should use.
 
-To download data assets, i.e., maps, scenes, and the pretrained ``SSIL` model
-```sh 
-bash download_assets.bash
-```
-Note: gdown in the above command might complain at some point due to data limits or permissions. This is not a permission issue but a data limit issue, just wait a few minutes and rerun the command.
+## Data Setup
 
-## Running CS-Freeze, CS-PIBT, Real-Time-LaCAM
-To run the provided pre-trained model from `SSIL` on a map, look at the `simulator.py` file. Here is an example command:
+Place the following zip files in an accessible location:
+- `data.zip` — maps, BD heuristics, scenario files
+- `massive_flow_dataset_large_scale.zip` — expert trajectory data (1.2M samples)
+
+Then use the training script which handles extraction automatically:
 ```sh
-python -m main_pys.simulator --mapNpzFile=data/constant_npzs/all_maps.npz \
-      --mapName=den312d --scenFile=data/mapf-scen-random/den312d-random-1.scen \
-      --bdNpzFile=data/constant_npzs/bd_npzs/den312d_bds.npz \
-      --modelPath=data/model/ssil_model.pt \
+python train_full.py --trajectories /path/to/massive_flow_dataset_large_scale.zip --base-data /path/to/data.zip
+```
+
+## Training
+
+### Full Training (GPU recommended)
+```sh
+python train_full.py --trajectories /path/to/trajectories.zip --base-data /path/to/data.zip
+```
+This extracts data and launches `main_pys.train_flow` with the correct configuration. On an A100, training uses batch size 128, 8 workers, and AMP.
+
+### Overfit Sanity Check (local GPU)
+To verify the model can memorize a small dataset:
+```sh
+python -m analysis_scripts.train_overfit_big
+python -m analysis_scripts.eval_overfit_big
+```
+
+## Evaluation
+
+### Batch Evaluation
+```sh
+python run_experiments.py
+```
+Runs the model across multiple maps (empty-48-48, random-32-32-10, den312d) and agent densities (50, 100, 200), outputting results to `logs/batch_results.csv`.
+
+### Single Scenario
+```sh
+python -m main_pys.simulator --mapNpzFile=data/all_maps.npz \
+      --mapName=empty-48-48 --scenFile=data/scen-random/empty-48-48-random-1.scen \
+      --bdNpzFile=data/bd_npzs/large_scale/empty-48-48-random-1_bds.npz \
+      --modelPath=large_scale_flow_epoch_1.pt \
       --outputCSVFile=logs/results.csv \
-      --outputPathsFile=logs/paths.npy \
-      --maxSteps=1000 --seed=0 --useGPU=True \
-      --agentNum=200 --shieldType=CS-Freeze
+      --maxSteps=3x --seed=0 --useGPU=True \
+      --agentNum=50 --shieldType=CS-PIBT
 ```
-Replace the last `--shieldType=CS-Freeze` with `--shieldType=CS-PIBT` or `--shieldType=Real-Time-LaCAM` to try out different collision shields. You can also try doing K multi-step planning using regular LaCAM with `--shieldType=LaCAM --lacamLookahead=K` where `K` is a positive integer of your choice.
 
-To visualize outputs, use:
+Replace `--shieldType=CS-PIBT` with `LaCAM` or `Real-Time-LaCAM` for other collision shields.
+
+### Visualization
 ```sh
-python -m main_pys.visualize_path den312d logs/paths.npy --scenName=den312d-random-1.scen 
+python -m main_pys.visualize_path empty-48-48 logs/paths.npy --scenName=empty-48-48-random-1.scen
 ```
 
-We also provide a sample script to compare `CS-Freeze`, `CS-PIBT`, and `Real-Time-LaCAM` on different number of agents on the same map. You can try it out by running the following command (note this will take a few hours to run):
-```sh
-python -m main_pys.run_mini_test --mapName=den312d
+## Project Structure
+
 ```
-At the end, you should see a plot like this in your `logs` folder.
-<div align="center">
-      <img src="example_den312d.png?raw=true" alt="Effect of different collision shields on den312d" width="500">
-</div>
-
-## Development
-I will monitor this repo and try my best to answer questions/issues, but I likely cannot make large changes. If you are interested in improving this repo then I am happy to merge pull requests or add you as a collaborator to the repo.
-
-Lastly, in general I am happy to collaborate so feel free to reach out.
+Flow-CS-PIBT/
+├── main_pys/
+│   ├── generative_model.py   # Flow GNN model (6-layer SAGEConv + CNN)
+│   ├── train_flow.py         # Rectified Flow training loop
+│   ├── dataset.py            # FlowMAPFDataset with BD heuristics
+│   ├── simulator.py          # Inference + CS-PIBT/LaCAM integration
+│   ├── model.py              # Original SSIL model (for reference)
+│   └── model_inputs.py       # Graph construction and normalization
+├── analysis_scripts/
+│   ├── train_overfit_big.py   # Overfit test for big model
+│   ├── eval_overfit_big.py    # Evaluate overfit model
+│   └── diagnose_action_mapping.py  # Action mapping analysis
+├── train_full.py              # End-to-end training script
+├── run_experiments.py         # Batch evaluation
+└── data/                      # Maps, scenarios, BDs, trajectories
+```
 
 ## Citation
-If you use this repository in your research, please cite our work:
+
+If you use this repository, please cite the original works:
 
 ```bibtex
 @article{veerapaneni2024improving_mapf_policies_with_search,
