@@ -13,17 +13,21 @@ from main_pys.generative_model import FlowGNNModel
 
 def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}")
+    use_amp = device.type == "cuda"
+    print(f"Device: {device} | AMP: {use_amp}")
 
     dataset = FlowMAPFDataset(data_dir="data/flow_training_data_multi",
                               map_dir="data/mapf-map",
                               bd_dir="data/bd_npzs",
                               k=4, m=5)
 
-    cpu_cores = min(4, os.cpu_count() or 2)
+    # A100: 8-12 workers to keep GPU saturated; CPU: stay conservative
+    cpu_cores = min(8, os.cpu_count() or 2) if device.type == "cuda" else min(4, os.cpu_count() or 2)
+    # A100: batch_size=128 fits comfortably in 40GB; CPU: keep small
+    batch_size = 128 if device.type == "cuda" else 32
     dataloader = DataLoader(
         dataset,
-        batch_size=32,
+        batch_size=batch_size,
         shuffle=True,
         num_workers=cpu_cores,
         pin_memory=(device.type == "cuda"),
@@ -37,6 +41,11 @@ def train():
     epochs = 10
     # Gentle cosine decay: LR goes from 1e-4 -> ~0 over all epochs
     scheduler = CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
+
+    # Mixed precision: ~2x throughput on A100 Tensor Cores
+    scaler = torch.amp.GradScaler(enabled=use_amp)
+
+    print(f"Batch size: {batch_size} | Workers: {cpu_cores} | Epochs: {epochs}")
 
     for epoch in range(epochs):
         model.train()
@@ -59,21 +68,24 @@ def train():
             x_0 = torch.randn_like(x_1)
             x_t = t * x_1 + (1 - t) * x_0
 
-            predicted_flow = model(x_t, t, graph_data)
-            target_flow = x_1 - x_0
+            with torch.amp.autocast(device_type=device.type, enabled=use_amp):
+                predicted_flow = model(x_t, t, graph_data)
+                target_flow = x_1 - x_0
 
-            # Pure weighted MSE — no collision loss (it targets the flow field
-            # not the final velocity, which is mathematically incorrect for
-            # flow matching and was shown to hurt convergence in overfit tests)
-            base_loss = F.mse_loss(predicted_flow, target_flow, reduction='none')
-            loss = (base_loss * node_weights).mean()
+                # Pure weighted MSE — no collision loss (it targets the flow field
+                # not the final velocity, which is mathematically incorrect for
+                # flow matching and was shown to hurt convergence in overfit tests)
+                base_loss = F.mse_loss(predicted_flow, target_flow, reduction='none')
+                loss = (base_loss * node_weights).mean()
 
             optimizer.zero_grad()
-            loss.backward()
+            scaler.scale(loss).backward()
             # Gradient clipping — flow matching targets (x_1 - x_0) can be large
             # when x_0 is far from x_1, causing gradient spikes
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
 
             total_loss += loss.item()
             num_batches += 1
