@@ -6,11 +6,13 @@ normalization) once and saves each sample as a torch .pt file. Training then
 does a simple torch.load() per sample — no computation, pure I/O.
 
 Usage:
-    python preprocess_dataset.py [--workers 32] [--out data/preprocessed]
+    python preprocess_dataset.py [--workers 32] [--out /media/.../preprocessed_data]
+    python preprocess_dataset.py --migrate-from data/preprocessed --out /media/.../preprocessed_data
 """
 import os
 import sys
 import glob
+import shutil
 import argparse
 import numpy as np
 import torch
@@ -93,7 +95,6 @@ def process_sample(args, maps, k, m, out_dir):
         graph_data.y = torch.tensor(target_velocity, dtype=torch.float32)
         graph_data.node_weights = torch.tensor(weights, dtype=torch.float32)
 
-        out_path = os.path.join(out_dir, f"sample_{sample_idx:08d}.pt")
         torch.save(graph_data, out_path)
         return out_path
     except Exception as e:
@@ -114,6 +115,49 @@ def worker_fn(args):
     return process_sample(args, _maps, _k, _m, _out_dir)
 
 
+def migrate_existing(old_dir, new_dir):
+    """Validate and move existing .pt files from old_dir to new_dir."""
+    old_files = sorted(glob.glob(os.path.join(old_dir, "sample_*.pt")))
+    if not old_files:
+        print(f"  No existing files found in {old_dir}")
+        return 0
+
+    print(f"  Found {len(old_files):,} files in {old_dir}")
+    print(f"  Validating and moving to {new_dir}...")
+    os.makedirs(new_dir, exist_ok=True)
+
+    moved = 0
+    corrupt = 0
+    for f in tqdm(old_files, desc="Migrating"):
+        fname = os.path.basename(f)
+        try:
+            if os.path.getsize(f) < 100:
+                os.remove(f)
+                corrupt += 1
+                continue
+        except OSError:
+            corrupt += 1
+            continue
+
+        dst = os.path.join(new_dir, fname)
+        if not os.path.exists(dst):
+            shutil.move(f, dst)
+            moved += 1
+        else:
+            # Already in new dir, just delete old copy
+            os.remove(f)
+            moved += 1
+
+    print(f"  Migrated {moved:,} valid files, removed {corrupt:,} corrupt files")
+
+    # Clean up old directory if empty
+    remaining = glob.glob(os.path.join(old_dir, "*.pt"))
+    if not remaining:
+        print(f"  Old directory {old_dir} is now empty")
+
+    return moved
+
+
 def main():
     parser = argparse.ArgumentParser(description="Preprocess MAPF dataset into PyG .pt files")
     parser.add_argument("--data-dir", default="data/flow_training_data_multi",
@@ -122,6 +166,8 @@ def main():
                         help="Directory with .map files")
     parser.add_argument("--out", default="data/preprocessed",
                         help="Output directory for .pt files")
+    parser.add_argument("--migrate-from", default=None,
+                        help="Old preprocessed dir to validate and move files from before processing")
     parser.add_argument("--workers", type=int, default=0,
                         help="Number of parallel workers (default: all CPU cores)")
     parser.add_argument("--k", type=int, default=4, help="Local region size")
@@ -130,6 +176,13 @@ def main():
 
     k, m = args.k, args.m
     num_workers = args.workers if args.workers > 0 else cpu_count()
+
+    # 0) Migrate existing data from old location if specified
+    if args.migrate_from and os.path.isdir(args.migrate_from):
+        print(f"Migrating existing data from {args.migrate_from} -> {args.out}")
+        migrate_existing(args.migrate_from, args.out)
+    elif args.migrate_from:
+        print(f"  Migration source {args.migrate_from} not found, skipping")
 
     # 1) Load all maps
     print("Loading maps...")
@@ -167,14 +220,7 @@ def main():
 
     succeeded = sum(1 for r in results if r is not None)
     failed = sum(1 for r in results if r is None)
-
-    # Count how many already existed before this run
-    already_existed = sum(1 for (_, _, idx) in index
-                         if os.path.exists(os.path.join(args.out, f"sample_{idx:08d}.pt")))
-    newly_processed = succeeded - already_existed if succeeded > already_existed else succeeded
-
-    print(f"\nDone! {succeeded:,} total samples OK ({already_existed:,} skipped, "
-          f"{newly_processed:,} newly processed), {failed} failed.")
+    print(f"\nDone! {succeeded:,} samples OK, {failed:,} failed.")
     print(f"Output: {args.out}/")
 
 

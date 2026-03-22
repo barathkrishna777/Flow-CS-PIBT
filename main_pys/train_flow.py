@@ -12,18 +12,29 @@ from main_pys.dataset import FlowMAPFDataset
 from main_pys.dataset_preprocessed import PreprocessedFlowMAPFDataset
 from main_pys.generative_model import FlowGNNModel
 
-PREPROCESSED_DIR = "data/preprocessed"
+PREPROCESSED_DIRS = [
+    "/media/anushree_mattlab/Seagate Por/preprocessed_data",  # external drive (primary)
+    "data/preprocessed",                                       # local fallback
+]
 
 
-def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", wandb_entity=None):
+def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", wandb_entity=None,
+          preprocessed_dir=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_amp = device.type == "cuda"
     print(f"Device: {device} | AMP: {use_amp}")
 
-    # Use preprocessed .pt files if available (50x faster); fall back to on-the-fly
-    if os.path.isdir(PREPROCESSED_DIR) and len(os.listdir(PREPROCESSED_DIR)) > 0:
-        print(f"Using PREPROCESSED dataset from {PREPROCESSED_DIR}")
-        dataset = PreprocessedFlowMAPFDataset(PREPROCESSED_DIR)
+    # Find preprocessed data: CLI override > external drive > local
+    pp_dir = preprocessed_dir
+    if pp_dir is None:
+        for candidate in PREPROCESSED_DIRS:
+            if os.path.isdir(candidate) and len(os.listdir(candidate)) > 0:
+                pp_dir = candidate
+                break
+
+    if pp_dir:
+        print(f"Using PREPROCESSED dataset from {pp_dir}")
+        dataset = PreprocessedFlowMAPFDataset(pp_dir)
     else:
         print(f"No preprocessed data found — using on-the-fly dataset (slow)")
         dataset = FlowMAPFDataset(data_dir="data/flow_training_data_multi",
@@ -183,6 +194,9 @@ if __name__ == "__main__":
                         help="W&B project name")
     parser.add_argument("--wandb-entity", type=str, default="flow-cspibt",
                         help="W&B entity/team (default: flow-cspibt)")
+    parser.add_argument("--preprocessed-dir", type=str, default=None,
+                        help="Override preprocessed data directory")
     args = parser.parse_args()
     train(run_name=args.run_name, quick=args.quick, use_wandb=not args.no_wandb,
-          wandb_project=args.wandb_project, wandb_entity=args.wandb_entity)
+          wandb_project=args.wandb_project, wandb_entity=args.wandb_entity,
+          preprocessed_dir=args.preprocessed_dir)
