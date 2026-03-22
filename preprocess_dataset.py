@@ -42,8 +42,8 @@ def process_sample(args, maps, k, m, out_dir):
     """Build and save one PyG Data object. Returns output path or None on error."""
     npz_path, t_step, sample_idx = args
     out_path = os.path.join(out_dir, f"sample_{sample_idx:08d}.pt")
-    if os.path.exists(out_path):
-        return out_path  # already processed, skip
+    if os.path.exists(out_path) and os.path.getsize(out_path) >= 100:
+        return out_path  # already processed and not corrupt, skip
     try:
         with np.load(npz_path) as data:
             discrete_positions = data['discrete_positions']
