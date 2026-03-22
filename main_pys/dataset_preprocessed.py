@@ -2,11 +2,13 @@
 Lightning-fast dataset that loads pre-built PyG .pt files.
 No CPU preprocessing at all — just torch.load().
 
-On init, validates all files and removes corrupt ones so the
-DataLoader never hits an EOFError mid-training.
+On init, removes obviously corrupt files (<100 bytes).
+At runtime, catches any remaining corrupt files and returns
+a random valid sample instead of crashing the DataLoader.
 """
 import os
 import glob
+import random
 import torch
 from torch.utils.data import Dataset
 from tqdm import tqdm
@@ -26,7 +28,6 @@ class PreprocessedFlowMAPFDataset(Dataset):
             self.files = []
             corrupt = 0
             for f in tqdm(all_files, desc="Validating", mininterval=5):
-                # Quick check: files under 100 bytes are definitely corrupt
                 try:
                     if os.path.getsize(f) < 100:
                         os.remove(f)
@@ -38,7 +39,7 @@ class PreprocessedFlowMAPFDataset(Dataset):
                 self.files.append(f)
 
             if corrupt > 0:
-                print(f"  Removed {corrupt:,} corrupt files. "
+                print(f"  Removed {corrupt:,} corrupt files (<100 bytes). "
                       f"Re-run `python preprocess_dataset.py` to regenerate them.")
         else:
             self.files = all_files
@@ -49,4 +50,13 @@ class PreprocessedFlowMAPFDataset(Dataset):
         return len(self.files)
 
     def __getitem__(self, idx):
-        return torch.load(self.files[idx], weights_only=False)
+        # Try loading the requested file; if corrupt, try random alternatives
+        for attempt in range(5):
+            try:
+                target = idx if attempt == 0 else random.randint(0, len(self.files) - 1)
+                return torch.load(self.files[target], weights_only=False)
+            except Exception:
+                continue
+        # All 5 attempts failed — shouldn't happen, but return a minimal dummy
+        # rather than crashing the entire training run
+        raise RuntimeError(f"Failed to load any sample after 5 attempts (started at idx {idx})")
