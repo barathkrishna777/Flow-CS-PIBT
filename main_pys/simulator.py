@@ -292,14 +292,14 @@ def runNNOnState(cur_locs, bd, grid_map, k, m, model, device, goal_locations, ti
         data = data.to(device)
         timer.stop("create_nn_data")
         
-        v = torch.randn(cur_locs.shape[0], 2).to(device) 
+        v = torch.randn(cur_locs.shape[0], 2).to(device)
         num_steps = 5
         dt = 1.0 / num_steps
-        
+
         for step in range(num_steps):
             t = torch.full((cur_locs.shape[0], 1), step * dt, device=device)
             flow = model(v, t, data)
-            v = v + flow * dt 
+            v = v + flow * dt
             
         predicted_velocity = v.cpu().numpy()
 
