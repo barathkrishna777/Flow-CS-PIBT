@@ -135,7 +135,7 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
         )
 
     model = FlowGNNModel().to(device)
-    optimizer = AdamW(model.parameters(), lr=1e-4, weight_decay=1e-5)
+    optimizer = AdamW(model.parameters(), lr=1e-4, weight_decay=1e-4)
 
     epochs = 1 if quick else 10
     # Gentle cosine decay: LR goes from 1e-4 -> ~0 over all epochs
@@ -300,7 +300,7 @@ if __name__ == "__main__":
                         help="Disable agent-count weighted sampling")
     parser.add_argument("--val-split", type=float, default=0.05,
                         help="Fraction of data for validation (0 to disable)")
-    parser.add_argument("--patience", type=int, default=0,
+    parser.add_argument("--patience", type=int, default=3,
                         help="Early stopping patience (0 to disable)")
     args = parser.parse_args()
     train(run_name=args.run_name, quick=args.quick, use_wandb=not args.no_wandb,
