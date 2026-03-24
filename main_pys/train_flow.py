@@ -55,7 +55,8 @@ def validate(model, val_loader, device, use_amp):
 
 
 def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", wandb_entity=None,
-          preprocessed_dir=None, no_weighted_sampling=False, val_split=0.05, patience=0):
+          preprocessed_dir=None, no_weighted_sampling=False, val_split=0.05, patience=0,
+          resume=None, start_epoch=0):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_amp = device.type == "cuda"
     print(f"Device: {device} | AMP: {use_amp}")
@@ -137,9 +138,17 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
     model = FlowGNNModel().to(device)
     optimizer = AdamW(model.parameters(), lr=1e-4, weight_decay=1e-4)
 
+    # Resume from checkpoint
+    if resume and os.path.exists(resume):
+        print(f"Resuming from checkpoint: {resume}")
+        model.load_state_dict(torch.load(resume, map_location=device))
+
     epochs = 1 if quick else 10
     # Gentle cosine decay: LR goes from 1e-4 -> ~0 over all epochs
     scheduler = CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
+    # Fast-forward scheduler to match resumed epoch
+    for _ in range(start_epoch):
+        scheduler.step()
 
     # Mixed precision: ~2x throughput on A100 Tensor Cores
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
@@ -177,7 +186,7 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
     epochs_without_improvement = 0
     prefix = f"large_scale_flow_{run_name}_" if run_name else "large_scale_flow_"
 
-    for epoch in range(epochs):
+    for epoch in range(start_epoch, epochs):
         # ── Training ──
         model.train()
         total_loss = 0.0
@@ -302,9 +311,14 @@ if __name__ == "__main__":
                         help="Fraction of data for validation (0 to disable)")
     parser.add_argument("--patience", type=int, default=3,
                         help="Early stopping patience (0 to disable)")
+    parser.add_argument("--resume", type=str, default=None,
+                        help="Path to checkpoint to resume from (e.g. large_scale_flow_wave4_epoch_1.pt)")
+    parser.add_argument("--start-epoch", type=int, default=0,
+                        help="Epoch to resume from (0-indexed, e.g. 1 means start at epoch 2)")
     args = parser.parse_args()
     train(run_name=args.run_name, quick=args.quick, use_wandb=not args.no_wandb,
           wandb_project=args.wandb_project, wandb_entity=args.wandb_entity,
           preprocessed_dir=args.preprocessed_dir,
           no_weighted_sampling=args.no_weighted_sampling,
-          val_split=args.val_split, patience=args.patience)
+          val_split=args.val_split, patience=args.patience,
+          resume=args.resume, start_epoch=args.start_epoch)
