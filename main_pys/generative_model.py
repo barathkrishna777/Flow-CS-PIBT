@@ -49,31 +49,39 @@ class FlowGNNModel(nn.Module):
             self.convs.append(pyg_nn.SAGEConv(hidden_dim, hidden_dim))
             self.lns.append(nn.LayerNorm(hidden_dim))
             
-        # --- 3. Expressive Output Head ---
+        # --- 3. Expressive Output Head (flow velocity) ---
         self.post_mp = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim), 
-            nn.SiLU(), 
-            nn.Dropout(0.15), 
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Dropout(0.15),
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.SiLU(),
             nn.Dropout(0.15),
             nn.Linear(hidden_dim // 2, 2)
         )
 
-    def forward(self, v_t, t, data):
+        # --- 4. Auxiliary Action Head (5-class: wait, right, down, up, left) ---
+        self.action_head = nn.Sequential(
+            nn.Linear(hidden_dim, 256),
+            nn.SiLU(),
+            nn.Dropout(0.15),
+            nn.Linear(256, 5)
+        )
+
+    def forward(self, v_t, t, data, return_action_logits=False):
         x, edge_index, bd_pred = data.x, data.edge_index, data.bd_pred
-        
+
         # 1. Process visual grid
         cnn_out = self.conv(x)
-        visual_features = torch.hstack([cnn_out, bd_pred]) 
-        visual_emb = self.visual_proj(visual_features) 
-        
+        visual_features = torch.hstack([cnn_out, bd_pred])
+        visual_emb = self.visual_proj(visual_features)
+
         # 2. Inject Flow variables
         if len(t.shape) == 1: t = t.unsqueeze(1)
-        node_features = torch.cat([visual_emb, v_t, t], dim=-1) 
-        
+        node_features = torch.cat([visual_emb, v_t, t], dim=-1)
+
         node_features = self.input_proj(node_features)
-        
+
         # 3. Pass messages with Residual (Skip) Connections
         for i in range(self.num_layers):
             identity = node_features
@@ -81,6 +89,13 @@ class FlowGNNModel(nn.Module):
             node_features = self.lns[i](node_features)
             node_features = F.silu(node_features)
             node_features = node_features + identity # The crucial residual addition
-            
-        # 4. Predict velocity
-        return self.post_mp(node_features)
+
+        # 4. Predict velocity (flow output)
+        flow_output = self.post_mp(node_features)
+
+        if return_action_logits:
+            # Auxiliary action logits from shared GNN features (detached from flow head)
+            action_logits = self.action_head(node_features)
+            return flow_output, action_logits
+
+        return flow_output

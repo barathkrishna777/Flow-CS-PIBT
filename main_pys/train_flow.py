@@ -19,8 +19,28 @@ PREPROCESSED_DIRS = [
 ]
 
 
-def compute_flow_loss(model, batch, device, use_amp):
-    """Shared flow matching loss computation for train and val."""
+WAIT_SPEED_THRESHOLD = 0.1  # velocities below this magnitude → wait action
+ACTION_VECTORS = torch.tensor([[0,1],[1,0],[-1,0],[0,-1]], dtype=torch.float32)  # right, down, up, left
+
+
+def velocity_to_action_labels(expert_velocities, device):
+    """Convert expert velocity vectors to discrete action labels (0-4).
+
+    Actions: 0=wait, 1=right, 2=down, 3=up, 4=left
+    """
+    speeds = expert_velocities.norm(dim=1)
+    is_wait = speeds < WAIT_SPEED_THRESHOLD
+
+    # Dot product with cardinal directions for non-wait agents
+    dots = expert_velocities @ ACTION_VECTORS.to(device).T  # (N, 4)
+    best_dir = dots.argmax(dim=1) + 1  # +1 because action 0 is wait
+
+    labels = torch.where(is_wait, torch.zeros_like(best_dir), best_dir)
+    return labels
+
+
+def compute_flow_loss(model, batch, device, use_amp, action_loss_weight=0.3):
+    """Shared flow matching loss computation for train and val, with optional auxiliary action loss."""
     batch = batch.to(device)
     x_1 = batch.y.view(-1, 2)
     node_weights = batch.node_weights.view(-1, 1)
@@ -33,10 +53,17 @@ def compute_flow_loss(model, batch, device, use_amp):
     x_t = t * x_1 + (1 - t) * x_0
 
     with torch.cuda.amp.autocast(enabled=use_amp):
-        predicted_flow = model(x_t, t, batch)
+        predicted_flow, action_logits = model(x_t, t, batch, return_action_logits=True)
         target_flow = x_1 - x_0
         base_loss = F.mse_loss(predicted_flow, target_flow, reduction='none')
-        loss = (base_loss * node_weights).mean()
+        flow_loss = (base_loss * node_weights).mean()
+
+        # Auxiliary action classification loss
+        expert_actions = velocity_to_action_labels(x_1, device)
+        action_loss = F.cross_entropy(action_logits, expert_actions, reduction='none')
+        action_loss = (action_loss * node_weights.squeeze(1)).mean()
+
+        loss = flow_loss + action_loss_weight * action_loss
 
     return loss
 

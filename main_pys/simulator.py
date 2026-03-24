@@ -291,32 +291,48 @@ def runNNOnState(cur_locs, bd, grid_map, k, m, model, device, goal_locations, ti
         data = normalize_graph_data(data, k)
         data = data.to(device)
         timer.stop("create_nn_data")
-        
-        v = torch.randn(cur_locs.shape[0], 2).to(device)
-        num_steps = args.numIntegrationSteps
-        dt = 1.0 / num_steps
 
-        for step in range(num_steps):
-            t = torch.full((cur_locs.shape[0], 1), step * dt, device=device)
-            flow = model(v, t, data)
-            v = v + flow * dt
+        n_agents = cur_locs.shape[0]
 
-        predicted_velocity = v.cpu().numpy()
+        if args.useActionHead:
+            # Direct action prediction via auxiliary head (single forward pass)
+            v_dummy = torch.zeros(n_agents, 2, device=device)
+            t_dummy = torch.full((n_agents, 1), 0.5, device=device)
+            _, action_logits = model(v_dummy, t_dummy, data, return_action_logits=True)
+            scores = action_logits.cpu().numpy()
+            scores = scores / args.tau
+            scores = scores - np.max(scores, axis=1, keepdims=True)
+            probs = np.exp(scores) / np.sum(np.exp(scores), axis=1, keepdims=True)
+        else:
+            # Flow-based inference with multi-sample consensus
+            num_steps = args.numIntegrationSteps
+            dt = 1.0 / num_steps
+            num_samples = args.numConsensusSamples
 
-        # --- WAIT FIX: magnitude threshold ---
-        magnitudes = np.linalg.norm(predicted_velocity, axis=1)
-        should_wait = magnitudes < args.waitThreshold
+            all_velocities = torch.zeros(n_agents, 2, device=device)
+            for _ in range(num_samples):
+                v = torch.randn(n_agents, 2, device=device)
+                for step in range(num_steps):
+                    t = torch.full((n_agents, 1), step * dt, device=device)
+                    flow = model(v, t, data)
+                    v = v + flow * dt
+                all_velocities += v
+            predicted_velocity = (all_velocities / num_samples).cpu().numpy()
 
-        action_vectors = np.array([[0,0], [0,1], [1,0], [-1,0], [0,-1]])
-        scores = predicted_velocity @ action_vectors.T
+            # --- WAIT FIX: magnitude threshold ---
+            magnitudes = np.linalg.norm(predicted_velocity, axis=1)
+            should_wait = magnitudes < args.waitThreshold
 
-        scores = scores / args.tau
-        scores = scores - np.max(scores, axis=1, keepdims=True)
-        probs = np.exp(scores) / np.sum(np.exp(scores), axis=1, keepdims=True)
+            action_vectors = np.array([[0,0], [0,1], [1,0], [-1,0], [0,-1]])
+            scores = predicted_velocity @ action_vectors.T
 
-        # For agents that should wait: set wait prob high, suppress others
-        probs[should_wait] = 0.01
-        probs[should_wait, 0] = 0.96  # action 0 = wait
+            scores = scores / args.tau
+            scores = scores - np.max(scores, axis=1, keepdims=True)
+            probs = np.exp(scores) / np.sum(np.exp(scores), axis=1, keepdims=True)
+
+            # For agents that should wait: set wait prob high, suppress others
+            probs[should_wait] = 0.01
+            probs[should_wait, 0] = 0.96  # action 0 = wait
 
     return probs
 
@@ -341,10 +357,15 @@ def simulate(device, model, k, m, grid_map, bd, start_locations, goal_locations,
     def getActionPrefsFromLocs(locs):
         probs = runNNOnState(locs, bd, grid_map, k, m, model, device, goal_locations, timer)
 
-        action_mask = grid_map[cur_locs[:, 0, None] + LABEL_TO_MOVES[:, 0], cur_locs[:, 1, None] + LABEL_TO_MOVES[:, 1]] == 1  
-        assert(not np.any(action_mask[:,0])) 
-        probs[action_mask] = 1e-8  
-        probs = probs / probs.sum(axis=1, keepdims=True)  
+        # Force at-goal agents to wait — prevents wandering away from goal
+        at_goal = np.all(np.equal(locs, goal_locations), axis=1)
+        probs[at_goal] = 0.0
+        probs[at_goal, 0] = 1.0  # action 0 = wait
+
+        action_mask = grid_map[locs[:, 0, None] + LABEL_TO_MOVES[:, 0], locs[:, 1, None] + LABEL_TO_MOVES[:, 1]] == 1
+        assert(not np.any(action_mask[:,0]))
+        probs[action_mask] = 1e-8
+        probs = probs / probs.sum(axis=1, keepdims=True)
         return convertProbsToPreferences(probs, "sampled")
     
     cur_locs = start_locations 
@@ -360,9 +381,22 @@ def simulate(device, model, k, m, grid_map, bd, start_locations, goal_locations,
     solution_path = [cur_locs.copy()]
     success = False
     start_time = time.time()
+    # Deadlock detection: track BD distances for stuck-agent boosting
+    deadlock_window = 30
+    num_agents = len(start_locations)
+    range_num_agents = np.arange(num_agents)
+    bd_dist_snapshot = bd[range_num_agents, cur_locs[:, 0], cur_locs[:, 1]].copy()
     for step in tqdm(range(max_steps)):
-        agents_at_goal = np.all(np.equal(cur_locs, goal_locations), axis=1) 
+        agents_at_goal = np.all(np.equal(cur_locs, goal_locations), axis=1)
         agent_priorities = updatePriorities(agent_priorities, agents_at_goal)
+
+        # Conservative deadlock detection: boost stuck agents every 30 steps
+        if step > 0 and step % deadlock_window == 0:
+            current_bd_dist = bd[range_num_agents, cur_locs[:, 0], cur_locs[:, 1]]
+            stuck = (current_bd_dist >= bd_dist_snapshot) & (~agents_at_goal)
+            agent_priorities[stuck] += 5
+            bd_dist_snapshot = current_bd_dist.copy()
+
         if time.time()-start_time > args.timeLimit and args.timeLimit > 0:
             print("time limit hit")
             break
@@ -454,9 +488,9 @@ def main(args: argparse.ArgumentParser):
     
     checkpoint = torch.load(args.modelPath, map_location=device, weights_only=False)
     if 'model_state_dict' in checkpoint:
-        model.load_state_dict(checkpoint['model_state_dict'])
+        model.load_state_dict(checkpoint['model_state_dict'], strict=False)
     else:
-        model.load_state_dict(checkpoint)
+        model.load_state_dict(checkpoint, strict=False)
         
     model.eval()
 
@@ -469,6 +503,8 @@ def main(args: argparse.ArgumentParser):
         max_steps = int(int(args.maxSteps[:-1]) * longest_single_path)
     else:
         max_steps = int(args.maxSteps)
+    # Floor: ensure enough steps for congested scenarios
+    max_steps = max(max_steps, 400)
         
     if args.debug:
         profiler = cProfile.Profile()
@@ -530,6 +566,8 @@ if __name__ == '__main__':
     parser.add_argument('--numIntegrationSteps', type=int, help="Euler integration steps (default 5)", default=5)
     parser.add_argument('--tau', type=float, help="Softmax temperature (default 0.3)", default=0.3)
     parser.add_argument('--waitThreshold', type=float, help="Wait magnitude threshold (default 0.25)", default=0.25)
+    parser.add_argument('--numConsensusSamples', type=int, help="Number of flow samples to average (default 3)", default=3)
+    parser.add_argument('--useActionHead', type=lambda x: bool(str2bool(x)), help="Use auxiliary action head instead of flow (default False)", default=False)
     args = parser.parse_args()
 
     if args.mapName.endswith('.map'): 

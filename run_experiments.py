@@ -11,7 +11,7 @@ MAP_NPZ = "data/all_maps.npz"
 BD_DIR = "data/bd_npzs"
 SCEN_DIR = "data/scen-random"
 
-MAX_STEPS = "3x"
+MAX_STEPS = "5x"
 SHIELD_TYPE = "CS-PIBT"
 SCENARIOS_PER_MAP = 3 
 

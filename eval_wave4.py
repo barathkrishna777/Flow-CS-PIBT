@@ -64,7 +64,7 @@ for map_name in TEST_MAPS:
                 f"--mapNpzFile={MAP_NPZ}", f"--mapName={map_name}",
                 f"--scenFile={scen}", f"--bdNpzFile={bd}",
                 f"--modelPath={MODEL}", f"--outputCSVFile={CSV}",
-                "--maxSteps=3x", "--seed=0",
+                "--maxSteps=5x", "--seed=0",
                 f"--useGPU={'True' if USE_GPU else 'False'}",
                 f"--agentNum={n}", "--shieldType=CS-PIBT"
             ])
