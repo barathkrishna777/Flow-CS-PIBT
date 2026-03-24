@@ -172,7 +172,10 @@ def main():
                         help="Number of parallel workers (default: all CPU cores)")
     parser.add_argument("--k", type=int, default=4, help="Local region size")
     parser.add_argument("--m", type=int, default=5, help="Nearest neighbors")
+    parser.add_argument("--exclude-maps", nargs="*", default=None,
+                        help="Map names to exclude from preprocessing (e.g. den312d empty-48-48)")
     args = parser.parse_args()
+    exclude_set = set(args.exclude_maps) if args.exclude_maps else set()
 
     k, m = args.k, args.m
     num_workers = args.workers if args.workers > 0 else cpu_count()
@@ -195,6 +198,11 @@ def main():
     # 2) Build flat index of (file, timestep, global_idx)
     print("Building sample index...")
     npz_files = sorted(glob.glob(os.path.join(args.data_dir, "*.npz")))
+    if exclude_set:
+        before = len(npz_files)
+        npz_files = [f for f in npz_files
+                     if os.path.basename(f).split("-random-")[0] not in exclude_set]
+        print(f"  Excluded {before - len(npz_files)} files from maps: {exclude_set}")
     index = []
     for f in tqdm(npz_files, desc="Scanning"):
         try:
