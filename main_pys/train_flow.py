@@ -138,20 +138,33 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
     model = FlowGNNModel().to(device)
     optimizer = AdamW(model.parameters(), lr=1e-4, weight_decay=1e-4)
 
-    # Resume from checkpoint
-    if resume and os.path.exists(resume):
-        print(f"Resuming from checkpoint: {resume}")
-        model.load_state_dict(torch.load(resume, map_location=device))
-
     epochs = 1 if quick else 10
     # Gentle cosine decay: LR goes from 1e-4 -> ~0 over all epochs
     scheduler = CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
-    # Fast-forward scheduler to match resumed epoch
-    for _ in range(start_epoch):
-        scheduler.step()
 
     # Mixed precision: ~2x throughput on A100 Tensor Cores
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+
+    # Resume from checkpoint
+    if resume and os.path.exists(resume):
+        print(f"Resuming from checkpoint: {resume}")
+        ckpt = torch.load(resume, map_location=device)
+        if isinstance(ckpt, dict) and 'model_state_dict' in ckpt:
+            # Full checkpoint (model + optimizer + scheduler + metadata)
+            model.load_state_dict(ckpt['model_state_dict'])
+            optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+            scheduler.load_state_dict(ckpt['scheduler_state_dict'])
+            if ckpt.get('scaler_state_dict'):
+                scaler.load_state_dict(ckpt['scaler_state_dict'])
+            start_epoch = ckpt['epoch']  # epoch is already 1-indexed, use as start
+            best_val_loss = ckpt.get('best_val_loss', float('inf'))
+            print(f"  Restored full state: resuming from epoch {start_epoch + 1}, best_val={best_val_loss:.4f}")
+        else:
+            # Legacy checkpoint (model weights only)
+            model.load_state_dict(ckpt)
+            print(f"  Loaded model weights only (legacy checkpoint). Fast-forwarding scheduler {start_epoch} steps.")
+            for _ in range(start_epoch):
+                scheduler.step()
 
     # WandB setup
     if use_wandb:
@@ -242,7 +255,16 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
                 best_val_loss = val_loss
                 epochs_without_improvement = 0
                 best_path = f"{prefix}best.pt"
-                torch.save(model.state_dict(), best_path)
+                torch.save({
+                    'epoch': epoch + 1,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
+                    'scaler_state_dict': scaler.state_dict(),
+                    'train_loss': avg_train_loss,
+                    'val_loss': val_loss,
+                    'best_val_loss': best_val_loss,
+                }, best_path)
                 val_str += " (best)"
             else:
                 epochs_without_improvement += 1
@@ -252,9 +274,18 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
 
         print(f"Epoch {epoch+1}/{epochs} | Train Loss: {avg_train_loss:.4f}{val_str} | LR: {current_lr:.2e}")
 
-        # Save epoch checkpoint
+        # Save epoch checkpoint (full state for resumability)
         ckpt_path = f"{prefix}epoch_{epoch+1}.pt"
-        torch.save(model.state_dict(), ckpt_path)
+        torch.save({
+            'epoch': epoch + 1,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
+            'scaler_state_dict': scaler.state_dict(),
+            'train_loss': avg_train_loss,
+            'val_loss': val_loss,
+            'best_val_loss': best_val_loss,
+        }, ckpt_path)
 
         # Per-epoch wandb logging
         if use_wandb:

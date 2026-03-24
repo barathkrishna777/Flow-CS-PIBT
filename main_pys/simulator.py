@@ -293,26 +293,24 @@ def runNNOnState(cur_locs, bd, grid_map, k, m, model, device, goal_locations, ti
         timer.stop("create_nn_data")
         
         v = torch.randn(cur_locs.shape[0], 2).to(device)
-        num_steps = 5
+        num_steps = args.numIntegrationSteps
         dt = 1.0 / num_steps
 
         for step in range(num_steps):
             t = torch.full((cur_locs.shape[0], 1), step * dt, device=device)
             flow = model(v, t, data)
             v = v + flow * dt
-            
+
         predicted_velocity = v.cpu().numpy()
 
         # --- WAIT FIX: magnitude threshold ---
-        WAIT_THRESHOLD = 0.25
         magnitudes = np.linalg.norm(predicted_velocity, axis=1)
-        should_wait = magnitudes < WAIT_THRESHOLD
+        should_wait = magnitudes < args.waitThreshold
 
         action_vectors = np.array([[0,0], [0,1], [1,0], [-1,0], [0,-1]])
         scores = predicted_velocity @ action_vectors.T
 
-        tau = 0.5
-        scores = scores / tau
+        scores = scores / args.tau
         scores = scores - np.max(scores, axis=1, keepdims=True)
         probs = np.exp(scores) / np.sum(np.exp(scores), axis=1, keepdims=True)
 
@@ -454,7 +452,7 @@ def main(args: argparse.ArgumentParser):
     
     model = FlowGNNModel(k=k).to(device) 
     
-    checkpoint = torch.load(args.modelPath, map_location=device, weights_only=True)
+    checkpoint = torch.load(args.modelPath, map_location=device, weights_only=False)
     if 'model_state_dict' in checkpoint:
         model.load_state_dict(checkpoint['model_state_dict'])
     else:
@@ -529,6 +527,9 @@ if __name__ == '__main__':
     parser.add_argument('--timeLimit', type=int, help="Time limit (s)", default=60)
     parser.add_argument('--outputCSVFile', type=str, help="where to output statistics", required=True)
     parser.add_argument('--outputPathsFile', type=str, help="where to output path, ends with .npy", default=None)
+    parser.add_argument('--numIntegrationSteps', type=int, help="Euler integration steps (default 5)", default=5)
+    parser.add_argument('--tau', type=float, help="Softmax temperature (default 0.5)", default=0.5)
+    parser.add_argument('--waitThreshold', type=float, help="Wait magnitude threshold (default 0.25)", default=0.25)
     args = parser.parse_args()
 
     if args.mapName.endswith('.map'): 
