@@ -195,7 +195,11 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
     print(f"Batch size: {batch_size} | Workers: {cpu_cores} | Epochs: {epochs}")
     print(f"Weighted sampling: {'ON' if sampler else 'OFF'}")
 
-    best_val_loss = float('inf')
+    # Initialize best_val_loss (may be overridden by resume checkpoint above)
+    if 'best_val_loss' not in dir():
+        best_val_loss = float('inf')
+    if not isinstance(best_val_loss, float) or best_val_loss is None:
+        best_val_loss = float('inf')
     epochs_without_improvement = 0
     prefix = f"large_scale_flow_{run_name}_" if run_name else "large_scale_flow_"
 

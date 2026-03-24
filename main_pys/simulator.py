@@ -528,7 +528,7 @@ if __name__ == '__main__':
     parser.add_argument('--outputCSVFile', type=str, help="where to output statistics", required=True)
     parser.add_argument('--outputPathsFile', type=str, help="where to output path, ends with .npy", default=None)
     parser.add_argument('--numIntegrationSteps', type=int, help="Euler integration steps (default 5)", default=5)
-    parser.add_argument('--tau', type=float, help="Softmax temperature (default 0.5)", default=0.5)
+    parser.add_argument('--tau', type=float, help="Softmax temperature (default 0.3)", default=0.3)
     parser.add_argument('--waitThreshold', type=float, help="Wait magnitude threshold (default 0.25)", default=0.25)
     args = parser.parse_args()
 
