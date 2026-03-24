@@ -359,8 +359,8 @@ def simulate(device, model, k, m, grid_map, bd, start_locations, goal_locations,
 
         # Force at-goal agents to wait — prevents wandering away from goal
         at_goal = np.all(np.equal(locs, goal_locations), axis=1)
-        probs[at_goal] = 0.0
-        probs[at_goal, 0] = 1.0  # action 0 = wait
+        probs[at_goal] = 1e-6  # small epsilon so multinomial can still rank all 5 actions
+        probs[at_goal, 0] = 1.0  # action 0 = wait (dominant)
 
         action_mask = grid_map[locs[:, 0, None] + LABEL_TO_MOVES[:, 0], locs[:, 1, None] + LABEL_TO_MOVES[:, 1]] == 1
         assert(not np.any(action_mask[:,0]))
