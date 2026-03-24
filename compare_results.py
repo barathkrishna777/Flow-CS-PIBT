@@ -1,11 +1,12 @@
-"""Compare evaluation results across wave 2 and wave 3 checkpoints.
+"""Compare evaluation results across all wave checkpoints.
 
 Usage:
-    python compare_results.py
-    python compare_results.py --csv logs/batch_results_wave2.csv logs/batch_results_wave3_ep5.csv logs/batch_results_wave3_ep10.csv
+    python compare_results.py                       # auto-discover all CSVs in logs/
+    python compare_results.py --csv logs/a.csv logs/b.csv   # specific files
 """
 import csv
 import argparse
+import glob
 import os
 from collections import defaultdict
 
@@ -44,11 +45,11 @@ def format_delta(new, old):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--csv", nargs="+", default=[
-        "logs/batch_results_wave2.csv",
-        "logs/batch_results_wave3_ep5.csv",
-        "logs/batch_results_wave3_ep10.csv",
-    ])
+    # Auto-discover all batch_results CSVs, sorted for consistent ordering
+    default_csvs = sorted(glob.glob("logs/batch_results_*.csv"))
+    if not default_csvs:
+        default_csvs = ["logs/batch_results_wave2.csv"]  # fallback
+    parser.add_argument("--csv", nargs="+", default=default_csvs)
     args = parser.parse_args()
 
     # Load all CSVs
