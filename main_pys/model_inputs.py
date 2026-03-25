@@ -60,9 +60,11 @@ def create_data_object(pos_list, bd_list, grid, k, m, goal_locs, labels=np.array
 
     fov_dist = np.any(np.abs(deltas) > k, axis=2) # (N,N,2)->(N,N) bool for if the agent is within the field of view
     dists[fov_dist] = np.inf # Set the distance to infinity if the agent is out of the field of view
-    closest_neighbors = np.argsort(dists, axis=1, kind="quicksort")[:, 1:m+1] # (N,m), the indices of the 4 closest agents, ignore self
-    # arg_dists = np.argpartition(dists, m+1, axis=1)
-    # closest_neighbors = arg_dists[:,1:m+1]
+    # O(N) partial sort: select m+1 smallest, then sort only those for deterministic ordering
+    partitioned_idx = np.argpartition(dists, m+1, axis=1)[:, 1:m+1]
+    neighbor_dists = np.take_along_axis(dists, partitioned_idx, axis=1)
+    sort_within = np.argsort(neighbor_dists, axis=1)
+    closest_neighbors = np.take_along_axis(partitioned_idx, sort_within, axis=1)
     distance_of_neighbors = dists[range_num_agents[:,None],closest_neighbors] # (N,m)
     
     agent_indices = np.repeat(np.arange(num_agents)[None,:], axis=0, repeats=closest_neighbors.shape[-1]).T # (N,m), each row is 0->num_agents

@@ -1,137 +1,221 @@
-"""Evaluate on the full 27-map MAPF benchmark (matching Rishi's paper).
+"""Phase 1 ablation: evaluate current architecture across maps, agent densities, and Euler steps.
+
+Runs 1 scenario each on 5 maps, for agents={100, 400, 800}, sweeping steps={1, 2, 3, 5}.
+This produces a results table for the inference-cost vs quality tradeoff.
 
 Usage:
-    python eval_full.py <model_path>                   # all 27 maps
-    python eval_full.py <model_path> --test-only        # 8 held-out test maps only
-    python eval_full.py <model_path> --maps den312d empty-48-48  # specific maps
+    python eval_full.py <model_path>
+    python eval_full.py <model_path> --output logs/my_results.csv
+    python eval_full.py <model_path> --steps 1 2 3           # custom steps
+    python eval_full.py <model_path> --agents 100 200 400     # custom agent counts
+    python eval_full.py <model_path> --maps den312d empty-48-48  # custom maps
 """
-import os, sys, subprocess, glob, argparse
-
-# ── The 8 held-out test maps (never seen during training) ──
-HELD_OUT_TEST = [
-    "Paris_1_256", "empty-48-48", "maze-128-128-2", "random-64-64-10",
-    "random-32-32-10", "warehouse-10-20-10-2-1", "den312d", "den520d",
-]
-
-# ── 4 maps omitted from the paper (pipeline issues) ──
-OMITTED = {"brc202d", "orz900d", "maze-128-128-1", "maze-128-128-10"}
-
-# ── All 33 MovingAI MAPF benchmark maps ──
-ALL_MAPS = [
-    "Berlin_1_256", "Boston_0_256", "Paris_1_256",
-    "brc202d", "den312d", "den520d",
-    "empty-8-8", "empty-16-16", "empty-32-32", "empty-48-48",
-    "ht_chantry", "ht_mansion_n", "lak303d", "lt_gallowstemplar_n",
-    "maze-128-128-1", "maze-128-128-2", "maze-128-128-10",
-    "maze-32-32-2", "maze-32-32-4",
-    "orz900d", "ost003d",
-    "random-32-32-10", "random-32-32-20", "random-64-64-10", "random-64-64-20",
-    "room-32-32-4", "room-64-64-16", "room-64-64-8",
-    "w_woundedcoast",
-    "warehouse-10-20-10-2-1", "warehouse-10-20-10-2-2",
-    "warehouse-20-40-10-2-1", "warehouse-20-40-10-2-2",
-]
-
-# Paper uses agent increments of 100
-AGENT_INCREMENT = 100
-SCENARIOS_PER_MAP = 25  # all 25 random scenarios
+import os, sys, subprocess, argparse, csv
 
 MAP_NPZ = "data/all_maps.npz"
 BD_DIR = "data/bd_npzs/large_scale"
 SCEN_DIR = "data/scen-random"
 
+# 5 diverse maps: open, random obstacles, structured, large city, warehouse
+DEFAULT_MAPS = [
+    ("empty-48-48", "empty-48-48-random-1.scen"),
+    ("random-32-32-10", "random-32-32-10-random-1.scen"),
+    ("den312d", "den312d-random-1.scen"),
+    ("Paris_1_256", "Paris_1_256-random-1.scen"),
+    ("warehouse-10-20-10-2-1", "warehouse-10-20-10-2-1-random-1.scen"),
+]
 
-def get_max_agents(map_name):
-    """Return max agents available in scenario files for this map."""
-    scens = glob.glob(os.path.join(SCEN_DIR, f"{map_name}-random-1.scen"))
-    if not scens:
-        return 0
-    with open(scens[0]) as f:
-        lines = f.readlines()
-    return len(lines) - 1  # subtract header
+DEFAULT_AGENTS = [100, 400, 800]
+DEFAULT_STEPS = [1, 2, 3, 5]
+DEFAULT_CONSENSUS = 3
+DEFAULT_TAU = 0.3
+DEFAULT_WAIT_THRESH = 0.25
 
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="Phase 1 ablation: steps vs quality")
     parser.add_argument("model", help="Path to model checkpoint")
-    parser.add_argument("--output", default=None, help="Output CSV path (default: logs/eval_full_<model>.csv)")
-    parser.add_argument("--test-only", action="store_true", help="Only evaluate on 8 held-out test maps")
-    parser.add_argument("--maps", nargs="*", default=None, help="Specific maps to evaluate")
-    parser.add_argument("--max-agents", type=int, default=1000, help="Max agents to test (default: 1000)")
-    parser.add_argument("--scenarios", type=int, default=SCENARIOS_PER_MAP, help="Scenarios per map (default: 25)")
+    parser.add_argument("--output", default=None, help="Output CSV path")
+    parser.add_argument("--maps", nargs="*", default=None,
+                        help="Map names to evaluate (default: 5 diverse maps)")
+    parser.add_argument("--agents", nargs="*", type=int, default=DEFAULT_AGENTS,
+                        help="Agent counts to test (default: 100 400 800)")
+    parser.add_argument("--steps", nargs="*", type=int, default=DEFAULT_STEPS,
+                        help="Euler integration steps to sweep (default: 1 2 3 5)")
+    parser.add_argument("--consensus", type=int, default=DEFAULT_CONSENSUS,
+                        help="Consensus samples (default: 3)")
+    parser.add_argument("--tau", type=float, default=DEFAULT_TAU)
+    parser.add_argument("--wait-thresh", type=float, default=DEFAULT_WAIT_THRESH)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--time-limit", type=int, default=60)
+    parser.add_argument("--max-steps-multiplier", type=str, default="5x",
+                        help="Max steps for simulator (default: 5x)")
+    parser.add_argument("--hidden-dim", type=int, default=1024,
+                        help="Model hidden dimension (default: 1024)")
+    parser.add_argument("--num-layers", type=int, default=6,
+                        help="Number of GNN layers (default: 6)")
     args = parser.parse_args()
 
     if not os.path.exists(args.model):
         print(f"ERROR: {args.model} not found")
         sys.exit(1)
 
-    # Select maps
+    # Resolve maps
     if args.maps:
-        test_maps = args.maps
-    elif args.test_only:
-        test_maps = HELD_OUT_TEST
+        map_configs = []
+        for m in args.maps:
+            scen = f"{m}-random-1.scen"
+            map_configs.append((m, scen))
     else:
-        test_maps = [m for m in ALL_MAPS if m not in OMITTED]
+        map_configs = DEFAULT_MAPS
 
     # Output path
     if args.output:
         csv_path = args.output
     else:
         model_tag = os.path.basename(args.model).replace(".pt", "")
-        csv_path = f"logs/eval_full_{model_tag}.csv"
+        csv_path = f"logs/eval_ablation_{model_tag}.csv"
 
     os.makedirs("logs", exist_ok=True)
-    if os.path.exists(csv_path):
-        os.remove(csv_path)
 
     import torch
     use_gpu = torch.cuda.is_available()
 
-    # Build run list
+    # Build run list: maps x agents x steps
     runs = []
-    for map_name in test_maps:
-        scens = sorted(glob.glob(os.path.join(SCEN_DIR, f"{map_name}-random-*.scen")))[:args.scenarios]
-        if not scens:
-            print(f"Skipping {map_name} - no scenario files")
+    for map_name, scen_file in map_configs:
+        scen_path = os.path.join(SCEN_DIR, scen_file)
+        bn = scen_file.replace(".scen", "")
+        bd_path = os.path.join(BD_DIR, f"{bn}_bds.npz")
+
+        if not os.path.exists(scen_path):
+            print(f"WARNING: scenario {scen_path} not found, skipping {map_name}")
+            continue
+        if not os.path.exists(bd_path):
+            print(f"WARNING: BD file {bd_path} not found, skipping {map_name}")
             continue
 
-        max_avail = get_max_agents(map_name)
-        agent_counts = list(range(AGENT_INCREMENT, min(max_avail, args.max_agents) + 1, AGENT_INCREMENT))
-        if not agent_counts:
-            agent_counts = [max_avail]  # map has fewer than 100 agents
+        # Check max agents available
+        with open(scen_path) as f:
+            max_avail = len(f.readlines()) - 1
 
-        for scen in scens:
-            bn = os.path.basename(scen).replace(".scen", "")
-            bd = os.path.join(BD_DIR, f"{bn}_bds.npz")
-            if not os.path.exists(bd):
+        for n_agents in args.agents:
+            if n_agents > max_avail:
+                print(f"WARNING: {map_name} has only {max_avail} agents, skipping {n_agents}")
                 continue
-            for n in agent_counts:
-                runs.append((map_name, scen, bd, n))
+            for num_steps in args.steps:
+                runs.append((map_name, scen_path, bd_path, n_agents, num_steps))
+
+    # Write CSV header
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "map", "agents", "num_steps", "consensus", "tau", "wait_thresh",
+            "success", "at_goal", "total", "at_goal_pct",
+            "runtime", "total_cost", "cost_not_resting"
+        ])
 
     total = len(runs)
-    is_test = {m for m in HELD_OUT_TEST}
     print(f"{'='*60}")
-    print(f"Full Benchmark Evaluation: {args.model}")
-    print(f"Maps: {len(test_maps)} | Scenarios/map: {args.scenarios} | GPU: {use_gpu}")
+    print(f"Phase 1 Ablation: Euler Steps vs Quality")
+    print(f"Model: {args.model}")
+    print(f"Maps: {len(map_configs)} | Agents: {args.agents} | Steps: {args.steps}")
+    print(f"Consensus: {args.consensus} | Tau: {args.tau} | GPU: {use_gpu}")
     print(f"Total runs: {total}")
     print(f"Output: {csv_path}")
     print(f"{'='*60}\n")
 
-    for i, (map_name, scen, bd, n) in enumerate(runs, 1):
-        tag = " [TEST]" if map_name in is_test else ""
-        print(f"[{i}/{total}] {map_name}{tag} | {n} agents")
-        subprocess.run([
+    for i, (map_name, scen_path, bd_path, n_agents, num_steps) in enumerate(runs, 1):
+        print(f"[{i}/{total}] {map_name} | {n_agents} agents | {num_steps} steps", end="", flush=True)
+
+        tmp_csv = "logs/_eval_tmp.csv"
+        if os.path.exists(tmp_csv):
+            os.remove(tmp_csv)
+
+        cmd = [
             "python", "-m", "main_pys.simulator",
             f"--mapNpzFile={MAP_NPZ}", f"--mapName={map_name}",
-            f"--scenFile={scen}", f"--bdNpzFile={bd}",
-            f"--modelPath={args.model}", f"--outputCSVFile={csv_path}",
-            "--maxSteps=5x", f"--seed={args.seed}",
+            f"--scenFile={scen_path}", f"--bdNpzFile={bd_path}",
+            f"--modelPath={args.model}", f"--outputCSVFile={tmp_csv}",
+            f"--maxSteps={args.max_steps_multiplier}", f"--seed={args.seed}",
             f"--useGPU={'True' if use_gpu else 'False'}",
-            f"--agentNum={n}", "--shieldType=CS-PIBT"
-        ])
+            f"--agentNum={n_agents}", "--shieldType=CS-PIBT",
+            f"--numIntegrationSteps={num_steps}",
+            f"--tau={args.tau}",
+            f"--waitThreshold={args.wait_thresh}",
+            f"--numConsensusSamples={args.consensus}",
+            f"--timeLimit={args.time_limit}",
+            f"--hiddenDim={args.hidden_dim}",
+            f"--numLayers={args.num_layers}",
+        ]
 
-    print(f"\nDone! Results: {csv_path}")
+        try:
+            subprocess.run(cmd, capture_output=True, text=True, timeout=args.time_limit + 60)
+        except subprocess.TimeoutExpired:
+            print(" TIMEOUT")
+            with open(csv_path, "a", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    map_name, n_agents, num_steps, args.consensus, args.tau, args.wait_thresh,
+                    False, 0, n_agents, "0.0", args.time_limit, 0, 0
+                ])
+            continue
+
+        if os.path.exists(tmp_csv):
+            with open(tmp_csv) as rf:
+                reader = csv.DictReader(rf)
+                for row in reader:
+                    at_goal = int(row.get("num_agents_at_goal", 0))
+                    success = row.get("success", "False")
+                    runtime = float(row.get("runtime", 0))
+                    total_cost = row.get("total_cost_true", 0)
+                    cost_nr = row.get("total_cost_not_resting_at_goal", 0)
+                    pct = 100.0 * at_goal / n_agents
+
+                    with open(csv_path, "a", newline="") as f:
+                        writer = csv.writer(f)
+                        writer.writerow([
+                            map_name, n_agents, num_steps, args.consensus,
+                            args.tau, args.wait_thresh,
+                            success, at_goal, n_agents, f"{pct:.1f}",
+                            f"{runtime:.2f}", total_cost, cost_nr
+                        ])
+
+                    print(f" -> {at_goal}/{n_agents} ({pct:.1f}%) {'OK' if success == 'True' else 'FAIL'} [{runtime:.1f}s]")
+        else:
+            print(" NO OUTPUT")
+            with open(csv_path, "a", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    map_name, n_agents, num_steps, args.consensus, args.tau, args.wait_thresh,
+                    False, 0, n_agents, "0.0", 0, 0, 0
+                ])
+
+    # Print summary table
+    print(f"\n{'='*60}")
+    print("  RESULTS SUMMARY")
+    print(f"{'='*60}")
+    try:
+        import pandas as pd
+        df = pd.read_csv(csv_path)
+        df["at_goal_pct"] = pd.to_numeric(df["at_goal_pct"], errors="coerce")
+        df["runtime"] = pd.to_numeric(df["runtime"], errors="coerce")
+
+        # Pivot: rows = (map, agents), cols = steps
+        pivot = df.pivot_table(
+            index=["map", "agents"],
+            columns="num_steps",
+            values=["at_goal_pct", "runtime"],
+            aggfunc="first"
+        )
+        print("\nAgents at goal (%):")
+        print(pivot["at_goal_pct"].to_string())
+        print("\nRuntime (s):")
+        print(pivot["runtime"].to_string())
+    except Exception as e:
+        print(f"  (install pandas for summary: {e})")
+
+    print(f"\nDone! Full results: {csv_path}")
 
 
 if __name__ == "__main__":

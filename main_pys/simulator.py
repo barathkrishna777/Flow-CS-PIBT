@@ -484,7 +484,7 @@ def main(args: argparse.ArgumentParser):
     if not os.path.exists(args.modelPath):
         raise FileNotFoundError('Model file: {} not found.'.format(args.modelPath))
     
-    model = FlowGNNModel(k=k).to(device) 
+    model = FlowGNNModel(k=k, hidden_dim=args.hiddenDim, num_layers=args.numLayers).to(device) 
     
     checkpoint = torch.load(args.modelPath, map_location=device, weights_only=False)
     if 'model_state_dict' in checkpoint:
@@ -568,6 +568,8 @@ if __name__ == '__main__':
     parser.add_argument('--waitThreshold', type=float, help="Wait magnitude threshold (default 0.25)", default=0.25)
     parser.add_argument('--numConsensusSamples', type=int, help="Number of flow samples to average (default 3)", default=3)
     parser.add_argument('--useActionHead', type=lambda x: bool(str2bool(x)), help="Use auxiliary action head instead of flow (default False)", default=False)
+    parser.add_argument('--hiddenDim', type=int, help="Model hidden dimension (default 1024)", default=1024)
+    parser.add_argument('--numLayers', type=int, help="Number of GNN layers (default 6)", default=6)
     args = parser.parse_args()
 
     if args.mapName.endswith('.map'): 

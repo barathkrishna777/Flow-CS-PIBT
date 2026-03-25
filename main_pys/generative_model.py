@@ -4,10 +4,12 @@ import torch.nn.functional as F
 import torch_geometric.nn as pyg_nn
 
 class FlowGNNModel(nn.Module):
-    def __init__(self, k=4, hidden_dim=1024): # Scaled up from 512 to 1024
+    def __init__(self, k=4, hidden_dim=1024, num_layers=6):
         super().__init__()
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
         
-        # --- 1. Wider Visual Context Encoder ---
+        # --- 1. Visual Context Encoder ---
         self.conv = nn.Sequential(
             nn.Conv2d(3, 64, kernel_size=3, padding=1),
             nn.BatchNorm2d(64),
@@ -35,21 +37,18 @@ class FlowGNNModel(nn.Module):
             nn.Dropout(0.15) 
         )
         
-        # --- 2. Deeper GNN with Residual Connections ---
+        # --- 2. GNN with Residual Connections ---
         gnn_input_dim = hidden_dim + 2 + 1 
-        
-        # Project inputs to match hidden_dim for residual addition
         self.input_proj = nn.Linear(gnn_input_dim, hidden_dim)
         
         self.convs = nn.ModuleList()
         self.lns = nn.ModuleList()
-        self.num_layers = 6 # Scaled from 4 to 6 for a larger receptive field
         
         for _ in range(self.num_layers): 
             self.convs.append(pyg_nn.SAGEConv(hidden_dim, hidden_dim))
             self.lns.append(nn.LayerNorm(hidden_dim))
             
-        # --- 3. Expressive Output Head (flow velocity) ---
+        # --- 3. Output Head (flow velocity) ---
         self.post_mp = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.SiLU(),
@@ -61,11 +60,12 @@ class FlowGNNModel(nn.Module):
         )
 
         # --- 4. Auxiliary Action Head (5-class: wait, right, down, up, left) ---
+        action_head_dim = min(hidden_dim, 256)
         self.action_head = nn.Sequential(
-            nn.Linear(hidden_dim, 256),
+            nn.Linear(hidden_dim, action_head_dim),
             nn.SiLU(),
             nn.Dropout(0.15),
-            nn.Linear(256, 5)
+            nn.Linear(action_head_dim, 5)
         )
 
     def forward(self, v_t, t, data, return_action_logits=False):

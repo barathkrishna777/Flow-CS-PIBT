@@ -81,6 +81,12 @@ def main():
                         help="Path to massive_flow_dataset_large_scale.zip")
     parser.add_argument("--skip-extract", action="store_true",
                         help="Skip extraction if data/ already exists")
+    parser.add_argument("--hidden-dim", type=int, default=1024,
+                        help="Model hidden dimension (default: 1024)")
+    parser.add_argument("--num-layers", type=int, default=6,
+                        help="Number of GNN layers (default: 6)")
+    parser.add_argument("--run-name", type=str, default="",
+                        help="Run name suffix for checkpoints")
     args = parser.parse_args()
 
     # Resolve project directory (where this script lives = repo root)
@@ -101,13 +107,18 @@ def main():
         extract_data(args.base_data, args.trajectories, project_dir)
 
     # Launch training
+    train_cmd = [
+        sys.executable, "-m", "main_pys.train_flow",
+        "--hidden-dim", str(args.hidden_dim),
+        "--num-layers", str(args.num_layers),
+    ]
+    if args.run_name:
+        train_cmd.extend(["--run-name", args.run_name])
+
     print("=" * 60)
-    print("Starting training...")
+    print(f"Starting training (hidden_dim={args.hidden_dim}, num_layers={args.num_layers})...")
     print("=" * 60)
-    result = subprocess.run(
-        [sys.executable, "-m", "main_pys.train_flow"],
-        cwd=project_dir
-    )
+    result = subprocess.run(train_cmd, cwd=project_dir)
 
     if result.returncode != 0:
         print(f"\nTraining failed with exit code {result.returncode}")

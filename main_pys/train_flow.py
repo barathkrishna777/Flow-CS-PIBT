@@ -83,7 +83,7 @@ def validate(model, val_loader, device, use_amp):
 
 def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", wandb_entity=None,
           preprocessed_dir=None, no_weighted_sampling=False, val_split=0.05, patience=0,
-          resume=None, start_epoch=0):
+          resume=None, start_epoch=0, hidden_dim=1024, num_layers=6):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_amp = device.type == "cuda"
     print(f"Device: {device} | AMP: {use_amp}")
@@ -162,7 +162,7 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
             persistent_workers=True
         )
 
-    model = FlowGNNModel().to(device)
+    model = FlowGNNModel(hidden_dim=hidden_dim, num_layers=num_layers).to(device)
     optimizer = AdamW(model.parameters(), lr=1e-4, weight_decay=1e-4)
 
     epochs = 1 if quick else 10
@@ -205,7 +205,9 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
             "epochs": epochs,
             "batch_size": batch_size,
             "lr": 1e-4,
-            "weight_decay": 1e-5,
+            "weight_decay": 1e-4,
+            "hidden_dim": hidden_dim,
+            "num_layers": num_layers,
             "dataset_size": len(full_dataset),
             "train_size": train_size,
             "val_size": val_size,
@@ -377,10 +379,15 @@ if __name__ == "__main__":
                         help="Path to checkpoint to resume from (e.g. large_scale_flow_wave4_epoch_1.pt)")
     parser.add_argument("--start-epoch", type=int, default=0,
                         help="Epoch to resume from (0-indexed, e.g. 1 means start at epoch 2)")
+    parser.add_argument("--hidden-dim", type=int, default=1024,
+                        help="Model hidden dimension (default: 1024)")
+    parser.add_argument("--num-layers", type=int, default=6,
+                        help="Number of GNN layers (default: 6)")
     args = parser.parse_args()
     train(run_name=args.run_name, quick=args.quick, use_wandb=not args.no_wandb,
           wandb_project=args.wandb_project, wandb_entity=args.wandb_entity,
           preprocessed_dir=args.preprocessed_dir,
           no_weighted_sampling=args.no_weighted_sampling,
           val_split=args.val_split, patience=args.patience,
-          resume=args.resume, start_epoch=args.start_epoch)
+          resume=args.resume, start_epoch=args.start_epoch,
+          hidden_dim=args.hidden_dim, num_layers=args.num_layers)

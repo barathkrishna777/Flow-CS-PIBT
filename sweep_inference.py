@@ -1,100 +1,196 @@
-"""Sweep inference hyperparameters (num_steps, tau, wait_threshold) on a single scenario.
-No retraining needed — just tests different inference configs on the same checkpoint.
+"""Sweep inference hyperparameters on multiple maps and agent densities.
+
+Sweeps: num_steps x tau x wait_threshold x consensus_samples (flow path)
+        + action head baseline (single forward pass, no flow integration)
 
 Usage:
-    CUDA_VISIBLE_DEVICES=1 python sweep_inference.py
+    CUDA_VISIBLE_DEVICES=0 python sweep_inference.py
+    CUDA_VISIBLE_DEVICES=0 python sweep_inference.py --model path/to/model.pt
+    CUDA_VISIBLE_DEVICES=0 python sweep_inference.py --quick   # small subset for testing
 """
 import subprocess
 import os
 import csv
+import argparse
 import itertools
 
-MODEL = "large_scale_flow_wave4_epoch_4.pt"
+DEFAULT_MODEL = "large_scale_flow_wave6_best.pt"
 MAP_NPZ = "data/all_maps.npz"
 BD_DIR = "data/bd_npzs"
 SCEN_DIR = "data/scen-random"
 
-# Test on one scenario per map at 100 agents (the sweet spot where we're at ~90%)
 TEST_CASES = [
     ("empty-48-48", "empty-48-48-random-1.scen", 100),
+    ("empty-48-48", "empty-48-48-random-1.scen", 400),
+    ("den312d", "den312d-random-1.scen", 100),
+    ("den312d", "den312d-random-1.scen", 400),
+    ("den312d", "den312d-random-1.scen", 600),
     ("random-32-32-10", "random-32-32-10-random-1.scen", 100),
+    ("Paris_1_256", "Paris_1_256-random-1.scen", 400),
+    ("Paris_1_256", "Paris_1_256-random-1.scen", 800),
+]
+
+QUICK_TEST_CASES = [
+    ("empty-48-48", "empty-48-48-random-1.scen", 100),
     ("den312d", "den312d-random-1.scen", 100),
 ]
 
-# Parameters to sweep
-NUM_STEPS_OPTIONS = [5, 10, 20]
-TAU_OPTIONS = [0.3, 0.5, 0.7, 1.0]
-WAIT_THRESH_OPTIONS = [0.15, 0.25, 0.35]
+NUM_STEPS_OPTIONS = [1, 2, 3, 5]
+TAU_OPTIONS = [0.3, 0.5]
+WAIT_THRESH_OPTIONS = [0.25]
+CONSENSUS_OPTIONS = [1, 3]
 
-os.makedirs("logs", exist_ok=True)
-RESULTS_FILE = "logs/inference_sweep.csv"
 
-with open(RESULTS_FILE, "w", newline="") as f:
-    writer = csv.writer(f)
-    writer.writerow(["num_steps", "tau", "wait_thresh", "map", "agents", "at_goal", "total", "at_goal_pct"])
+def run_single(model, map_name, scen_file, n_agents, csv_path, use_gpu,
+               num_steps=5, tau=0.3, wait_thresh=0.25, consensus=3, use_action_head=False,
+               hidden_dim=1024, num_layers=6):
+    scen_path = f"{SCEN_DIR}/{scen_file}"
+    bn = scen_file.replace(".scen", "")
+    bd_path = f"{BD_DIR}/large_scale/{bn}_bds.npz"
 
-configs = list(itertools.product(NUM_STEPS_OPTIONS, TAU_OPTIONS, WAIT_THRESH_OPTIONS))
-print(f"Sweeping {len(configs)} configs × {len(TEST_CASES)} test cases = {len(configs) * len(TEST_CASES)} runs")
+    tmp_csv = "logs/_sweep_tmp.csv"
+    if os.path.exists(tmp_csv):
+        os.remove(tmp_csv)
 
-for i, (num_steps, tau, wait_thresh) in enumerate(configs):
-    print(f"\n[{i+1}/{len(configs)}] steps={num_steps}, tau={tau}, wait={wait_thresh}")
+    cmd = [
+        "python", "-m", "main_pys.simulator",
+        f"--mapNpzFile={MAP_NPZ}", f"--mapName={map_name}",
+        f"--scenFile={scen_path}", f"--bdNpzFile={bd_path}",
+        f"--modelPath={model}", f"--outputCSVFile={tmp_csv}",
+        "--maxSteps=5x", "--seed=0",
+        f"--useGPU={'True' if use_gpu else 'False'}",
+        f"--agentNum={n_agents}", "--shieldType=CS-PIBT",
+        f"--numIntegrationSteps={num_steps}",
+        f"--tau={tau}",
+        f"--waitThreshold={wait_thresh}",
+        f"--numConsensusSamples={consensus}",
+        f"--useActionHead={'True' if use_action_head else 'False'}",
+        f"--hiddenDim={hidden_dim}",
+        f"--numLayers={num_layers}",
+    ]
 
-    for map_name, scen_file, n_agents in TEST_CASES:
-        scen_path = f"{SCEN_DIR}/{scen_file}"
-        bn = scen_file.replace(".scen", "")
-        bd_path = f"{BD_DIR}/large_scale/{bn}_bds.npz"
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
 
-        # Use a temp CSV for this single run
-        tmp_csv = f"logs/_sweep_tmp.csv"
-        if os.path.exists(tmp_csv):
-            os.remove(tmp_csv)
+    if os.path.exists(tmp_csv):
+        with open(tmp_csv) as rf:
+            reader = csv.DictReader(rf)
+            for row in reader:
+                at_goal = int(row.get("num_agents_at_goal", 0))
+                success = row.get("success", "False")
+                runtime = float(row.get("runtime", 0))
+                pct = 100.0 * at_goal / n_agents
 
-        cmd = [
-            "python", "-m", "main_pys.simulator",
-            f"--mapNpzFile={MAP_NPZ}", f"--mapName={map_name}",
-            f"--scenFile={scen_path}", f"--bdNpzFile={bd_path}",
-            f"--modelPath={MODEL}", f"--outputCSVFile={tmp_csv}",
-            "--maxSteps=3x", "--seed=0", "--useGPU=True",
-            f"--agentNum={n_agents}", "--shieldType=CS-PIBT",
-            f"--numIntegrationSteps={num_steps}",
-            f"--tau={tau}",
-            f"--waitThreshold={wait_thresh}",
-        ]
+                with open(csv_path, "a", newline="") as wf:
+                    writer = csv.writer(wf)
+                    writer.writerow([
+                        num_steps, tau, wait_thresh, consensus, use_action_head,
+                        map_name, n_agents, at_goal, n_agents, f"{pct:.1f}",
+                        success, f"{runtime:.2f}"
+                    ])
 
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                return at_goal, n_agents, pct, success, runtime
 
-        # Parse result from tmp CSV
-        if os.path.exists(tmp_csv):
-            with open(tmp_csv) as rf:
-                reader = csv.DictReader(rf)
-                for row in reader:
-                    at_goal = int(row.get("num_agents_at_goal", 0))
-                    total = int(row.get("num_agents", n_agents))
-                    pct = 100.0 * at_goal / total
+    return None, n_agents, 0, "FAIL", 0
 
-                    with open(RESULTS_FILE, "a", newline="") as wf:
-                        writer = csv.writer(wf)
-                        writer.writerow([num_steps, tau, wait_thresh, map_name, n_agents, at_goal, total, f"{pct:.1f}"])
 
-                    print(f"  {map_name} {n_agents}ag: {at_goal}/{total} ({pct:.1f}%)")
-        else:
-            print(f"  {map_name} {n_agents}ag: FAILED")
-            with open(RESULTS_FILE, "a", newline="") as wf:
-                writer = csv.writer(wf)
-                writer.writerow([num_steps, tau, wait_thresh, map_name, n_agents, "FAIL", n_agents, "FAIL"])
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", default=DEFAULT_MODEL, help="Model checkpoint path")
+    parser.add_argument("--quick", action="store_true", help="Quick test with fewer configs")
+    parser.add_argument("--output", default=None, help="Output CSV path")
+    parser.add_argument("--hidden-dim", type=int, default=1024, help="Model hidden dimension")
+    parser.add_argument("--num-layers", type=int, default=6, help="Number of GNN layers")
+    args = parser.parse_args()
 
-print(f"\nDone! Results in {RESULTS_FILE}")
+    import torch
+    use_gpu = torch.cuda.is_available()
 
-# Print summary: best config per map
-print("\n" + "="*60)
-print("  BEST CONFIGS PER MAP")
-print("="*60)
-import pandas as pd
-try:
-    df = pd.read_csv(RESULTS_FILE)
-    for m in df["map"].unique():
-        sub = df[df["map"] == m]
-        best = sub.loc[sub["at_goal_pct"].astype(float).idxmax()]
-        print(f"  {m}: {best['at_goal_pct']}% @ steps={best['num_steps']}, tau={best['tau']}, wait={best['wait_thresh']}")
-except Exception as e:
-    print(f"  (install pandas for summary, or check {RESULTS_FILE})")
+    test_cases = QUICK_TEST_CASES if args.quick else TEST_CASES
+    output = args.output or "logs/inference_sweep_extended.csv"
+    os.makedirs("logs", exist_ok=True)
+
+    with open(output, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "num_steps", "tau", "wait_thresh", "consensus", "action_head",
+            "map", "agents", "at_goal", "total", "at_goal_pct",
+            "success", "runtime"
+        ])
+
+    # Flow-based configs
+    flow_configs = list(itertools.product(
+        NUM_STEPS_OPTIONS, TAU_OPTIONS, WAIT_THRESH_OPTIONS, CONSENSUS_OPTIONS
+    ))
+
+    total_runs = len(flow_configs) * len(test_cases) + len(test_cases)  # +action head runs
+    print(f"{'='*60}")
+    print(f"Inference Sweep: {args.model}")
+    print(f"Flow configs: {len(flow_configs)} | Action head: 1")
+    print(f"Test cases: {len(test_cases)} | Total runs: {total_runs}")
+    print(f"GPU: {use_gpu} | Output: {output}")
+    print(f"{'='*60}\n")
+
+    run_idx = 0
+
+    # Flow-based sweep
+    for i, (num_steps, tau, wait_thresh, consensus) in enumerate(flow_configs):
+        print(f"\n[Config {i+1}/{len(flow_configs)}] steps={num_steps}, tau={tau}, "
+              f"wait={wait_thresh}, consensus={consensus}")
+
+        for map_name, scen_file, n_agents in test_cases:
+            run_idx += 1
+            at_goal, total, pct, success, runtime = run_single(
+                args.model, map_name, scen_file, n_agents, output, use_gpu,
+                num_steps=num_steps, tau=tau, wait_thresh=wait_thresh,
+                consensus=consensus, use_action_head=False,
+                hidden_dim=args.hidden_dim, num_layers=args.num_layers,
+            )
+            status = f"{at_goal}/{total} ({pct:.1f}%)" if at_goal is not None else "FAIL"
+            print(f"  [{run_idx}/{total_runs}] {map_name} {n_agents}ag: {status}  [{runtime:.1f}s]")
+
+    # Action head baseline (tau still matters for softmax temperature)
+    print(f"\n[Action Head] tau=0.3")
+    for map_name, scen_file, n_agents in test_cases:
+        run_idx += 1
+        at_goal, total, pct, success, runtime = run_single(
+            args.model, map_name, scen_file, n_agents, output, use_gpu,
+            num_steps=1, tau=0.3, wait_thresh=0.25,
+            consensus=1, use_action_head=True,
+            hidden_dim=args.hidden_dim, num_layers=args.num_layers,
+        )
+        status = f"{at_goal}/{total} ({pct:.1f}%)" if at_goal is not None else "FAIL"
+        print(f"  [{run_idx}/{total_runs}] {map_name} {n_agents}ag: {status}  [{runtime:.1f}s]")
+
+    print(f"\nDone! Results in {output}")
+
+    # Summary
+    print(f"\n{'='*60}")
+    print("  SUMMARY")
+    print(f"{'='*60}")
+    try:
+        import pandas as pd
+        df = pd.read_csv(output)
+        df["at_goal_pct"] = pd.to_numeric(df["at_goal_pct"], errors="coerce")
+
+        # Best flow config per map/agent combo
+        flow_df = df[df["action_head"] == "False"]
+        if not flow_df.empty:
+            print("\nBest flow config per test case:")
+            for (m, a), sub in flow_df.groupby(["map", "agents"]):
+                best = sub.loc[sub["at_goal_pct"].idxmax()]
+                print(f"  {m} {a}ag: {best['at_goal_pct']}% @ "
+                      f"steps={best['num_steps']}, tau={best['tau']}, "
+                      f"consensus={best['consensus']}, runtime={best['runtime']}s")
+
+        # Action head results
+        ah_df = df[df["action_head"] == "True"]
+        if not ah_df.empty:
+            print("\nAction head results:")
+            for _, row in ah_df.iterrows():
+                print(f"  {row['map']} {row['agents']}ag: {row['at_goal_pct']}%, runtime={row['runtime']}s")
+    except Exception as e:
+        print(f"  (install pandas for summary: {e})")
+
+
+if __name__ == "__main__":
+    main()
