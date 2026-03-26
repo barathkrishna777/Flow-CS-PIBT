@@ -560,7 +560,7 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--shieldType', type=str, default='CS-PIBT', choices=['CS-PIBT', 'CS-Freeze', 'LaCAM', 'Real-Time-LaCAM'])
     parser.add_argument('--lacamLookahead', type=int, help="LaCAM node expansion limit", default=0)
-    parser.add_argument('--timeLimit', type=int, help="Time limit (s)", default=60)
+    parser.add_argument('--timeLimit', type=int, help="Time limit in seconds (default: 120, matching paper)", default=120)
     parser.add_argument('--outputCSVFile', type=str, help="where to output statistics", required=True)
     parser.add_argument('--outputPathsFile', type=str, help="where to output path, ends with .npy", default=None)
     parser.add_argument('--numIntegrationSteps', type=int, help="Euler integration steps (default 5)", default=5)

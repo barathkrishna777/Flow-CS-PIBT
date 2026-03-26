@@ -31,6 +31,8 @@ DEFAULT_STEPS = [1, 2, 3, 5]
 DEFAULT_CONSENSUS = 3
 DEFAULT_TAU = 0.3
 DEFAULT_WAIT_THRESH = 0.25
+DEFAULT_TIME_LIMIT = 120  # 2 minutes, matching Veerapaneni et al.
+DEFAULT_MAX_STEPS = "3x"  # 3x makespan, matching Veerapaneni et al.
 
 # Hard scenarios: extra agent counts per map when --extended is used
 EXTENDED_AGENTS = {
@@ -57,9 +59,10 @@ def main():
     parser.add_argument("--tau", type=float, default=DEFAULT_TAU)
     parser.add_argument("--wait-thresh", type=float, default=DEFAULT_WAIT_THRESH)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--time-limit", type=int, default=60)
-    parser.add_argument("--max-steps-multiplier", type=str, default="5x",
-                        help="Max steps for simulator (default: 5x)")
+    parser.add_argument("--time-limit", type=int, default=DEFAULT_TIME_LIMIT,
+                        help="Wall-clock time limit in seconds (default: 120, matching paper)")
+    parser.add_argument("--max-steps-multiplier", type=str, default=DEFAULT_MAX_STEPS,
+                        help="Max steps for simulator (default: 3x, matching paper)")
     parser.add_argument("--hidden-dim", type=int, default=1024,
                         help="Model hidden dimension (default: 1024)")
     parser.add_argument("--num-layers", type=int, default=6,
