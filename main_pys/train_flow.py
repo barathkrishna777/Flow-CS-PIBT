@@ -369,7 +369,8 @@ if __name__ == "__main__":
     parser.add_argument("--wandb-entity", type=str, default="flow-cspibt",
                         help="W&B entity/team (default: flow-cspibt)")
     parser.add_argument("--preprocessed-dir", type=str, default=None,
-                        help="Override preprocessed data directory")
+                        help="Preprocessed .pt directory, or comma-separated list (e.g. "
+                             "data/preprocessed,data/preprocessed_heldout)")
     parser.add_argument("--no-weighted-sampling", action="store_true",
                         help="Disable agent-count weighted sampling")
     parser.add_argument("--val-split", type=float, default=0.05,

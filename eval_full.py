@@ -44,7 +44,10 @@ EXTENDED_AGENTS = {
 
 def main():
     parser = argparse.ArgumentParser(description="Phase 1 ablation: steps vs quality")
-    parser.add_argument("model", help="Path to model checkpoint")
+    parser.add_argument("model", nargs="?", default=None,
+                        help="Path to model checkpoint (or use --model)")
+    parser.add_argument("--model", "-m", dest="model_opt", default=None,
+                        help="Path to model checkpoint (alternative to positional)")
     parser.add_argument("--output", default=None, help="Output CSV path")
     parser.add_argument("--maps", nargs="*", default=None,
                         help="Map names to evaluate (default: 5 diverse maps)")
@@ -68,6 +71,10 @@ def main():
     parser.add_argument("--num-layers", type=int, default=6,
                         help="Number of GNN layers (default: 6)")
     args = parser.parse_args()
+
+    args.model = args.model_opt or args.model
+    if not args.model:
+        parser.error("Provide model path as positional argument or --model / -m")
 
     if not os.path.exists(args.model):
         print(f"ERROR: {args.model} not found")
