@@ -1,10 +1,11 @@
-"""Phase 1 ablation: evaluate current architecture across maps, agent densities, and Euler steps.
+"""Evaluate model across maps, agent densities, and Euler steps.
 
 Runs 1 scenario each on 5 maps, for agents={100, 400, 800}, sweeping steps={1, 2, 3, 5}.
-This produces a results table for the inference-cost vs quality tradeoff.
+Use --extended to also test hard scenarios (high agent counts on den312d, Paris, empty).
 
 Usage:
     python eval_full.py <model_path>
+    python eval_full.py <model_path> --extended               # include hard scenarios
     python eval_full.py <model_path> --output logs/my_results.csv
     python eval_full.py <model_path> --steps 1 2 3           # custom steps
     python eval_full.py <model_path> --agents 100 200 400     # custom agent counts
@@ -31,6 +32,13 @@ DEFAULT_CONSENSUS = 3
 DEFAULT_TAU = 0.3
 DEFAULT_WAIT_THRESH = 0.25
 
+# Hard scenarios: extra agent counts per map when --extended is used
+EXTENDED_AGENTS = {
+    "den312d": [700, 800, 900, 1000],
+    "Paris_1_256": [900, 1000],
+    "empty-48-48": [700, 800, 900, 1000],
+}
+
 
 def main():
     parser = argparse.ArgumentParser(description="Phase 1 ablation: steps vs quality")
@@ -40,6 +48,8 @@ def main():
                         help="Map names to evaluate (default: 5 diverse maps)")
     parser.add_argument("--agents", nargs="*", type=int, default=DEFAULT_AGENTS,
                         help="Agent counts to test (default: 100 400 800)")
+    parser.add_argument("--extended", action="store_true",
+                        help="Include hard scenarios: den312d 700-1000, Paris 900-1000, empty 700-1000")
     parser.add_argument("--steps", nargs="*", type=int, default=DEFAULT_STEPS,
                         help="Euler integration steps to sweep (default: 1 2 3 5)")
     parser.add_argument("--consensus", type=int, default=DEFAULT_CONSENSUS,
@@ -99,7 +109,11 @@ def main():
         with open(scen_path) as f:
             max_avail = len(f.readlines()) - 1
 
-        for n_agents in args.agents:
+        agent_counts = sorted(set(args.agents))
+        if args.extended and map_name in EXTENDED_AGENTS:
+            agent_counts = sorted(set(agent_counts) | set(EXTENDED_AGENTS[map_name]))
+
+        for n_agents in agent_counts:
             if n_agents > max_avail:
                 print(f"WARNING: {map_name} has only {max_avail} agents, skipping {n_agents}")
                 continue
@@ -117,10 +131,11 @@ def main():
 
     total = len(runs)
     print(f"{'='*60}")
-    print(f"Phase 1 Ablation: Euler Steps vs Quality")
+    print(f"Evaluation: Euler Steps vs Quality")
     print(f"Model: {args.model}")
+    print(f"Architecture: hidden_dim={args.hidden_dim}, num_layers={args.num_layers}")
     print(f"Maps: {len(map_configs)} | Agents: {args.agents} | Steps: {args.steps}")
-    print(f"Consensus: {args.consensus} | Tau: {args.tau} | GPU: {use_gpu}")
+    print(f"Extended: {args.extended} | Consensus: {args.consensus} | Tau: {args.tau} | GPU: {use_gpu}")
     print(f"Total runs: {total}")
     print(f"Output: {csv_path}")
     print(f"{'='*60}\n")
