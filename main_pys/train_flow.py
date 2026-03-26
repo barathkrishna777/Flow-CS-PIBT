@@ -97,7 +97,8 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
                 break
 
     if pp_dir:
-        print(f"Using PREPROCESSED dataset from {pp_dir}")
+        dirs = [d.strip() for d in pp_dir.split(",")] if "," in pp_dir else [pp_dir]
+        print(f"Using PREPROCESSED dataset from {' + '.join(dirs)}")
         full_dataset = PreprocessedFlowMAPFDataset(pp_dir)
     else:
         print(f"No preprocessed data found — using on-the-fly dataset (slow)")

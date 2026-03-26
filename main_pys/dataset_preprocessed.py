@@ -18,13 +18,30 @@ from tqdm import tqdm
 
 class PreprocessedFlowMAPFDataset(Dataset):
     def __init__(self, preprocessed_dir="data/preprocessed", validate=True):
-        self.preprocessed_dir = preprocessed_dir
-        all_files = sorted(glob.glob(os.path.join(preprocessed_dir, "*.pt")))
+        # Support multiple directories (comma-separated string or list)
+        if isinstance(preprocessed_dir, str):
+            dirs = [d.strip() for d in preprocessed_dir.split(",") if d.strip()]
+        elif isinstance(preprocessed_dir, (list, tuple)):
+            dirs = list(preprocessed_dir)
+        else:
+            dirs = [preprocessed_dir]
+
+        self.preprocessed_dir = dirs[0]  # primary dir (for cache files)
+        all_files = []
+        for d in dirs:
+            all_files.extend(glob.glob(os.path.join(d, "*.pt")))
+        all_files.sort()
+
         if len(all_files) == 0:
             raise RuntimeError(
-                f"No .pt files found in {preprocessed_dir}. "
+                f"No .pt files found in {dirs}. "
                 f"Run `python preprocess_dataset.py` first."
             )
+        if len(dirs) > 1:
+            for d in dirs:
+                n = len(glob.glob(os.path.join(d, "*.pt")))
+                print(f"  {d}: {n:,} files")
+            print(f"  Combined: {len(all_files):,} files")
 
         if validate:
             print(f"Validating {len(all_files):,} preprocessed files...")
