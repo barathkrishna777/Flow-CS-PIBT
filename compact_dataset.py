@@ -188,16 +188,28 @@ def main():
                      if os.path.basename(f) not in deleted_set and os.path.exists(f)]
         if to_delete:
             print(f"\nPhase 1: Deleting {len(to_delete):,} downsampled files "
-                  f"({num_workers} workers)...")
+                  f"({num_workers} workers)...", flush=True)
             freed = 0
+            t0 = time.time()
+            log_interval = max(1, len(to_delete) // 20)  # ~20 log lines
+
             with Pool(num_workers) as pool:
-                for sz in tqdm(pool.imap_unordered(delete_one_file, to_delete,
-                                                   chunksize=256),
-                               total=len(to_delete), desc="Deleting"):
+                for i, sz in enumerate(pool.imap_unordered(
+                        delete_one_file, to_delete, chunksize=256)):
                     freed += sz
-            # All files in to_delete are now gone
+                    if (i + 1) % log_interval == 0 or (i + 1) == len(to_delete):
+                        elapsed = time.time() - t0
+                        rate = (i + 1) / elapsed
+                        eta = (len(to_delete) - i - 1) / rate if rate > 0 else 0
+                        print(f"  [{i+1:,}/{len(to_delete):,}] "
+                              f"{freed/1e9:.2f} GB freed | "
+                              f"{rate:.0f} files/s | "
+                              f"ETA {eta:.0f}s", flush=True)
+
             deleted_set.update(os.path.basename(f) for f in to_delete)
-            print(f"  Freed {freed / 1e9:.2f} GB")
+            elapsed = time.time() - t0
+            print(f"  Done: freed {freed / 1e9:.2f} GB in {elapsed:.1f}s "
+                  f"({len(to_delete)/elapsed:.0f} files/s)", flush=True)
 
             with open(checkpoint_path, 'w') as f:
                 json.dump({"processed": list(processed_set),
@@ -213,25 +225,41 @@ def main():
         print("\nPhase 2: All files already compacted.")
     else:
         print(f"\nPhase 2: Compacting {len(to_compact):,} files "
-              f"({num_workers} workers)...")
+              f"({num_workers} workers)...", flush=True)
         total_old = 0
         total_new = 0
         errors = 0
         save_interval = 5000  # checkpoint every N files
+        log_interval = max(1, len(to_compact) // 50)  # ~50 log lines
+        t0 = time.time()
 
         with Pool(num_workers) as pool:
             results_iter = pool.imap_unordered(compact_one_file, to_compact,
                                                chunksize=64)
-            for i, (basename, old_sz, new_sz, err) in enumerate(
-                    tqdm(results_iter, total=len(to_compact), desc="Compacting")):
+            for i, (basename, old_sz, new_sz, err) in enumerate(results_iter):
                 if err is not None:
                     errors += 1
                     if errors <= 5:
-                        tqdm.write(f"  Error: {basename}: {err}")
+                        print(f"  Error: {basename}: {err}", flush=True)
                 else:
                     total_old += old_sz
                     total_new += new_sz
                     processed_set.add(basename)
+
+                # Progress log
+                if (i + 1) % log_interval == 0 or (i + 1) == len(to_compact):
+                    elapsed = time.time() - t0
+                    rate = (i + 1) / elapsed
+                    eta = (len(to_compact) - i - 1) / rate if rate > 0 else 0
+                    pct = (i + 1) / len(to_compact) * 100
+                    ratio_str = (f"{total_new/total_old:.1%}"
+                                 if total_old > 0 else "N/A")
+                    print(f"  [{i+1:,}/{len(to_compact):,} {pct:.0f}%] "
+                          f"{total_old/1e9:.2f} GB → {total_new/1e9:.2f} GB "
+                          f"({ratio_str}) | "
+                          f"{rate:.0f} files/s | "
+                          f"ETA {eta:.0f}s | "
+                          f"errors: {errors}", flush=True)
 
                 # Periodic checkpoint
                 if (i + 1) % save_interval == 0:
@@ -244,10 +272,11 @@ def main():
             json.dump({"processed": list(processed_set),
                        "deleted": list(deleted_set)}, f)
 
+        elapsed = time.time() - t0
         if total_old > 0:
             ratio = total_new / total_old
-            print(f"  Compressed: {total_old / 1e9:.2f} GB → {total_new / 1e9:.2f} GB "
-                  f"({ratio:.2%} of original)")
+            print(f"\n  Compressed: {total_old / 1e9:.2f} GB → {total_new / 1e9:.2f} GB "
+                  f"({ratio:.2%} of original) in {elapsed:.1f}s", flush=True)
         if errors > 0:
             print(f"  Errors: {errors}")
 
