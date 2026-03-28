@@ -2,6 +2,10 @@
 Lightning-fast dataset that loads pre-built PyG .pt files.
 No CPU preprocessing at all — just torch.load().
 
+Supports both original (float32) and compact (float16) formats.
+Compact files are automatically upcast to float32 on load so the
+model sees identical inputs regardless of on-disk format.
+
 On init, removes obviously corrupt files (<100 bytes).
 At runtime, catches any remaining corrupt files and returns
 a random valid sample instead of crashing the DataLoader.
@@ -14,6 +18,29 @@ import torch
 import numpy as np
 from torch.utils.data import Dataset, WeightedRandomSampler
 from tqdm import tqdm
+
+
+def _upcast_compact(data):
+    """Upcast compact (float16/int32) tensors to training dtypes.
+
+    Handles both original float32 files and compacted float16 files
+    transparently — if already float32, this is a no-op.
+    """
+    if data.x.dtype == torch.float16:
+        data.x = data.x.float()
+    if data.edge_attr.dtype == torch.float16:
+        data.edge_attr = data.edge_attr.float()
+    if data.y.dtype == torch.float16:
+        data.y = data.y.float()
+    if data.edge_index.dtype == torch.int32:
+        data.edge_index = data.edge_index.to(torch.int64)
+    if hasattr(data, 'node_weights') and data.node_weights is not None:
+        if data.node_weights.dtype == torch.float16:
+            data.node_weights = data.node_weights.float()
+    if hasattr(data, 'bd_pred') and data.bd_pred is not None:
+        if data.bd_pred.dtype == torch.float16:
+            data.bd_pred = data.bd_pred.float()
+    return data
 
 
 class PreprocessedFlowMAPFDataset(Dataset):
@@ -74,7 +101,8 @@ class PreprocessedFlowMAPFDataset(Dataset):
         for attempt in range(5):
             try:
                 target = idx if attempt == 0 else random.randint(0, len(self.files) - 1)
-                return torch.load(self.files[target], weights_only=False)
+                data = torch.load(self.files[target], weights_only=False)
+                return _upcast_compact(data)
             except Exception:
                 continue
         # All 5 attempts failed — shouldn't happen, but return a minimal dummy
