@@ -9,12 +9,12 @@ Optimizations applied:
 
 The script processes files in-place (overwrite + delete) to minimize
 disk usage during migration. Progress is checkpointed so it can resume
-after interruption.
+after interruption. Compaction is parallelized across CPU workers.
 
 Usage:
     python compact_dataset.py --dir data/preprocessed
     python compact_dataset.py --dir data/preprocessed --keep-every 3 --dry-run
-    python compact_dataset.py --dir data/preprocessed --resume
+    python compact_dataset.py --dir data/preprocessed --workers 64 --resume
 """
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ import json
 import os
 import sys
 import time
+from multiprocessing import Pool, cpu_count
 
 import torch
 import numpy as np
@@ -55,55 +56,58 @@ def derive_discrete_actions(velocities: torch.Tensor) -> torch.Tensor:
     return actions.to(torch.int8)
 
 
-def compact_one_file(filepath: str) -> tuple[int, int]:
+def compact_one_file(filepath: str) -> tuple[str, int, int, str | None]:
     """Load a .pt file, compress dtypes, add action labels, save back.
 
     Returns:
-        (old_size, new_size) in bytes.
+        (basename, old_size, new_size, error_or_None)
     """
-    old_size = os.path.getsize(filepath)
+    basename = os.path.basename(filepath)
+    try:
+        old_size = os.path.getsize(filepath)
 
-    data = torch.load(filepath, weights_only=False)
+        data = torch.load(filepath, weights_only=False)
 
-    # --- Dtype compression ---
-    # Node features: (N, 3, 9, 9) float32 → float16
-    if data.x.dtype == torch.float32:
-        data.x = data.x.half()
+        # --- Dtype compression ---
+        if data.x.dtype == torch.float32:
+            data.x = data.x.half()
+        if data.edge_index.dtype == torch.int64:
+            data.edge_index = data.edge_index.to(torch.int32)
+        if data.edge_attr.dtype == torch.float32:
+            data.edge_attr = data.edge_attr.half()
+        if data.y.dtype == torch.float32:
+            data.y = data.y.half()
+        if hasattr(data, 'node_weights') and data.node_weights is not None:
+            if data.node_weights.dtype == torch.float32:
+                data.node_weights = data.node_weights.half()
+        if hasattr(data, 'bd_pred') and data.bd_pred is not None:
+            if data.bd_pred.dtype == torch.float32:
+                data.bd_pred = data.bd_pred.half()
 
-    # Edge index: (2, E) int64 → int32
-    if data.edge_index.dtype == torch.int64:
-        data.edge_index = data.edge_index.to(torch.int32)
+        # --- Add discrete action labels ---
+        if not hasattr(data, 'action_label') or data.action_label is None:
+            data.action_label = derive_discrete_actions(data.y)
 
-    # Edge attributes: (E, 2) float32 → float16
-    if data.edge_attr.dtype == torch.float32:
-        data.edge_attr = data.edge_attr.half()
+        # --- Mark as compact format ---
+        data.compact_version = 1
 
-    # Target velocity: (N, 2) float32 → float16
-    if data.y.dtype == torch.float32:
-        data.y = data.y.half()
+        # Save back (overwrite)
+        torch.save(data, filepath, pickle_protocol=4)
+        new_size = os.path.getsize(filepath)
 
-    # Node weights: (N,) float32 → float16
-    if hasattr(data, 'node_weights') and data.node_weights is not None:
-        if data.node_weights.dtype == torch.float32:
-            data.node_weights = data.node_weights.half()
+        return basename, old_size, new_size, None
+    except Exception as e:
+        return basename, 0, 0, str(e)
 
-    # BD predictions: (N, 5) float32 → float16
-    if hasattr(data, 'bd_pred') and data.bd_pred is not None:
-        if data.bd_pred.dtype == torch.float32:
-            data.bd_pred = data.bd_pred.half()
 
-    # --- Add discrete action labels ---
-    if not hasattr(data, 'action_label') or data.action_label is None:
-        data.action_label = derive_discrete_actions(data.y)
-
-    # --- Mark as compact format ---
-    data.compact_version = 1
-
-    # Save back (overwrite)
-    torch.save(data, filepath, pickle_protocol=4)
-    new_size = os.path.getsize(filepath)
-
-    return old_size, new_size
+def delete_one_file(filepath: str) -> int:
+    """Delete a file and return its size (0 on error)."""
+    try:
+        sz = os.path.getsize(filepath)
+        os.remove(filepath)
+        return sz
+    except OSError:
+        return 0
 
 
 def main():
@@ -115,12 +119,16 @@ def main():
     parser.add_argument("--dry-run", action="store_true",
                         help="Show what would happen without modifying files")
     parser.add_argument("--resume", action="store_true",
-                        help="Skip already-compacted files (detected by dtype)")
+                        help="Skip already-compacted files (detected by checkpoint)")
     parser.add_argument("--no-downsample", action="store_true",
                         help="Only compress dtypes, don't delete any files")
+    parser.add_argument("--workers", type=int, default=0,
+                        help="Number of parallel workers (default: all CPU cores)")
     parser.add_argument("--verify-count", type=int, default=5,
                         help="Number of random files to verify after compaction")
     args = parser.parse_args()
+
+    num_workers = args.workers if args.workers > 0 else cpu_count()
 
     if not os.path.isdir(args.dir):
         print(f"ERROR: directory not found: {args.dir}", file=sys.stderr)
@@ -135,6 +143,7 @@ def main():
 
     total_files = len(all_files)
     print(f"Found {total_files:,} files in {args.dir}")
+    print(f"Workers: {num_workers}")
 
     # Checkpoint file for resumable processing
     checkpoint_path = os.path.join(args.dir, ".compact_checkpoint.json")
@@ -173,59 +182,62 @@ def main():
         print("\n[DRY RUN] No files modified.")
         return
 
-    # Phase 1: Delete files we don't need (frees space for compaction)
+    # ── Phase 1: Delete files we don't need (parallel) ──────────────────
     if delete_files:
-        # Filter out already-deleted files
         to_delete = [f for f in delete_files
                      if os.path.basename(f) not in deleted_set and os.path.exists(f)]
         if to_delete:
-            print(f"\nPhase 1: Deleting {len(to_delete):,} downsampled files...")
+            print(f"\nPhase 1: Deleting {len(to_delete):,} downsampled files "
+                  f"({num_workers} workers)...")
             freed = 0
-            for f in tqdm(to_delete, desc="Deleting"):
-                try:
-                    freed += os.path.getsize(f)
-                    os.remove(f)
-                    deleted_set.add(os.path.basename(f))
-                except OSError:
-                    pass
+            with Pool(num_workers) as pool:
+                for sz in tqdm(pool.imap_unordered(delete_one_file, to_delete,
+                                                   chunksize=256),
+                               total=len(to_delete), desc="Deleting"):
+                    freed += sz
+            # All files in to_delete are now gone
+            deleted_set.update(os.path.basename(f) for f in to_delete)
             print(f"  Freed {freed / 1e9:.2f} GB")
 
-            # Save checkpoint
             with open(checkpoint_path, 'w') as f:
                 json.dump({"processed": list(processed_set),
                            "deleted": list(deleted_set)}, f)
         else:
             print("\nPhase 1: All downsample deletions already done.")
 
-    # Phase 2: Compress kept files in-place
+    # ── Phase 2: Compress kept files in-place (parallel) ────────────────
     to_compact = [f for f in keep_files
                   if os.path.basename(f) not in processed_set and os.path.exists(f)]
 
     if not to_compact:
         print("\nPhase 2: All files already compacted.")
     else:
-        print(f"\nPhase 2: Compacting {len(to_compact):,} files...")
+        print(f"\nPhase 2: Compacting {len(to_compact):,} files "
+              f"({num_workers} workers)...")
         total_old = 0
         total_new = 0
         errors = 0
-        save_interval = 1000  # checkpoint every N files
+        save_interval = 5000  # checkpoint every N files
 
-        for i, filepath in enumerate(tqdm(to_compact, desc="Compacting")):
-            try:
-                old_sz, new_sz = compact_one_file(filepath)
-                total_old += old_sz
-                total_new += new_sz
-                processed_set.add(os.path.basename(filepath))
-            except Exception as e:
-                errors += 1
-                if errors <= 5:
-                    tqdm.write(f"  Error: {filepath}: {e}")
+        with Pool(num_workers) as pool:
+            results_iter = pool.imap_unordered(compact_one_file, to_compact,
+                                               chunksize=64)
+            for i, (basename, old_sz, new_sz, err) in enumerate(
+                    tqdm(results_iter, total=len(to_compact), desc="Compacting")):
+                if err is not None:
+                    errors += 1
+                    if errors <= 5:
+                        tqdm.write(f"  Error: {basename}: {err}")
+                else:
+                    total_old += old_sz
+                    total_new += new_sz
+                    processed_set.add(basename)
 
-            # Periodic checkpoint
-            if (i + 1) % save_interval == 0:
-                with open(checkpoint_path, 'w') as f:
-                    json.dump({"processed": list(processed_set),
-                               "deleted": list(deleted_set)}, f)
+                # Periodic checkpoint
+                if (i + 1) % save_interval == 0:
+                    with open(checkpoint_path, 'w') as f:
+                        json.dump({"processed": list(processed_set),
+                                   "deleted": list(deleted_set)}, f)
 
         # Final checkpoint
         with open(checkpoint_path, 'w') as f:
@@ -239,7 +251,7 @@ def main():
         if errors > 0:
             print(f"  Errors: {errors}")
 
-    # Phase 3: Verify random samples
+    # ── Phase 3: Verify random samples ──────────────────────────────────
     remaining_files = sorted(glob.glob(os.path.join(args.dir, "sample_*.pt")))
     print(f"\nFinal file count: {len(remaining_files):,}")
 
@@ -260,10 +272,10 @@ def main():
                 assert data.x.shape == (n_agents, 3, 9, 9), f"x shape: {data.x.shape}"
                 assert data.y.shape == (n_agents, 2), f"y shape: {data.y.shape}"
                 assert data.action_label.shape == (n_agents,), f"action_label shape: {data.action_label.shape}"
-                tqdm.write(f"  ✓ {os.path.basename(vf)}: {n_agents} agents, "
-                           f"{os.path.getsize(vf)/1024:.0f} KB")
+                print(f"  OK {os.path.basename(vf)}: {n_agents} agents, "
+                      f"{os.path.getsize(vf)/1024:.0f} KB")
             except Exception as e:
-                tqdm.write(f"  ✗ {os.path.basename(vf)}: {e}")
+                print(f"  FAIL {os.path.basename(vf)}: {e}")
 
     # Clean up checkpoint if fully done
     if os.path.exists(checkpoint_path):
