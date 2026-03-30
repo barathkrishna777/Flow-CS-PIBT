@@ -162,7 +162,7 @@ def main():
     parser.add_argument("--model-path", default=None)
     parser.add_argument("--output-csv", required=True)
     parser.add_argument("--viz-dir", default=None)
-    parser.add_argument("--shield-type", choices=["orca", "simple", "none"], default="orca")
+    parser.add_argument("--shield-type", choices=["orca", "heuristic-orca", "simple", "none"], default="orca")
     parser.add_argument("--num-integration-steps", type=int, default=3)
     parser.add_argument("--tau", type=float, default=0.3)
     parser.add_argument("--k", type=int, default=4)

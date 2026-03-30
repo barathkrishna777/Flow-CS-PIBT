@@ -6,6 +6,11 @@ import numpy as np
 
 from main_pys.model_inputs import load_grid_map_from_file
 
+try:
+    import rvo2  # type: ignore
+except ImportError:
+    rvo2 = None
+
 
 def parse_scene_file(scen_file: str, agent_num: Optional[int] = None) -> Tuple[np.ndarray, np.ndarray]:
     start_locations = []
@@ -59,11 +64,7 @@ class StepMetrics:
 
 
 class ORCAStyleShield:
-    """Lightweight ORCA-inspired local velocity projector.
-
-    This is intentionally dependency-free so the code can run on Lambda
-    without requiring a heavyweight external ORCA binding.
-    """
+    """ORCA-backed shield with heuristic fallback."""
 
     def __init__(
         self,
@@ -80,8 +81,70 @@ class ORCAStyleShield:
         self.time_horizon = time_horizon
         self.obstacle_horizon = obstacle_horizon
         self.iterations = iterations
+        self.neighbor_dist = max(4.0 * agent_radius, 2.0)
+        self.max_neighbors = 16
+        self._obstacle_cache = {}
 
     def project(
+        self,
+        positions: np.ndarray,
+        preferred_velocities: np.ndarray,
+        obstacle_map: np.ndarray,
+        use_true_orca: bool = True,
+    ) -> np.ndarray:
+        if use_true_orca and rvo2 is not None:
+            try:
+                return self._project_with_rvo2(positions, preferred_velocities, obstacle_map)
+            except Exception:
+                # Keep the heuristic path available as a robust fallback.
+                pass
+        return self._project_heuristic(positions, preferred_velocities, obstacle_map)
+
+    def _project_with_rvo2(
+        self,
+        positions: np.ndarray,
+        preferred_velocities: np.ndarray,
+        obstacle_map: np.ndarray,
+    ) -> np.ndarray:
+        safe = np.asarray(preferred_velocities, dtype=np.float32).copy()
+        safe = self._clip_speeds(safe)
+
+        sim = rvo2.PyRVOSimulator(
+            self.dt,
+            self.neighbor_dist,
+            self.max_neighbors,
+            self.time_horizon,
+            self.obstacle_horizon,
+            self.agent_radius,
+            self.max_speed,
+        )
+
+        for polygon in self._obstacle_polygons(obstacle_map):
+            sim.addObstacle(polygon)
+        sim.processObstacles()
+
+        for pos, vel in zip(np.asarray(positions, dtype=np.float32), safe):
+            sim.addAgent(
+                tuple(float(x) for x in pos),
+                self.neighbor_dist,
+                self.max_neighbors,
+                self.time_horizon,
+                self.obstacle_horizon,
+                self.agent_radius,
+                self.max_speed,
+                tuple(float(x) for x in vel),
+            )
+
+        for agent_idx, vel in enumerate(safe):
+            sim.setAgentPrefVelocity(agent_idx, tuple(float(x) for x in vel))
+
+        sim.doStep()
+        projected = np.zeros_like(safe)
+        for agent_idx in range(len(safe)):
+            projected[agent_idx] = np.asarray(sim.getAgentVelocity(agent_idx), dtype=np.float32)
+        return self._clip_speeds(projected)
+
+    def _project_heuristic(
         self,
         positions: np.ndarray,
         preferred_velocities: np.ndarray,
@@ -95,6 +158,27 @@ class ORCAStyleShield:
             safe = self._apply_obstacle_constraints(positions, safe, obstacle_map)
             safe = self._clip_speeds(safe)
         return safe
+
+    def _obstacle_polygons(self, obstacle_map: np.ndarray):
+        key = (obstacle_map.shape, obstacle_map.tobytes())
+        cached = self._obstacle_cache.get(key)
+        if cached is not None:
+            return cached
+
+        polygons = []
+        rows, cols = np.where(obstacle_map == 1)
+        inflate = self.agent_radius
+        for r, c in zip(rows.tolist(), cols.tolist()):
+            polygons.append(
+                [
+                    (r - inflate, c - inflate),
+                    (r - inflate, c + 1.0 + inflate),
+                    (r + 1.0 + inflate, c + 1.0 + inflate),
+                    (r + 1.0 + inflate, c - inflate),
+                ]
+            )
+        self._obstacle_cache[key] = polygons
+        return polygons
 
     def _clip_speeds(self, velocities: np.ndarray) -> np.ndarray:
         norms = np.linalg.norm(velocities, axis=1, keepdims=True)
@@ -214,9 +298,21 @@ class ContinuousMAPFEnv:
             return self._clip_speeds(preferred_velocities)
         if shield_type == "simple":
             return self._simple_safety_filter(preferred_velocities)
+        if shield_type == "heuristic-orca":
+            return self._shield.project(
+                self.positions,
+                preferred_velocities,
+                self.obstacle_map,
+                use_true_orca=False,
+            )
         if shield_type != "orca":
             raise ValueError(f"Unsupported shield type: {shield_type}")
-        return self._shield.project(self.positions, preferred_velocities, self.obstacle_map)
+        return self._shield.project(
+            self.positions,
+            preferred_velocities,
+            self.obstacle_map,
+            use_true_orca=True,
+        )
 
     def step(self, velocities: np.ndarray, shield_type: str = "orca") -> Tuple[np.ndarray, bool, Dict[str, float]]:
         safe_velocities = self.apply_shield(velocities, shield_type=shield_type)
