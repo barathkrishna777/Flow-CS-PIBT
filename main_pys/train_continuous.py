@@ -1,6 +1,8 @@
 import argparse
 import os
+import random
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.optim import AdamW
@@ -12,6 +14,23 @@ from tqdm import tqdm
 from main_pys.dataset_continuous import ContinuousFlowDataset, build_continuous_weighted_sampler
 from main_pys.generative_model import FlowGNNModel
 from main_pys.model_inputs import labels_to_direction_vectors
+
+
+def set_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    if hasattr(torch.backends, "cudnn"):
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+
+def seed_worker(worker_id: int) -> None:
+    worker_seed = torch.initial_seed() % (2 ** 32)
+    random.seed(worker_seed)
+    np.random.seed(worker_seed)
 
 
 def compute_flow_loss(model, batch, device, use_amp, action_loss_weight=0.2):
@@ -65,8 +84,10 @@ def validate(model, loader, device, use_amp, policy_type):
 
 
 def train(args):
+    set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
     use_amp = device.type == "cuda"
+    data_loader_generator = torch.Generator().manual_seed(args.seed)
 
     dataset = ContinuousFlowDataset(
         data_dir=args.data_dir,
@@ -83,7 +104,7 @@ def train(args):
         train_dataset, val_dataset = random_split(
             dataset,
             [train_size, val_size],
-            generator=torch.Generator().manual_seed(42),
+            generator=torch.Generator().manual_seed(args.seed),
         )
     else:
         train_dataset = dataset
@@ -111,6 +132,8 @@ def train(args):
         num_workers=workers,
         pin_memory=(device.type == "cuda"),
         persistent_workers=workers > 0,
+        worker_init_fn=seed_worker if workers > 0 else None,
+        generator=data_loader_generator,
     )
     val_loader = None
     if val_dataset is not None:
@@ -121,6 +144,8 @@ def train(args):
             num_workers=min(4, workers),
             pin_memory=(device.type == "cuda"),
             persistent_workers=workers > 0,
+            worker_init_fn=seed_worker if workers > 0 else None,
+            generator=data_loader_generator,
         )
 
     model = FlowGNNModel(
@@ -136,6 +161,7 @@ def train(args):
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
     best_val = float("inf")
+    os.makedirs(args.output_dir, exist_ok=True)
 
     prefix = f"continuous_{args.policy_type}_{args.run_name}_" if args.run_name else f"continuous_{args.policy_type}_"
     for epoch in range(args.epochs):
@@ -185,13 +211,14 @@ def train(args):
                 "wait_threshold": args.wait_threshold,
                 "max_speed": args.max_speed,
             },
+            "seed": args.seed,
             "train_loss": avg_train,
             "val_loss": val_loss,
         }
-        torch.save(ckpt, f"{prefix}epoch_{epoch + 1}.pt")
+        torch.save(ckpt, os.path.join(args.output_dir, f"{prefix}epoch_{epoch + 1}.pt"))
         if val_loss <= best_val:
             best_val = val_loss
-            torch.save(ckpt, f"{prefix}best.pt")
+            torch.save(ckpt, os.path.join(args.output_dir, f"{prefix}best.pt"))
 
 
 def main():
@@ -200,6 +227,7 @@ def main():
     parser.add_argument("--map-dir", required=True, help="Directory of .map files")
     parser.add_argument("--policy-type", choices=["flow", "discrete"], default="flow")
     parser.add_argument("--run-name", default="")
+    parser.add_argument("--output-dir", default=".")
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=0)
     parser.add_argument("--num-workers", type=int, default=0)
@@ -214,6 +242,7 @@ def main():
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--val-split", type=float, default=0.05)
     parser.add_argument("--no-weighted-sampling", action="store_true")
+    parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--cpu", action="store_true")
     args = parser.parse_args()
     train(args)

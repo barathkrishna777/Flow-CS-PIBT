@@ -114,14 +114,18 @@ python3 -m main_pys.train_continuous \
   --data-dir data/continuous \
   --map-dir data/mapf-map \
   --policy-type flow \
-  --run-name conti_flow_v1
+  --run-name conti_flow_v1 \
+  --output-dir checkpoints/continuous \
+  --seed 0
 
 # Train the continuous discrete baseline
 python3 -m main_pys.train_continuous \
   --data-dir data/continuous \
   --map-dir data/mapf-map \
   --policy-type discrete \
-  --run-name conti_disc_v1
+  --run-name conti_disc_v1 \
+  --output-dir checkpoints/continuous \
+  --seed 0
 
 # Evaluate a learned continuous policy
 python3 eval_continuous.py \
@@ -130,10 +134,30 @@ python3 eval_continuous.py \
   --maps empty-48-48 random-32-32-10 \
   --agent-counts 100 200 \
   --policy flow \
-  --model-path continuous_flow_conti_flow_v1_best.pt \
+  --model-path checkpoints/continuous/continuous_flow_conti_flow_v1_best.pt \
+  --run-name conti_flow_v1 \
+  --train-seed 0 \
   --output-csv evals/continuous_flow_eval.csv \
   --viz-dir logs/continuous_viz
+
+# Run the Phase A open-space benchmark from PLAN.md
+python3 run_continuous_benchmark.py \
+  --map-dir data/mapf-map \
+  --scen-dir data/scen-random \
+  --maps empty-48-48 \
+  --agent-counts 32 64 96 128 \
+  --max-scenarios 5 \
+  --data-dir data/continuous_phase_a \
+  --checkpoint-dir checkpoints/continuous_phase_a \
+  --benchmark-dir benchmarks/continuous_phase_a \
+  --run-prefix phaseA_empty48 \
+  --epochs 30 \
+  --seeds 0 1 2 \
+  --enable-consensus-sweep \
+  --make-viz
 ```
+
+The benchmark runner orchestrates shared data generation, 3-seed training for flow and the discretized continuous baseline, ORCA/learned-policy evaluation, optional `1/3/5` consensus sweeps, and summary plots/tables.
 
 ### Visualization
 ```sh

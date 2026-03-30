@@ -2,12 +2,10 @@ import argparse
 import csv
 import glob
 import os
+import random
 import time
 from typing import Dict, Iterable, List, Optional, Tuple
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
@@ -21,6 +19,21 @@ from main_pys.model_inputs import (
 
 
 DEFAULT_MAPS = ["empty-48-48", "random-32-32-10"]
+
+
+def get_pyplot():
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    return plt
+
+
+def set_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 def find_scenarios(scen_dir: str, map_name: str, max_scenarios: int) -> List[str]:
@@ -112,6 +125,7 @@ def run_orca_baseline(env, positions, goals, max_steps: int) -> Dict[str, float]
 
 
 def visualize_trajectory(env, output_path: str, title: str) -> None:
+    plt = get_pyplot()
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     positions = np.asarray(env.history_positions)
     plt.figure(figsize=(6, 6))
@@ -134,6 +148,14 @@ def write_rows(output_csv: str, rows: List[Dict[str, object]]) -> None:
         "agents",
         "policy",
         "shield_type",
+        "run_name",
+        "model_name",
+        "model_path",
+        "train_seed",
+        "eval_seed",
+        "num_integration_steps",
+        "num_consensus_samples",
+        "tau",
         "success",
         "agents_at_goal",
         "agent_fraction_at_goal",
@@ -164,6 +186,9 @@ def main():
     parser.add_argument("--max-scenarios", type=int, default=1)
     parser.add_argument("--policy", choices=["flow", "discrete", "orca"], default="orca")
     parser.add_argument("--model-path", default=None)
+    parser.add_argument("--run-name", default="")
+    parser.add_argument("--train-seed", type=int, default=None)
+    parser.add_argument("--eval-seed", type=int, default=0)
     parser.add_argument("--output-csv", required=True)
     parser.add_argument("--viz-dir", default=None)
     parser.add_argument("--shield-type", choices=["orca", "heuristic-orca", "simple", "none"], default="orca")
@@ -180,6 +205,7 @@ def main():
     parser.add_argument("--cpu", action="store_true")
     args = parser.parse_args()
 
+    set_seed(args.eval_seed)
     device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
     model = None
     if args.policy != "orca":
@@ -227,6 +253,14 @@ def main():
                     "agents": agent_num,
                     "policy": args.policy,
                     "shield_type": args.shield_type if args.policy != "orca" else "orca",
+                    "run_name": args.run_name,
+                    "model_name": os.path.basename(args.model_path) if args.model_path else "",
+                    "model_path": args.model_path or "",
+                    "train_seed": "" if args.train_seed is None else args.train_seed,
+                    "eval_seed": args.eval_seed,
+                    "num_integration_steps": args.num_integration_steps,
+                    "num_consensus_samples": args.num_consensus_samples,
+                    "tau": args.tau,
                     **metrics,
                 }
                 rows.append(row)
