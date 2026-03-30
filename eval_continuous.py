@@ -59,6 +59,7 @@ def run_learned_policy(
     device: torch.device,
     shield_type: str,
     num_integration_steps: int,
+    num_consensus_samples: int,
     tau: float,
 ) -> Dict[str, float]:
     start_time = time.time()
@@ -72,12 +73,15 @@ def run_learned_policy(
         with torch.no_grad():
             if policy_type == "flow":
                 dt = 1.0 / max(num_integration_steps, 1)
-                v = torch.randn(n_agents, 2, device=device)
-                for step in range(num_integration_steps):
-                    t = torch.full((n_agents, 1), step * dt, device=device)
-                    flow = model(v, t, data)
-                    v = v + flow * dt
-                velocities = v.cpu().numpy() * env.max_speed
+                all_velocities = torch.zeros(n_agents, 2, device=device)
+                for _ in range(max(num_consensus_samples, 1)):
+                    v = torch.randn(n_agents, 2, device=device)
+                    for step in range(num_integration_steps):
+                        t = torch.full((n_agents, 1), step * dt, device=device)
+                        flow = model(v, t, data)
+                        v = v + flow * dt
+                    all_velocities += v
+                velocities = (all_velocities / max(num_consensus_samples, 1)).cpu().numpy() * env.max_speed
             else:
                 zero_v = torch.zeros(n_agents, 2, device=device)
                 zero_t = torch.zeros(n_agents, 1, device=device)
@@ -164,6 +168,7 @@ def main():
     parser.add_argument("--viz-dir", default=None)
     parser.add_argument("--shield-type", choices=["orca", "heuristic-orca", "simple", "none"], default="orca")
     parser.add_argument("--num-integration-steps", type=int, default=3)
+    parser.add_argument("--num-consensus-samples", type=int, default=1)
     parser.add_argument("--tau", type=float, default=0.3)
     parser.add_argument("--k", type=int, default=4)
     parser.add_argument("--m", type=int, default=5)
@@ -213,6 +218,7 @@ def main():
                         device,
                         args.shield_type,
                         args.num_integration_steps,
+                        args.num_consensus_samples,
                         args.tau,
                     )
                 row = {
