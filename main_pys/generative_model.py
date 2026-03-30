@@ -4,14 +4,27 @@ import torch.nn.functional as F
 import torch_geometric.nn as pyg_nn
 
 class FlowGNNModel(nn.Module):
-    def __init__(self, k=4, hidden_dim=1024, num_layers=6):
+    def __init__(
+        self,
+        k=4,
+        hidden_dim=1024,
+        num_layers=6,
+        num_input_channels=3,
+        aux_feature_dim=5,
+        action_dim=5,
+        velocity_dim=2,
+    ):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
+        self.num_input_channels = num_input_channels
+        self.aux_feature_dim = aux_feature_dim
+        self.action_dim = action_dim
+        self.velocity_dim = velocity_dim
         
         # --- 1. Visual Context Encoder ---
         self.conv = nn.Sequential(
-            nn.Conv2d(3, 64, kernel_size=3, padding=1),
+            nn.Conv2d(num_input_channels, 64, kernel_size=3, padding=1),
             nn.BatchNorm2d(64),
             nn.SiLU(),
             nn.MaxPool2d(2), 
@@ -31,14 +44,14 @@ class FlowGNNModel(nn.Module):
         cnn_out_dim = 256 * spatial_size * spatial_size
         
         self.visual_proj = nn.Sequential(
-            nn.Linear(cnn_out_dim + 5, hidden_dim),
+            nn.Linear(cnn_out_dim + aux_feature_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.SiLU(),
             nn.Dropout(0.15) 
         )
         
         # --- 2. GNN with Residual Connections ---
-        gnn_input_dim = hidden_dim + 2 + 1 
+        gnn_input_dim = hidden_dim + velocity_dim + 1 
         self.input_proj = nn.Linear(gnn_input_dim, hidden_dim)
         
         self.convs = nn.ModuleList()
@@ -56,7 +69,7 @@ class FlowGNNModel(nn.Module):
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.SiLU(),
             nn.Dropout(0.15),
-            nn.Linear(hidden_dim // 2, 2)
+            nn.Linear(hidden_dim // 2, velocity_dim)
         )
 
         # --- 4. Auxiliary Action Head (5-class: wait, right, down, up, left) ---
@@ -65,15 +78,18 @@ class FlowGNNModel(nn.Module):
             nn.Linear(hidden_dim, action_head_dim),
             nn.SiLU(),
             nn.Dropout(0.15),
-            nn.Linear(action_head_dim, 5)
+            nn.Linear(action_head_dim, action_dim)
         )
 
     def forward(self, v_t, t, data, return_action_logits=False):
-        x, edge_index, bd_pred = data.x, data.edge_index, data.bd_pred
+        x, edge_index = data.x, data.edge_index
+        aux_features = getattr(data, "aux_features", None)
+        if aux_features is None:
+            aux_features = data.bd_pred
 
         # 1. Process visual grid
         cnn_out = self.conv(x)
-        visual_features = torch.hstack([cnn_out, bd_pred])
+        visual_features = torch.hstack([cnn_out, aux_features])
         visual_emb = self.visual_proj(visual_features)
 
         # 2. Inject Flow variables

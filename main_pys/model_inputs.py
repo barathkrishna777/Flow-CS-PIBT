@@ -146,3 +146,168 @@ def normalize_graph_data(data, k, edge_normalize="k", bd_normalize="center"):
     assert(data.x[:,1].max() <= 1.0 and data.x[:,1].min() >= -1.0) # Make sure all agents are on empty space
     assert(data.x[:,0,k,k].all() == 0) # Make sure all agents are on empty space
     return data
+
+
+def load_grid_map_from_file(map_file):
+    with open(map_file, 'r') as f:
+        f.readline()
+        height = int(f.readline().split()[1])
+        width = int(f.readline().split()[1])
+        f.readline()
+        map_data = np.zeros((height, width), dtype=np.int8)
+        for r in range(height):
+            line = f.readline().strip()
+            for c in range(width):
+                if line[c] in ['@', 'T', 'O']:
+                    map_data[r, c] = 1
+    return map_data
+
+
+def extract_continuous_patches(grid, positions, k):
+    """Rasterize local obstacle patches around float positions.
+
+    positions are in map coordinates with cell centers at integer + 0.5.
+    """
+    positions = np.asarray(positions, dtype=np.float32)
+    offsets = np.arange(-k, k + 1, dtype=np.float32)
+    row_coords = positions[:, 0][:, None, None] + offsets[None, :, None]
+    col_coords = positions[:, 1][:, None, None] + offsets[None, None, :]
+    row_idx = np.floor(row_coords).astype(np.int64)
+    col_idx = np.floor(col_coords).astype(np.int64)
+    row_idx = np.clip(row_idx, 0, grid.shape[0] - 1)
+    col_idx = np.clip(col_idx, 0, grid.shape[1] - 1)
+    return grid[row_idx, col_idx].astype(np.float32)
+
+
+def build_continuous_neighbor_graph(pos_list, m, neighbor_radius=None):
+    pos_list = np.asarray(pos_list, dtype=np.float32)
+    num_agents = len(pos_list)
+    if num_agents <= 1:
+        return np.zeros((2, 0), dtype=np.int64), np.zeros((0, 2), dtype=np.float32)
+
+    deltas = pos_list[:, None, :] - pos_list[None, :, :]
+    dists = np.einsum('ijk,ijk->ij', deltas, deltas, optimize='optimal').astype(np.float32)
+    np.fill_diagonal(dists, np.inf)
+
+    if neighbor_radius is not None:
+        dists[dists > neighbor_radius ** 2] = np.inf
+
+    m_eff = min(max(m, 1), max(num_agents - 1, 1))
+    part = np.argpartition(dists, m_eff, axis=1)[:, :m_eff]
+    part_dists = np.take_along_axis(dists, part, axis=1)
+    order = np.argsort(part_dists, axis=1)
+    closest = np.take_along_axis(part, order, axis=1)
+    neighbor_dists = dists[np.arange(num_agents)[:, None], closest]
+    valid = np.isfinite(neighbor_dists)
+
+    src = np.repeat(np.arange(num_agents)[:, None], closest.shape[1], axis=1)
+    edge_indices = np.stack([src, closest])[:, valid]
+    edge_features = deltas[edge_indices[0], edge_indices[1]].astype(np.float32)
+    return edge_indices, edge_features
+
+
+def velocity_to_direction_labels(velocities, num_directions=8, wait_threshold=0.1):
+    velocities = np.asarray(velocities, dtype=np.float32)
+    norms = np.linalg.norm(velocities, axis=1)
+    labels = np.zeros(len(velocities), dtype=np.int64)
+    moving = norms >= wait_threshold
+    if np.any(moving):
+        angles = np.arctan2(velocities[moving, 0], velocities[moving, 1])
+        bins = np.floor(((angles + np.pi) / (2 * np.pi)) * num_directions).astype(np.int64)
+        bins = np.mod(bins, num_directions)
+        labels[moving] = bins + 1
+    return labels
+
+
+def labels_to_direction_vectors(labels, num_directions=8):
+    labels = np.asarray(labels, dtype=np.int64)
+    vecs = np.zeros((len(labels), 2), dtype=np.float32)
+    moving = labels > 0
+    if np.any(moving):
+        angles = ((labels[moving] - 1).astype(np.float32) + 0.5) * (2 * np.pi / num_directions) - np.pi
+        vecs[moving, 0] = np.sin(angles)
+        vecs[moving, 1] = np.cos(angles)
+    return vecs
+
+
+def create_continuous_data_object(
+    pos_list,
+    goal_locs,
+    grid,
+    k,
+    m,
+    labels=None,
+    action_labels=None,
+    neighbor_radius=None,
+    max_speed=1.0,
+):
+    pos_list = np.asarray(pos_list, dtype=np.float32)
+    goal_locs = np.asarray(goal_locs, dtype=np.float32)
+    num_agents = len(pos_list)
+    patch_size = 2 * k + 1
+
+    map_patches = extract_continuous_patches(grid, pos_list, k)
+    rel_goal = goal_locs - pos_list
+    goal_dx = np.broadcast_to(rel_goal[:, 0][:, None, None], (num_agents, patch_size, patch_size)).astype(np.float32)
+    goal_dy = np.broadcast_to(rel_goal[:, 1][:, None, None], (num_agents, patch_size, patch_size)).astype(np.float32)
+
+    deltas = pos_list[:, None, :] - pos_list[None, :, :]
+    dists = np.sqrt(np.sum(deltas ** 2, axis=2, dtype=np.float32)).astype(np.float32)
+    agent_patch = np.zeros((num_agents, patch_size, patch_size), dtype=np.float32)
+    offsets = np.arange(-k, k + 1, dtype=np.float32)
+    row_grid, col_grid = np.meshgrid(offsets, offsets, indexing='ij')
+    for i in range(num_agents):
+        rel = pos_list - pos_list[i]
+        occupancy = np.zeros_like(agent_patch[i])
+        for j in range(num_agents):
+            if i == j:
+                continue
+            sigma = max(0.5, dists[i, j])
+            occupancy += np.exp(-((row_grid - rel[j, 0]) ** 2 + (col_grid - rel[j, 1]) ** 2) / (2 * sigma ** 2))
+        agent_patch[i] = np.clip(occupancy, 0.0, 1.0)
+
+    node_features = np.stack([map_patches, goal_dx, goal_dy, agent_patch], axis=1).astype(np.float32)
+    edge_index, edge_attr = build_continuous_neighbor_graph(pos_list, m, neighbor_radius=neighbor_radius)
+
+    goal_dist = np.linalg.norm(rel_goal, axis=1, keepdims=True)
+    at_goal = (goal_dist <= 0.25).astype(np.float32)
+    aux_features = np.concatenate(
+        [
+            np.clip(rel_goal / max(k, 1), -1.0, 1.0),
+            np.clip(goal_dist / max(k, 1), 0.0, 1.0),
+            at_goal,
+            np.full((num_agents, 1), max_speed, dtype=np.float32),
+        ],
+        axis=1,
+    ).astype(np.float32)
+
+    if labels is None:
+        labels = np.zeros((num_agents, 2), dtype=np.float32)
+    if action_labels is None:
+        action_labels = velocity_to_direction_labels(labels)
+
+    return Data(
+        x=torch.from_numpy(node_features),
+        edge_index=torch.from_numpy(edge_index),
+        edge_attr=torch.from_numpy(edge_attr),
+        aux_features=torch.from_numpy(aux_features),
+        y=torch.from_numpy(np.asarray(labels, dtype=np.float32)),
+        action_label=torch.from_numpy(np.asarray(action_labels, dtype=np.int64)),
+    )
+
+
+def normalize_continuous_graph_data(data, k, max_speed=1.0):
+    data.edge_attr = data.edge_attr.float() / max(float(k), 1.0)
+    data.edge_attr = torch.clamp(data.edge_attr, min=-1.0, max=1.0)
+    data.x = data.x.float()
+    data.x[:, 0] = torch.clamp(data.x[:, 0], 0.0, 1.0)
+    data.x[:, 1] = torch.clamp(data.x[:, 1] / max(float(k), 1.0), -1.0, 1.0)
+    data.x[:, 2] = torch.clamp(data.x[:, 2] / max(float(k), 1.0), -1.0, 1.0)
+    data.x[:, 3] = torch.clamp(data.x[:, 3], 0.0, 1.0)
+    if hasattr(data, "y") and data.y is not None:
+        data.y = data.y.float() / max(float(max_speed), 1.0)
+    if hasattr(data, "aux_features") and data.aux_features is not None:
+        data.aux_features = data.aux_features.float()
+    if hasattr(data, "action_label") and data.action_label is not None:
+        data.action_label = data.action_label.long()
+    return data

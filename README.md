@@ -88,6 +88,53 @@ python -m main_pys.simulator --mapNpzFile=data/all_maps.npz \
 
 Replace `--shieldType=CS-PIBT` with `LaCAM` or `Real-Time-LaCAM` for other collision shields.
 
+## Continuous MAPF (Phase 3)
+
+The continuous stack is intentionally separate from the grid simulator:
+
+- `main_pys/continuous_env.py` implements continuous dynamics, obstacle checks, and an ORCA-style local safety shield.
+- `generate_continuous_data.py` converts `EECBS-flow` plans into continuous trajectories and can fall back to an ORCA-style expert.
+- `main_pys/train_continuous.py` trains either a continuous flow model or an 8-direction discrete baseline on continuous `.npz` rollouts.
+- `eval_continuous.py` evaluates ORCA, continuous flow, or the discrete baseline and can save trajectory plots.
+
+Example commands:
+
+```sh
+# Generate continuous supervision from EECBS-flow with ORCA fallback
+python3 generate_continuous_data.py \
+  --map-dir data/mapf-map \
+  --scen-dir data/scen-random \
+  --maps empty-48-48 random-32-32-10 \
+  --agent-counts 100 200 \
+  --output-dir data/continuous \
+  --expert-source hybrid
+
+# Train the continuous flow model
+python3 -m main_pys.train_continuous \
+  --data-dir data/continuous \
+  --map-dir data/mapf-map \
+  --policy-type flow \
+  --run-name conti_flow_v1
+
+# Train the continuous discrete baseline
+python3 -m main_pys.train_continuous \
+  --data-dir data/continuous \
+  --map-dir data/mapf-map \
+  --policy-type discrete \
+  --run-name conti_disc_v1
+
+# Evaluate a learned continuous policy
+python3 eval_continuous.py \
+  --map-dir data/mapf-map \
+  --scen-dir data/scen-random \
+  --maps empty-48-48 random-32-32-10 \
+  --agent-counts 100 200 \
+  --policy flow \
+  --model-path continuous_flow_conti_flow_v1_best.pt \
+  --output-csv evals/continuous_flow_eval.csv \
+  --viz-dir logs/continuous_viz
+```
+
 ### Visualization
 ```sh
 python -m main_pys.visualize_path empty-48-48 logs/paths.npy --scenName=empty-48-48-random-1.scen
