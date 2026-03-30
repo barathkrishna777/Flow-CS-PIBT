@@ -3,6 +3,7 @@ import glob
 import os
 import subprocess
 import tempfile
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -10,13 +11,13 @@ import numpy as np
 from main_pys.continuous_env import (
     ContinuousMAPFEnv,
     grid_starts_to_continuous,
-    load_env_from_files,
     parse_scene_file,
 )
-from main_pys.model_inputs import labels_to_direction_vectors, load_grid_map_from_file, velocity_to_direction_labels
+from main_pys.model_inputs import load_grid_map_from_file, velocity_to_direction_labels
 
 
-DEFAULT_EECBS_REPO = "/Users/barathkrishna/Documents/GitHub/EECBS-flow"
+REPO_ROOT = Path(__file__).resolve().parent
+DEFAULT_EECBS_REPO = os.environ.get("EECBS_FLOW_REPO", str(REPO_ROOT.parent / "EECBS-flow"))
 
 
 def parse_paths_txt(file_path: str) -> np.ndarray:
@@ -131,6 +132,40 @@ def validate_replay(
     return env.metrics.collisions == 0 and env.metrics.obstacle_hits == 0
 
 
+def resolve_eecbs_binary(explicit_binary: Optional[str], eecbs_repo: Optional[str]) -> str:
+    candidates = []
+    if explicit_binary:
+        candidates.append(Path(explicit_binary).expanduser())
+
+    if eecbs_repo:
+        repo_path = Path(eecbs_repo).expanduser()
+        candidates.extend([repo_path / "build" / "eecbs", repo_path / "eecbs"])
+
+    candidates.extend(
+        [
+            REPO_ROOT / "build" / "eecbs",
+            REPO_ROOT.parent / "EECBS-flow" / "build" / "eecbs",
+            REPO_ROOT.parent / "EECBS-flow" / "eecbs",
+        ]
+    )
+
+    seen = set()
+    for candidate in candidates:
+        candidate_str = str(candidate.resolve()) if candidate.exists() else str(candidate)
+        if candidate_str in seen:
+            continue
+        seen.add(candidate_str)
+        if os.path.exists(candidate):
+            return str(candidate)
+
+    checked = "\n".join(f"  - {c}" for c in seen)
+    raise FileNotFoundError(
+        "Could not find an EECBS binary. Checked:\n"
+        f"{checked}\n"
+        "Pass --eecbs-binary explicitly, set EECBS_FLOW_REPO, or place the solver in ../EECBS-flow/build/eecbs."
+    )
+
+
 def run_eecbs(
     map_file: str,
     scen_file: str,
@@ -162,8 +197,21 @@ def run_eecbs(
             "--suboptimality",
             str(suboptimality),
         ]
-        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return parse_paths_txt(out_paths)
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        if not os.path.exists(out_paths):
+            raise RuntimeError(
+                "EECBS finished without producing an output paths file. "
+                f"stdout:\n{result.stdout}\n"
+                f"stderr:\n{result.stderr}"
+            )
+        paths = parse_paths_txt(out_paths)
+        if len(paths) == 0:
+            raise RuntimeError(
+                "EECBS produced an empty path file. "
+                f"stdout:\n{result.stdout}\n"
+                f"stderr:\n{result.stderr}"
+            )
+        return paths
 
 
 def derive_action_labels(velocities: np.ndarray, num_directions: int, wait_threshold: float) -> np.ndarray:
@@ -241,11 +289,15 @@ def main():
     parser.add_argument("--time-limit", type=int, default=60)
     args = parser.parse_args()
 
-    eecbs_binary = args.eecbs_binary or os.path.join(args.eecbs_repo, "eecbs")
-    if not os.path.exists(eecbs_binary):
-        candidate = os.path.join(args.eecbs_repo, "build", "eecbs")
-        if os.path.exists(candidate):
-            eecbs_binary = candidate
+    eecbs_binary = None
+    if args.expert_source in {"eecbs", "hybrid"}:
+        try:
+            eecbs_binary = resolve_eecbs_binary(args.eecbs_binary, args.eecbs_repo)
+            print(f"Using EECBS binary: {eecbs_binary}")
+        except FileNotFoundError as e:
+            if args.expert_source == "eecbs":
+                raise
+            print(f"[hybrid] EECBS unavailable, will fall back to ORCA:\n{e}")
 
     pairs = build_map_scenario_pairs(args.map_dir, args.scen_dir, args.maps, args.max_scenarios)
     if not pairs:
@@ -284,8 +336,21 @@ def main():
                         args.agent_radius,
                         args.goal_tolerance,
                     ):
+                        print(
+                            f"[hybrid] EECBS replay validation failed for {map_name} "
+                            f"{os.path.basename(scen_path)} N={agent_num}"
+                        )
                         positions, velocities = None, None
-                except Exception:
+                except Exception as e:
+                    if args.expert_source == "eecbs":
+                        raise RuntimeError(
+                            f"EECBS generation failed for {map_name} {os.path.basename(scen_path)} "
+                            f"N={agent_num}: {e}"
+                        ) from e
+                    print(
+                        f"[hybrid] EECBS failed for {map_name} {os.path.basename(scen_path)} "
+                        f"N={agent_num}: {e}"
+                    )
                     positions, velocities = None, None
 
             if positions is None and args.expert_source in {"orca", "hybrid"}:
