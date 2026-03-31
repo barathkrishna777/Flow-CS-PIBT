@@ -3,7 +3,7 @@ import re
 from typing import Iterable, List, Optional, Sequence
 
 
-_SCENARIO_RE = re.compile(r"-random-(\d+)\.scen$")
+_SCENARIO_RE = re.compile(r"-random-(\d+)(?:[_\.]|$)")
 
 
 def scenario_id_from_path(path: str) -> int:

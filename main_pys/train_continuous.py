@@ -150,17 +150,7 @@ def train(args):
     use_amp = device.type == "cuda"
     data_loader_generator = torch.Generator().manual_seed(args.seed)
 
-    base_dataset = ContinuousFlowDataset(
-        data_dir=args.data_dir,
-        map_dir=args.map_dir,
-        k=args.k,
-        m=args.m,
-        num_directions=args.num_directions,
-        wait_threshold=args.wait_threshold,
-        max_speed=args.max_speed,
-        expert_sources=args.expert_sources,
-    )
-
+    base_dataset = None
     if args.val_scenario_start is not None or args.val_scenario_end is not None or args.val_scenario_ids:
         train_dataset = ContinuousFlowDataset(
             data_dir=args.data_dir,
@@ -188,10 +178,22 @@ def train(args):
             scenario_start=args.val_scenario_start,
             scenario_end=args.val_scenario_end,
         )
+        map_cache = train_dataset.maps
     else:
+        base_dataset = ContinuousFlowDataset(
+            data_dir=args.data_dir,
+            map_dir=args.map_dir,
+            k=args.k,
+            m=args.m,
+            num_directions=args.num_directions,
+            wait_threshold=args.wait_threshold,
+            max_speed=args.max_speed,
+            expert_sources=args.expert_sources,
+        )
         train_indices, val_indices = base_dataset.split_indices_by_rollout(args.val_split, args.seed)
         train_dataset = Subset(base_dataset, train_indices)
         val_dataset = Subset(base_dataset, val_indices) if val_indices else None
+        map_cache = base_dataset.maps
 
     train_size = len(train_dataset)
     val_size = len(val_dataset) if val_dataset is not None else 0
@@ -250,7 +252,6 @@ def train(args):
     os.makedirs(args.output_dir, exist_ok=True)
 
     prefix = f"continuous_{args.policy_type}_{args.run_name}_" if args.run_name else f"continuous_{args.policy_type}_"
-    map_cache = base_dataset.maps
     for epoch in range(args.epochs):
         model.train()
         total_loss = 0.0

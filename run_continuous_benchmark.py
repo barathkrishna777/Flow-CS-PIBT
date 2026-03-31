@@ -60,6 +60,12 @@ def write_csv(path: Path, fieldnames: Sequence[str], rows: Iterable[Dict[str, ob
             writer.writerow(row)
 
 
+def scenario_range_count(start: Optional[int], end: Optional[int]) -> Optional[int]:
+    if start is None or end is None:
+        return None
+    return max(end - start + 1, 0)
+
+
 def apply_funnel_stage_defaults(args: argparse.Namespace) -> None:
     if args.funnel_stage == "custom":
         return
@@ -312,8 +318,19 @@ def phase_a_run_name(prefix: str, seed: int) -> str:
 
 
 def stage_generate(args: argparse.Namespace, python_bin: str) -> None:
-    scenario_starts = [value for value in [args.train_scenario_start, args.val_scenario_start] if value is not None]
-    scenario_ends = [value for value in [args.train_scenario_end, args.val_scenario_end] if value is not None]
+    scenario_starts = [
+        value
+        for value in [args.train_scenario_start, args.val_scenario_start, args.test_scenario_start]
+        if value is not None
+    ]
+    scenario_ends = [
+        value
+        for value in [args.train_scenario_end, args.val_scenario_end, args.test_scenario_end]
+        if value is not None
+    ]
+    effective_max_scenarios = args.max_scenarios
+    if scenario_starts and scenario_ends:
+        effective_max_scenarios = max(effective_max_scenarios, max(scenario_ends) - min(scenario_starts) + 1)
     cmd = [
         python_bin,
         str(REPO_ROOT / "generate_continuous_data.py"),
@@ -330,7 +347,7 @@ def stage_generate(args: argparse.Namespace, python_bin: str) -> None:
         "--expert-source",
         args.expert_source,
         "--max-scenarios",
-        str(args.max_scenarios),
+        str(effective_max_scenarios),
         "--rollout-horizon",
         str(args.rollout_horizon),
         "--dt",
@@ -464,6 +481,10 @@ def build_eval_command(
     max_scenarios: Optional[int] = None,
     agent_counts: Optional[Sequence[int]] = None,
 ) -> List[str]:
+    effective_max_scenarios = max_scenarios or args.max_scenarios
+    eval_range_count = scenario_range_count(args.test_scenario_start, args.test_scenario_end)
+    if eval_range_count is not None:
+        effective_max_scenarios = max(effective_max_scenarios, eval_range_count)
     cmd = [
         python_bin,
         str(REPO_ROOT / "eval_continuous.py"),
@@ -476,7 +497,7 @@ def build_eval_command(
         "--agent-counts",
         *[str(agent_count) for agent_count in (agent_counts or args.agent_counts)],
         "--max-scenarios",
-        str(max_scenarios or args.max_scenarios),
+        str(effective_max_scenarios),
         "--policy",
         policy,
         "--run-name",
