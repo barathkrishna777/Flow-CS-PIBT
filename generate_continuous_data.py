@@ -90,6 +90,7 @@ def rollout_orca_policy(
     max_steps: int,
     agent_radius: float,
     goal_tolerance: float,
+    shield_type: str = "orca",
 ) -> Tuple[np.ndarray, np.ndarray]:
     env = ContinuousMAPFEnv(
         obstacle_map=obstacle_map,
@@ -101,7 +102,7 @@ def rollout_orca_policy(
     env.reset(starts, goals)
     for _ in range(max_steps):
         preferred = env.goal_directed_velocities()
-        env.step(preferred, shield_type="orca")
+        env.step(preferred, shield_type=shield_type)
         if env.is_done():
             break
     positions = np.asarray(env.history_positions, dtype=np.float32)
@@ -357,7 +358,8 @@ def generate_single_rollout(task, args, eecbs_binary: Optional[str]) -> str:
             fallback_reason = "eecbs_failed"
             positions, velocities = None, None
 
-    if positions is None and args.expert_source in {"orca", "hybrid"}:
+    if positions is None and args.expert_source in {"orca", "po-orca", "hybrid"}:
+        shield = "po-orca" if args.expert_source in {"po-orca", "hybrid"} else "orca"
         positions, velocities = rollout_orca_policy(
             obstacle_map,
             starts,
@@ -367,9 +369,10 @@ def generate_single_rollout(task, args, eecbs_binary: Optional[str]) -> str:
             args.rollout_horizon,
             args.agent_radius,
             args.goal_tolerance,
+            shield_type=shield,
         )
-        source_used = "orca"
-        if args.expert_source == "orca":
+        source_used = shield
+        if args.expert_source in {"orca", "po-orca"}:
             fallback_reason = "none"
 
     if positions is None or velocities is None:
@@ -403,7 +406,7 @@ def main():
     parser.add_argument("--maps", nargs="*", default=None)
     parser.add_argument("--agent-counts", nargs="+", type=int, default=[100])
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--expert-source", choices=["eecbs", "orca", "hybrid"], default="hybrid")
+    parser.add_argument("--expert-source", choices=["eecbs", "orca", "po-orca", "hybrid"], default="hybrid")
     parser.add_argument("--max-scenarios", type=int, default=1)
     parser.add_argument("--scenario-ids", nargs="*", type=int, default=None)
     parser.add_argument("--scenario-start", type=int, default=None)

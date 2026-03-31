@@ -1,5 +1,6 @@
 import argparse
 import csv
+import glob
 import json
 import subprocess
 import sys
@@ -8,6 +9,10 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
 import numpy as np
+from scipy.ndimage import distance_transform_edt
+
+from main_pys.continuous_env import compute_sdf
+from main_pys.model_inputs import load_grid_map_from_file
 
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -150,7 +155,7 @@ def main() -> None:
     parser.add_argument("--scen-dir", required=True)
     parser.add_argument("--maps", nargs="+", default=["empty-48-48"])
     parser.add_argument("--agent-counts", nargs="+", type=int, default=[16, 32, 64, 96, 128, 160])
-    parser.add_argument("--expert-source", choices=["eecbs", "orca", "hybrid"], default="hybrid")
+    parser.add_argument("--expert-source", choices=["eecbs", "orca", "po-orca", "hybrid"], default="hybrid")
     parser.add_argument("--max-scenarios", type=int, default=80)
     parser.add_argument("--scenario-start", type=int, default=1)
     parser.add_argument("--scenario-end", type=int, default=80)
@@ -260,6 +265,36 @@ def main() -> None:
             val_range=parse_range(args.val_scenario_start, args.val_scenario_end),
             test_range=parse_range(args.test_scenario_start, args.test_scenario_end),
         )
+
+        # Precompute SDFs for all maps used in the dataset
+        sdf_dir = dataset_root / "sdfs"
+        sdf_dir.mkdir(parents=True, exist_ok=True)
+        print(f"\nPrecomputing SDFs into {sdf_dir} ...")
+        for map_name in args.maps:
+            sdf_path = sdf_dir / f"{map_name}_sdf.npz"
+            if sdf_path.exists():
+                print(f"  [skip] {sdf_path}")
+                continue
+            map_path = Path(args.map_dir) / f"{map_name}.map"
+            if not map_path.exists():
+                print(f"  [warn] Map not found: {map_path}")
+                continue
+            obstacle_map = load_grid_map_from_file(str(map_path))
+            sdf = compute_sdf(obstacle_map)
+            np.savez_compressed(str(sdf_path), sdf=sdf)
+            print(f"  [saved] {sdf_path} ({obstacle_map.shape})")
+
+        # Print dataset summary
+        raw_files = list(raw_dir.glob("*.npz"))
+        total_size = sum(f.stat().st_size for f in raw_files)
+        print(f"\nDataset summary:")
+        print(f"  Files:   {len(raw_files)}")
+        print(f"  Size:    {total_size / (1024**2):.1f} MB")
+        print(f"  Maps:    {args.maps}")
+        print(f"  Agents:  {args.agent_counts}")
+        print(f"  Train:   scenarios {args.train_scenario_start}-{args.train_scenario_end}")
+        print(f"  Val:     scenarios {args.val_scenario_start}-{args.val_scenario_end}")
+        print(f"  Test:    scenarios {args.test_scenario_start}-{args.test_scenario_end}")
     else:
         print(f"Would write manifest and config under {manifests_dir}")
 
