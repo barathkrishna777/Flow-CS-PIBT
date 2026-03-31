@@ -171,6 +171,7 @@ def main() -> None:
     parser.add_argument("--time-limit", type=int, default=60)
     parser.add_argument("--eecbs-repo", default=str(REPO_ROOT.parent / "EECBS-flow"))
     parser.add_argument("--eecbs-binary", default=None)
+    parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--skip-generate", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
@@ -220,6 +221,8 @@ def main() -> None:
             str(args.suboptimality),
             "--time-limit",
             str(args.time_limit),
+            "--workers",
+            str(args.workers),
         ]
         if args.eecbs_repo:
             cmd.extend(["--eecbs-repo", args.eecbs_repo])

@@ -3,6 +3,8 @@ import glob
 import os
 import subprocess
 import tempfile
+from functools import partial
+from multiprocessing import Pool, cpu_count
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -308,6 +310,92 @@ def build_map_scenario_pairs(
     return pairs
 
 
+def generate_single_rollout(task, args, eecbs_binary: Optional[str]) -> str:
+    map_name, map_path, scen_path, agent_num = task
+    obstacle_map = load_grid_map_from_file(map_path)
+    starts_grid, goals_grid = parse_scene_file(scen_path, agent_num=agent_num)
+    starts = grid_starts_to_continuous(starts_grid)
+    goals = grid_starts_to_continuous(goals_grid)
+
+    positions = None
+    velocities = None
+    source_used = ""
+    fallback_reason = "none"
+
+    if args.expert_source in {"eecbs", "hybrid"}:
+        try:
+            discrete_paths = run_eecbs(
+                map_path,
+                scen_path,
+                agent_num,
+                args.suboptimality,
+                args.time_limit,
+                eecbs_binary,
+            )
+            positions, velocities = discrete_paths_to_continuous(discrete_paths, args.dt, args.max_speed)
+            if not validate_replay(
+                obstacle_map,
+                starts,
+                goals,
+                positions,
+                velocities,
+                args.dt,
+                args.max_speed,
+                args.agent_radius,
+                args.goal_tolerance,
+            ):
+                fallback_reason = "replay_validation_failed"
+                positions, velocities = None, None
+            else:
+                source_used = "eecbs"
+        except Exception as e:
+            if args.expert_source == "eecbs":
+                raise RuntimeError(
+                    f"EECBS generation failed for {map_name} {os.path.basename(scen_path)} "
+                    f"N={agent_num}: {e}"
+                ) from e
+            fallback_reason = "eecbs_failed"
+            positions, velocities = None, None
+
+    if positions is None and args.expert_source in {"orca", "hybrid"}:
+        positions, velocities = rollout_orca_policy(
+            obstacle_map,
+            starts,
+            goals,
+            args.dt,
+            args.max_speed,
+            args.rollout_horizon,
+            args.agent_radius,
+            args.goal_tolerance,
+        )
+        source_used = "orca"
+        if args.expert_source == "orca":
+            fallback_reason = "none"
+
+    if positions is None or velocities is None:
+        raise RuntimeError(f"Failed to generate rollout for {map_name} {os.path.basename(scen_path)} N={agent_num}")
+
+    scenario_name = os.path.basename(scen_path).replace(".scen", "")
+    scenario_id = scenario_id_from_path(scen_path)
+    output_path = os.path.join(args.output_dir, f"{scenario_name}_{agent_num}.npz")
+    save_rollout(
+        output_path,
+        map_name,
+        scenario_name,
+        scenario_id,
+        positions,
+        velocities,
+        goals,
+        args.dt,
+        args.expert_source,
+        source_used,
+        fallback_reason,
+        args.num_directions,
+        args.wait_threshold,
+    )
+    return f"saved {output_path} [{source_used}]"
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate continuous MAPF supervision")
     parser.add_argument("--map-dir", required=True)
@@ -331,6 +419,7 @@ def main():
     parser.add_argument("--eecbs-binary", default=None)
     parser.add_argument("--suboptimality", type=float, default=1.2)
     parser.add_argument("--time-limit", type=int, default=60)
+    parser.add_argument("--workers", type=int, default=1)
     args = parser.parse_args()
 
     eecbs_binary = None
@@ -354,99 +443,24 @@ def main():
     )
     if not pairs:
         raise RuntimeError("No map/scenario pairs found")
+    tasks = [
+        (map_name, map_path, scen_path, agent_num)
+        for map_name, map_path, scen_path in pairs
+        for agent_num in args.agent_counts
+    ]
 
-    for map_name, map_path, scen_path in pairs:
-        obstacle_map = load_grid_map_from_file(map_path)
-        for agent_num in args.agent_counts:
-            starts_grid, goals_grid = parse_scene_file(scen_path, agent_num=agent_num)
-            starts = grid_starts_to_continuous(starts_grid)
-            goals = grid_starts_to_continuous(goals_grid)
+    workers = max(1, args.workers)
+    if workers == 1:
+        for task in tasks:
+            print(generate_single_rollout(task, args, eecbs_binary))
+        return
 
-            positions = None
-            velocities = None
-            source_used = ""
-            fallback_reason = "none"
-
-            if args.expert_source in {"eecbs", "hybrid"}:
-                try:
-                    discrete_paths = run_eecbs(
-                        map_path,
-                        scen_path,
-                        agent_num,
-                        args.suboptimality,
-                        args.time_limit,
-                        eecbs_binary,
-                    )
-                    positions, velocities = discrete_paths_to_continuous(discrete_paths, args.dt, args.max_speed)
-                    if not validate_replay(
-                        obstacle_map,
-                        starts,
-                        goals,
-                        positions,
-                        velocities,
-                        args.dt,
-                        args.max_speed,
-                        args.agent_radius,
-                        args.goal_tolerance,
-                    ):
-                        print(
-                            f"[hybrid] EECBS replay validation failed for {map_name} "
-                            f"{os.path.basename(scen_path)} N={agent_num}"
-                        )
-                        fallback_reason = "replay_validation_failed"
-                        positions, velocities = None, None
-                    else:
-                        source_used = "eecbs"
-                except Exception as e:
-                    if args.expert_source == "eecbs":
-                        raise RuntimeError(
-                            f"EECBS generation failed for {map_name} {os.path.basename(scen_path)} "
-                            f"N={agent_num}: {e}"
-                        ) from e
-                    print(
-                        f"[hybrid] EECBS failed for {map_name} {os.path.basename(scen_path)} "
-                        f"N={agent_num}: {e}"
-                    )
-                    fallback_reason = "eecbs_failed"
-                    positions, velocities = None, None
-
-            if positions is None and args.expert_source in {"orca", "hybrid"}:
-                positions, velocities = rollout_orca_policy(
-                    obstacle_map,
-                    starts,
-                    goals,
-                    args.dt,
-                    args.max_speed,
-                    args.rollout_horizon,
-                    args.agent_radius,
-                    args.goal_tolerance,
-                )
-                source_used = "orca"
-                if args.expert_source == "orca":
-                    fallback_reason = "none"
-
-            if positions is None or velocities is None:
-                raise RuntimeError(f"Failed to generate rollout for {map_name} {os.path.basename(scen_path)} N={agent_num}")
-
-            scenario_name = os.path.basename(scen_path).replace(".scen", "")
-            scenario_id = scenario_id_from_path(scen_path)
-            output_path = os.path.join(args.output_dir, f"{scenario_name}_{agent_num}.npz")
-            save_rollout(
-                output_path,
-                map_name,
-                scenario_name,
-                scenario_id,
-                positions,
-                velocities,
-                goals,
-                args.dt,
-                args.expert_source,
-                source_used,
-                fallback_reason,
-                args.num_directions,
-                args.wait_threshold,
-            )
-            print(f"saved {output_path} [{source_used}]")
+    worker_count = min(workers, cpu_count(), len(tasks))
+    print(f"Generating {len(tasks)} rollouts with {worker_count} workers")
+    with Pool(worker_count) as pool:
+        worker_fn = partial(generate_single_rollout, args=args, eecbs_binary=eecbs_binary)
+        for message in pool.imap_unordered(worker_fn, tasks, chunksize=1):
+            print(message)
 
 
 if __name__ == "__main__":
