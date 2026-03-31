@@ -10,6 +10,7 @@ import numpy as np
 import torch
 
 from main_pys.continuous_env import load_env_from_files
+from main_pys.continuous_scenarios import scenario_id_from_path, select_scenarios
 from main_pys.generative_model import FlowGNNModel
 from main_pys.model_inputs import (
     create_continuous_data_object,
@@ -36,8 +37,65 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def find_scenarios(scen_dir: str, map_name: str, max_scenarios: int) -> List[str]:
-    return sorted(glob.glob(os.path.join(scen_dir, f"{map_name}-random-*.scen")))[:max_scenarios]
+def find_scenarios(
+    scen_dir: str,
+    map_name: str,
+    max_scenarios: int,
+    scenario_ids: Optional[List[int]] = None,
+    scenario_start: Optional[int] = None,
+    scenario_end: Optional[int] = None,
+) -> List[str]:
+    return select_scenarios(
+        glob.glob(os.path.join(scen_dir, f"{map_name}-random-*.scen")),
+        max_scenarios=max_scenarios,
+        scenario_ids=scenario_ids,
+        scenario_start=scenario_start,
+        scenario_end=scenario_end,
+    )
+
+
+def score_candidate_velocities(env, velocities: np.ndarray) -> float:
+    clipped = np.asarray(velocities, dtype=np.float32)
+    norms = np.linalg.norm(clipped, axis=1)
+    clipping_penalty = float(np.mean(np.maximum(norms - env.max_speed, 0.0)))
+    clipped = clipped / np.maximum(norms[:, None] / max(env.max_speed, 1e-6), 1.0)
+
+    current_dist = np.linalg.norm(env.goals - env.positions, axis=1)
+    next_positions = env.positions + clipped * env.dt
+    next_dist = np.linalg.norm(env.goals - next_positions, axis=1)
+    progress = float(np.mean(current_dist - next_dist))
+
+    conflict_penalty = 0.0
+    min_dist = 2.0 * env.agent_radius
+    for i in range(len(next_positions)):
+        for j in range(i + 1, len(next_positions)):
+            dist = np.linalg.norm(next_positions[i] - next_positions[j])
+            if dist < min_dist:
+                conflict_penalty += (min_dist - dist) / max(min_dist, 1e-6)
+    conflict_penalty /= max(len(next_positions), 1)
+    return progress - 0.25 * clipping_penalty - conflict_penalty
+
+
+def aggregate_flow_samples(candidate_velocities: List[np.ndarray], aggregation: str, env) -> np.ndarray:
+    if len(candidate_velocities) == 1:
+        return candidate_velocities[0]
+    if aggregation == "mean":
+        return np.mean(np.stack(candidate_velocities, axis=0), axis=0)
+    if aggregation == "medoid":
+        flat = [vel.reshape(-1) for vel in candidate_velocities]
+        total_dists = []
+        for i, src in enumerate(flat):
+            total = 0.0
+            for j, dst in enumerate(flat):
+                if i == j:
+                    continue
+                total += float(np.linalg.norm(src - dst))
+            total_dists.append(total)
+        return candidate_velocities[int(np.argmin(total_dists))]
+    if aggregation == "best":
+        scores = [score_candidate_velocities(env, vel) for vel in candidate_velocities]
+        return candidate_velocities[int(np.argmax(scores))]
+    raise ValueError(f"Unsupported flow aggregation: {aggregation}")
 
 
 def load_model(model_path: str, device: torch.device):
@@ -74,6 +132,7 @@ def run_learned_policy(
     num_integration_steps: int,
     num_consensus_samples: int,
     tau: float,
+    flow_aggregation: str,
 ) -> Dict[str, float]:
     start_time = time.time()
     env.reset(positions, goals)
@@ -86,15 +145,15 @@ def run_learned_policy(
         with torch.no_grad():
             if policy_type == "flow":
                 dt = 1.0 / max(num_integration_steps, 1)
-                all_velocities = torch.zeros(n_agents, 2, device=device)
+                candidate_velocities: List[np.ndarray] = []
                 for _ in range(max(num_consensus_samples, 1)):
                     v = torch.randn(n_agents, 2, device=device)
                     for step in range(num_integration_steps):
                         t = torch.full((n_agents, 1), step * dt, device=device)
                         flow = model(v, t, data)
                         v = v + flow * dt
-                    all_velocities += v
-                velocities = (all_velocities / max(num_consensus_samples, 1)).cpu().numpy() * env.max_speed
+                    candidate_velocities.append((v.cpu().numpy() * env.max_speed).astype(np.float32))
+                velocities = aggregate_flow_samples(candidate_velocities, aggregation=flow_aggregation, env=env)
             else:
                 zero_v = torch.zeros(n_agents, 2, device=device)
                 zero_t = torch.zeros(n_agents, 1, device=device)
@@ -145,6 +204,7 @@ def write_rows(output_csv: str, rows: List[Dict[str, object]]) -> None:
     fieldnames = [
         "map",
         "scenario",
+        "scenario_id",
         "agents",
         "policy",
         "shield_type",
@@ -156,6 +216,7 @@ def write_rows(output_csv: str, rows: List[Dict[str, object]]) -> None:
         "num_integration_steps",
         "num_consensus_samples",
         "tau",
+        "flow_aggregation",
         "success",
         "agents_at_goal",
         "agent_fraction_at_goal",
@@ -184,6 +245,9 @@ def main():
     parser.add_argument("--maps", nargs="*", default=DEFAULT_MAPS)
     parser.add_argument("--agent-counts", nargs="+", type=int, default=[100, 200])
     parser.add_argument("--max-scenarios", type=int, default=1)
+    parser.add_argument("--scenario-ids", nargs="*", type=int, default=None)
+    parser.add_argument("--scenario-start", type=int, default=None)
+    parser.add_argument("--scenario-end", type=int, default=None)
     parser.add_argument("--policy", choices=["flow", "discrete", "orca"], default="orca")
     parser.add_argument("--model-path", default=None)
     parser.add_argument("--run-name", default="")
@@ -194,6 +258,7 @@ def main():
     parser.add_argument("--shield-type", choices=["orca", "heuristic-orca", "simple", "none"], default="orca")
     parser.add_argument("--num-integration-steps", type=int, default=3)
     parser.add_argument("--num-consensus-samples", type=int, default=1)
+    parser.add_argument("--flow-aggregation", choices=["mean", "medoid", "best"], default="mean")
     parser.add_argument("--tau", type=float, default=0.3)
     parser.add_argument("--k", type=int, default=4)
     parser.add_argument("--m", type=int, default=5)
@@ -216,9 +281,17 @@ def main():
     rows = []
     for map_name in args.maps:
         map_file = os.path.join(args.map_dir, f"{map_name}.map")
-        scenarios = find_scenarios(args.scen_dir, map_name, args.max_scenarios)
+        scenarios = find_scenarios(
+            args.scen_dir,
+            map_name,
+            args.max_scenarios,
+            scenario_ids=args.scenario_ids,
+            scenario_start=args.scenario_start,
+            scenario_end=args.scenario_end,
+        )
         for scen_file in scenarios:
             scen_name = os.path.basename(scen_file).replace(".scen", "")
+            scen_id = scenario_id_from_path(scen_file)
             for agent_num in args.agent_counts:
                 env, starts, goals = load_env_from_files(
                     map_file,
@@ -246,10 +319,12 @@ def main():
                         args.num_integration_steps,
                         args.num_consensus_samples,
                         args.tau,
+                        args.flow_aggregation,
                     )
                 row = {
                     "map": map_name,
                     "scenario": scen_name,
+                    "scenario_id": scen_id,
                     "agents": agent_num,
                     "policy": args.policy,
                     "shield_type": args.shield_type if args.policy != "orca" else "orca",
@@ -261,6 +336,7 @@ def main():
                     "num_integration_steps": args.num_integration_steps,
                     "num_consensus_samples": args.num_consensus_samples,
                     "tau": args.tau,
+                    "flow_aggregation": args.flow_aggregation if args.policy == "flow" else "",
                     **metrics,
                 }
                 rows.append(row)

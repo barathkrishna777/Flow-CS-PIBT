@@ -1,19 +1,20 @@
 import argparse
 import os
 import random
+from typing import List
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from torch.utils.data import random_split
+from torch.utils.data import Subset
 from torch_geometric.loader import DataLoader
 from tqdm import tqdm
 
+from main_pys.continuous_env import ORCAStyleShield
 from main_pys.dataset_continuous import ContinuousFlowDataset, build_continuous_weighted_sampler
 from main_pys.generative_model import FlowGNNModel
-from main_pys.model_inputs import labels_to_direction_vectors
 
 
 def set_seed(seed: int) -> None:
@@ -33,7 +34,46 @@ def seed_worker(worker_id: int) -> None:
     np.random.seed(worker_seed)
 
 
-def compute_flow_loss(model, batch, device, use_amp, action_loss_weight=0.2):
+def _batch_string_attr(batch, attr_name: str, num_graphs: int) -> List[str]:
+    values = getattr(batch, attr_name, None)
+    if values is None:
+        return [""] * num_graphs
+    if isinstance(values, str):
+        return [values]
+    if isinstance(values, (list, tuple)):
+        return [str(v) for v in values]
+    return [str(values)] * num_graphs
+
+
+def _shield_project_batch(predicted_velocity, batch, map_cache, max_speed, shield_type, dt, agent_radius):
+    ptr = batch.ptr.cpu().tolist()
+    num_graphs = len(ptr) - 1
+    map_names = _batch_string_attr(batch, "map_name", num_graphs)
+    shielded_chunks = []
+    for graph_idx in range(num_graphs):
+        start = ptr[graph_idx]
+        end = ptr[graph_idx + 1]
+        positions = batch.positions[start:end].detach().cpu().numpy()
+        preferred = predicted_velocity[start:end].detach().cpu().numpy() * max_speed
+        obstacle_map = map_cache.get(map_names[graph_idx])
+        if obstacle_map is None:
+            obstacle_map = np.zeros((48, 48), dtype=np.int8)
+        shield = ORCAStyleShield(
+            agent_radius=agent_radius,
+            max_speed=max_speed,
+            dt=dt,
+        )
+        projected = shield.project(
+            positions,
+            preferred,
+            obstacle_map,
+            use_true_orca=(shield_type == "orca"),
+        )
+        shielded_chunks.append(torch.from_numpy(projected / max(max_speed, 1e-6)))
+    return torch.cat(shielded_chunks, dim=0).to(predicted_velocity.device, dtype=predicted_velocity.dtype)
+
+
+def compute_flow_loss(model, batch, device, use_amp, args, map_cache):
     batch = batch.to(device)
     x_1 = batch.y.view(-1, 2)
     weights = batch.node_weights.view(-1, 1)
@@ -48,9 +88,30 @@ def compute_flow_loss(model, batch, device, use_amp, action_loss_weight=0.2):
         predicted_flow, action_logits = model(x_t, t, batch, return_action_logits=True)
         target_flow = x_1 - x_0
         flow_loss = (F.mse_loss(predicted_flow, target_flow, reduction="none") * weights).mean()
+
+        predicted_velocity = x_t + (1.0 - t) * predicted_flow
+        shield_loss = torch.tensor(0.0, device=device)
+        if args.shield_aware_loss:
+            shielded_velocity = _shield_project_batch(
+                predicted_velocity=predicted_velocity,
+                batch=batch,
+                map_cache=map_cache,
+                max_speed=args.max_speed,
+                shield_type=args.train_shield_type,
+                dt=args.dt,
+                agent_radius=args.agent_radius,
+            )
+            shielded_velocity = predicted_velocity + (shielded_velocity - predicted_velocity).detach()
+            shield_loss = (F.mse_loss(shielded_velocity, x_1, reduction="none") * weights).mean()
+
         action_loss = F.cross_entropy(action_logits, batch.action_label, reduction="none")
         action_loss = (action_loss * weights.squeeze(1)).mean()
-        total_loss = flow_loss + action_loss_weight * action_loss
+
+        total_loss = (
+            args.flow_loss_weight * flow_loss
+            + args.shield_loss_weight * shield_loss
+            + args.action_loss_weight * action_loss
+        )
     return total_loss
 
 
@@ -68,14 +129,14 @@ def compute_discrete_loss(model, batch, device, use_amp):
     return loss
 
 
-def validate(model, loader, device, use_amp, policy_type):
+def validate(model, loader, device, use_amp, policy_type, args, map_cache):
     model.eval()
     total = 0.0
     count = 0
     with torch.no_grad():
         for batch in loader:
             if policy_type == "flow":
-                loss = compute_flow_loss(model, batch, device, use_amp)
+                loss = compute_flow_loss(model, batch, device, use_amp, args, map_cache)
             else:
                 loss = compute_discrete_loss(model, batch, device, use_amp)
             total += loss.item()
@@ -89,7 +150,7 @@ def train(args):
     use_amp = device.type == "cuda"
     data_loader_generator = torch.Generator().manual_seed(args.seed)
 
-    dataset = ContinuousFlowDataset(
+    base_dataset = ContinuousFlowDataset(
         data_dir=args.data_dir,
         map_dir=args.map_dir,
         k=args.k,
@@ -97,30 +158,55 @@ def train(args):
         num_directions=args.num_directions,
         wait_threshold=args.wait_threshold,
         max_speed=args.max_speed,
+        expert_sources=args.expert_sources,
     )
-    val_size = int(len(dataset) * args.val_split) if args.val_split > 0 else 0
-    train_size = len(dataset) - val_size
-    if val_size > 0:
-        train_dataset, val_dataset = random_split(
-            dataset,
-            [train_size, val_size],
-            generator=torch.Generator().manual_seed(args.seed),
+
+    if args.val_scenario_start is not None or args.val_scenario_end is not None or args.val_scenario_ids:
+        train_dataset = ContinuousFlowDataset(
+            data_dir=args.data_dir,
+            map_dir=args.map_dir,
+            k=args.k,
+            m=args.m,
+            num_directions=args.num_directions,
+            wait_threshold=args.wait_threshold,
+            max_speed=args.max_speed,
+            expert_sources=args.expert_sources,
+            scenario_ids=args.train_scenario_ids,
+            scenario_start=args.train_scenario_start,
+            scenario_end=args.train_scenario_end,
+        )
+        val_dataset = ContinuousFlowDataset(
+            data_dir=args.data_dir,
+            map_dir=args.map_dir,
+            k=args.k,
+            m=args.m,
+            num_directions=args.num_directions,
+            wait_threshold=args.wait_threshold,
+            max_speed=args.max_speed,
+            expert_sources=args.expert_sources,
+            scenario_ids=args.val_scenario_ids,
+            scenario_start=args.val_scenario_start,
+            scenario_end=args.val_scenario_end,
         )
     else:
-        train_dataset = dataset
-        val_dataset = None
+        train_indices, val_indices = base_dataset.split_indices_by_rollout(args.val_split, args.seed)
+        train_dataset = Subset(base_dataset, train_indices)
+        val_dataset = Subset(base_dataset, val_indices) if val_indices else None
+
+    train_size = len(train_dataset)
+    val_size = len(val_dataset) if val_dataset is not None else 0
 
     sampler = None
     if not args.no_weighted_sampling:
-        sampler = build_continuous_weighted_sampler(dataset)
-        if val_size > 0:
-            train_indices = train_dataset.indices
-            train_weights = sampler.weights[train_indices]
-            sampler = torch.utils.data.WeightedRandomSampler(
-                train_weights,
-                num_samples=len(train_dataset),
-                replacement=True,
-            )
+        sampler_base = base_dataset if isinstance(train_dataset, Subset) else train_dataset
+        sampler_subset = train_dataset if isinstance(train_dataset, Subset) else None
+        sampler = build_continuous_weighted_sampler(
+            sampler_base,
+            subset=sampler_subset,
+            balance_agent_counts=True,
+            balance_expert_sources=True,
+            oversample_difficult=args.oversample_difficult,
+        )
 
     batch_size = args.batch_size or (128 if device.type == "cuda" else 16)
     workers = args.num_workers or min(8, os.cpu_count() or 2)
@@ -164,6 +250,7 @@ def train(args):
     os.makedirs(args.output_dir, exist_ok=True)
 
     prefix = f"continuous_{args.policy_type}_{args.run_name}_" if args.run_name else f"continuous_{args.policy_type}_"
+    map_cache = base_dataset.maps
     for epoch in range(args.epochs):
         model.train()
         total_loss = 0.0
@@ -171,7 +258,7 @@ def train(args):
         pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{args.epochs}")
         for batch in pbar:
             if args.policy_type == "flow":
-                loss = compute_flow_loss(model, batch, device, use_amp)
+                loss = compute_flow_loss(model, batch, device, use_amp, args, map_cache)
             else:
                 loss = compute_discrete_loss(model, batch, device, use_amp)
 
@@ -188,7 +275,7 @@ def train(args):
 
         scheduler.step()
         avg_train = total_loss / max(count, 1)
-        val_loss = validate(model, val_loader, device, use_amp, args.policy_type) if val_loader else avg_train
+        val_loss = validate(model, val_loader, device, use_amp, args.policy_type, args, map_cache) if val_loader else avg_train
         print(f"Epoch {epoch + 1}: train={avg_train:.4f} val={val_loss:.4f}")
 
         ckpt = {
@@ -210,6 +297,20 @@ def train(args):
                 "num_directions": args.num_directions,
                 "wait_threshold": args.wait_threshold,
                 "max_speed": args.max_speed,
+                "expert_sources": args.expert_sources,
+                "train_scenario_ids": args.train_scenario_ids,
+                "train_scenario_start": args.train_scenario_start,
+                "train_scenario_end": args.train_scenario_end,
+                "val_scenario_ids": args.val_scenario_ids,
+                "val_scenario_start": args.val_scenario_start,
+                "val_scenario_end": args.val_scenario_end,
+            },
+            "loss_config": {
+                "shield_aware_loss": args.shield_aware_loss,
+                "train_shield_type": args.train_shield_type,
+                "flow_loss_weight": args.flow_loss_weight,
+                "shield_loss_weight": args.shield_loss_weight,
+                "action_loss_weight": args.action_loss_weight,
             },
             "seed": args.seed,
             "train_loss": avg_train,
@@ -219,6 +320,8 @@ def train(args):
         if val_loss <= best_val:
             best_val = val_loss
             torch.save(ckpt, os.path.join(args.output_dir, f"{prefix}best.pt"))
+
+    print(f"Completed training | train_samples={train_size} val_samples={val_size} best_val={best_val:.4f}")
 
 
 def main():
@@ -237,11 +340,26 @@ def main():
     parser.add_argument("--m", type=int, default=5)
     parser.add_argument("--num-directions", type=int, default=8)
     parser.add_argument("--wait-threshold", type=float, default=0.1)
+    parser.add_argument("--dt", type=float, default=0.2)
     parser.add_argument("--max-speed", type=float, default=1.0)
+    parser.add_argument("--agent-radius", type=float, default=0.3)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--val-split", type=float, default=0.05)
     parser.add_argument("--no-weighted-sampling", action="store_true")
+    parser.add_argument("--oversample-difficult", action="store_true")
+    parser.add_argument("--expert-sources", nargs="*", default=None)
+    parser.add_argument("--train-scenario-ids", nargs="*", type=int, default=None)
+    parser.add_argument("--train-scenario-start", type=int, default=None)
+    parser.add_argument("--train-scenario-end", type=int, default=None)
+    parser.add_argument("--val-scenario-ids", nargs="*", type=int, default=None)
+    parser.add_argument("--val-scenario-start", type=int, default=None)
+    parser.add_argument("--val-scenario-end", type=int, default=None)
+    parser.add_argument("--shield-aware-loss", action="store_true")
+    parser.add_argument("--train-shield-type", choices=["orca", "heuristic-orca"], default="orca")
+    parser.add_argument("--flow-loss-weight", type=float, default=1.0)
+    parser.add_argument("--shield-loss-weight", type=float, default=1.0)
+    parser.add_argument("--action-loss-weight", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--cpu", action="store_true")
     args = parser.parse_args()

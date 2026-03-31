@@ -13,6 +13,7 @@ from main_pys.continuous_env import (
     grid_starts_to_continuous,
     parse_scene_file,
 )
+from main_pys.continuous_scenarios import scenario_id_from_path, select_scenarios
 from main_pys.model_inputs import load_grid_map_from_file, velocity_to_direction_labels
 
 
@@ -227,10 +228,20 @@ def derive_action_labels(velocities: np.ndarray, num_directions: int, wait_thres
     return np.asarray(action_labels, dtype=np.int64)
 
 
+def _mean_nearest_neighbor_distance(positions: np.ndarray) -> float:
+    if len(positions) <= 1:
+        return 0.0
+    deltas = positions[:, None, :] - positions[None, :, :]
+    dists = np.linalg.norm(deltas, axis=2)
+    np.fill_diagonal(dists, np.inf)
+    return float(np.mean(np.min(dists, axis=1)))
+
+
 def save_rollout(
     output_path: str,
     map_name: str,
     scenario_name: str,
+    scenario_id: int,
     positions: np.ndarray,
     velocities: np.ndarray,
     goals: np.ndarray,
@@ -244,16 +255,35 @@ def save_rollout(
         output_path,
         map_name=np.asarray(map_name),
         scenario_name=np.asarray(scenario_name),
+        scenario_id=np.asarray(scenario_id, dtype=np.int32),
         positions=positions.astype(np.float32),
         velocities=velocities.astype(np.float32),
         goals=goals.astype(np.float32),
         dt=np.asarray(dt, dtype=np.float32),
         expert_source=np.asarray(expert_source),
+        agent_count=np.asarray(positions.shape[1], dtype=np.int32),
+        rollout_length=np.asarray(len(velocities), dtype=np.int32),
+        fraction_moving=np.asarray(
+            float(np.mean(np.linalg.norm(velocities, axis=2) >= wait_threshold)) if len(velocities) else 0.0,
+            dtype=np.float32,
+        ),
+        mean_nearest_neighbor_distance=np.asarray(
+            _mean_nearest_neighbor_distance(positions[0]) if len(positions) else 0.0,
+            dtype=np.float32,
+        ),
         action_labels=derive_action_labels(velocities, num_directions, wait_threshold),
     )
 
 
-def build_map_scenario_pairs(map_dir: str, scen_dir: str, maps: Optional[List[str]], max_scenarios: int) -> List[Tuple[str, str, str]]:
+def build_map_scenario_pairs(
+    map_dir: str,
+    scen_dir: str,
+    maps: Optional[List[str]],
+    max_scenarios: int,
+    scenario_ids: Optional[List[int]] = None,
+    scenario_start: Optional[int] = None,
+    scenario_end: Optional[int] = None,
+) -> List[Tuple[str, str, str]]:
     pairs = []
     if maps:
         map_paths = [os.path.join(map_dir, f"{m}.map") for m in maps]
@@ -261,7 +291,13 @@ def build_map_scenario_pairs(map_dir: str, scen_dir: str, maps: Optional[List[st
         map_paths = sorted(glob.glob(os.path.join(map_dir, "*.map")))
     for map_path in map_paths:
         map_name = os.path.basename(map_path).replace(".map", "")
-        scen_paths = sorted(glob.glob(os.path.join(scen_dir, f"{map_name}-random-*.scen")))[:max_scenarios]
+        scen_paths = select_scenarios(
+            glob.glob(os.path.join(scen_dir, f"{map_name}-random-*.scen")),
+            max_scenarios=max_scenarios,
+            scenario_ids=scenario_ids,
+            scenario_start=scenario_start,
+            scenario_end=scenario_end,
+        )
         for scen_path in scen_paths:
             pairs.append((map_name, map_path, scen_path))
     return pairs
@@ -276,6 +312,9 @@ def main():
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--expert-source", choices=["eecbs", "orca", "hybrid"], default="hybrid")
     parser.add_argument("--max-scenarios", type=int, default=1)
+    parser.add_argument("--scenario-ids", nargs="*", type=int, default=None)
+    parser.add_argument("--scenario-start", type=int, default=None)
+    parser.add_argument("--scenario-end", type=int, default=None)
     parser.add_argument("--rollout-horizon", type=int, default=256)
     parser.add_argument("--dt", type=float, default=0.2)
     parser.add_argument("--max-speed", type=float, default=1.0)
@@ -299,7 +338,15 @@ def main():
                 raise
             print(f"[hybrid] EECBS unavailable, will fall back to ORCA:\n{e}")
 
-    pairs = build_map_scenario_pairs(args.map_dir, args.scen_dir, args.maps, args.max_scenarios)
+    pairs = build_map_scenario_pairs(
+        args.map_dir,
+        args.scen_dir,
+        args.maps,
+        args.max_scenarios,
+        scenario_ids=args.scenario_ids,
+        scenario_start=args.scenario_start,
+        scenario_end=args.scenario_end,
+    )
     if not pairs:
         raise RuntimeError("No map/scenario pairs found")
 
@@ -370,11 +417,13 @@ def main():
                 raise RuntimeError(f"Failed to generate rollout for {map_name} {os.path.basename(scen_path)} N={agent_num}")
 
             scenario_name = os.path.basename(scen_path).replace(".scen", "")
+            scenario_id = scenario_id_from_path(scen_path)
             output_path = os.path.join(args.output_dir, f"{scenario_name}_{agent_num}.npz")
             save_rollout(
                 output_path,
                 map_name,
                 scenario_name,
+                scenario_id,
                 positions,
                 velocities,
                 goals,
