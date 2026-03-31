@@ -69,7 +69,11 @@ class ContinuousFlowDataset(Dataset):
         infos: List[Dict[str, object]] = []
         for path in self.files:
             data = _load_npz(path)
-            expert_source = str(data["expert_source"].item() if data["expert_source"].ndim == 0 else data["expert_source"][0])
+            if "expert_source_used" in data:
+                source_arr = data["expert_source_used"]
+            else:
+                source_arr = data["expert_source"]
+            expert_source = str(source_arr.item() if source_arr.ndim == 0 else source_arr[0])
             scenario_name = str(data["scenario_name"].item() if data["scenario_name"].ndim == 0 else data["scenario_name"][0])
             scenario_id = int(data["scenario_id"].item()) if "scenario_id" in data else scenario_id_from_path(path)
             if self.allowed_expert_sources is not None and expert_source not in self.allowed_expert_sources:

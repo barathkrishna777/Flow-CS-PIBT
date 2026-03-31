@@ -93,6 +93,7 @@ Replace `--shieldType=CS-PIBT` with `LaCAM` or `Real-Time-LaCAM` for other colli
 The continuous stack is intentionally separate from the grid simulator:
 
 - `main_pys/continuous_env.py` implements continuous dynamics, obstacle checks, and an ORCA-style local safety shield.
+- `generate_and_preprocess_continuous.py` creates the main continuous-space dataset root and manifest.
 - `generate_continuous_data.py` converts `EECBS-flow` plans into continuous trajectories and can fall back to an ORCA-style expert.
 - `main_pys/train_continuous.py` trains either a continuous flow model or an 8-direction discrete baseline on continuous `.npz` rollouts.
 - `eval_continuous.py` evaluates ORCA, continuous flow, or the discrete baseline and can save trajectory plots.
@@ -100,18 +101,18 @@ The continuous stack is intentionally separate from the grid simulator:
 Example commands:
 
 ```sh
-# Generate continuous supervision from EECBS-flow with ORCA fallback
-python3 generate_continuous_data.py \
+# Create the main continuous-space dataset
+python3 generate_and_preprocess_continuous.py \
   --map-dir data/mapf-map \
   --scen-dir data/scen-random \
-  --maps empty-48-48 random-32-32-10 \
-  --agent-counts 100 200 \
-  --output-dir data/continuous \
+  --maps empty-48-48 \
+  --agent-counts 16 32 64 96 128 160 \
+  --dataset-root data/continuous_main \
   --expert-source hybrid
 
 # Train the continuous flow model
 python3 -m main_pys.train_continuous \
-  --data-dir data/continuous \
+  --data-dir data/continuous_main/raw \
   --map-dir data/mapf-map \
   --policy-type flow \
   --run-name conti_flow_v1 \
@@ -120,7 +121,7 @@ python3 -m main_pys.train_continuous \
 
 # Train the continuous discrete baseline
 python3 -m main_pys.train_continuous \
-  --data-dir data/continuous \
+  --data-dir data/continuous_main/raw \
   --map-dir data/mapf-map \
   --policy-type discrete \
   --run-name conti_disc_v1 \

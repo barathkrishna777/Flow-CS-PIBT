@@ -246,7 +246,9 @@ def save_rollout(
     velocities: np.ndarray,
     goals: np.ndarray,
     dt: float,
-    expert_source: str,
+    expert_recipe_requested: str,
+    expert_source_used: str,
+    fallback_reason: str,
     num_directions: int,
     wait_threshold: float,
 ) -> None:
@@ -260,7 +262,10 @@ def save_rollout(
         velocities=velocities.astype(np.float32),
         goals=goals.astype(np.float32),
         dt=np.asarray(dt, dtype=np.float32),
-        expert_source=np.asarray(expert_source),
+        expert_recipe_requested=np.asarray(expert_recipe_requested),
+        expert_source_used=np.asarray(expert_source_used),
+        expert_source=np.asarray(expert_source_used),
+        fallback_reason=np.asarray(fallback_reason),
         agent_count=np.asarray(positions.shape[1], dtype=np.int32),
         rollout_length=np.asarray(len(velocities), dtype=np.int32),
         fraction_moving=np.asarray(
@@ -359,7 +364,8 @@ def main():
 
             positions = None
             velocities = None
-            source_used = args.expert_source
+            source_used = ""
+            fallback_reason = "none"
 
             if args.expert_source in {"eecbs", "hybrid"}:
                 try:
@@ -387,7 +393,10 @@ def main():
                             f"[hybrid] EECBS replay validation failed for {map_name} "
                             f"{os.path.basename(scen_path)} N={agent_num}"
                         )
+                        fallback_reason = "replay_validation_failed"
                         positions, velocities = None, None
+                    else:
+                        source_used = "eecbs"
                 except Exception as e:
                     if args.expert_source == "eecbs":
                         raise RuntimeError(
@@ -398,6 +407,7 @@ def main():
                         f"[hybrid] EECBS failed for {map_name} {os.path.basename(scen_path)} "
                         f"N={agent_num}: {e}"
                     )
+                    fallback_reason = "eecbs_failed"
                     positions, velocities = None, None
 
             if positions is None and args.expert_source in {"orca", "hybrid"}:
@@ -412,6 +422,8 @@ def main():
                     args.goal_tolerance,
                 )
                 source_used = "orca"
+                if args.expert_source == "orca":
+                    fallback_reason = "none"
 
             if positions is None or velocities is None:
                 raise RuntimeError(f"Failed to generate rollout for {map_name} {os.path.basename(scen_path)} N={agent_num}")
@@ -428,7 +440,9 @@ def main():
                 velocities,
                 goals,
                 args.dt,
+                args.expert_source,
                 source_used,
+                fallback_reason,
                 args.num_directions,
                 args.wait_threshold,
             )

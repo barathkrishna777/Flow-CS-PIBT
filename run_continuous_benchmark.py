@@ -280,7 +280,10 @@ def summarize_dataset(data_dir: Path, output_dir: Path) -> None:
     source_counts: Dict[Tuple[str, int], int] = defaultdict(int)
     for path in files:
         with np.load(path, allow_pickle=True) as data:
-            expert_source = str(data["expert_source"].item())
+            if "expert_source_used" in data:
+                expert_source = str(data["expert_source_used"].item())
+            else:
+                expert_source = str(data["expert_source"].item())
             agent_count = int(data["agent_count"].item()) if "agent_count" in data else int(data["positions"].shape[1])
             scenario_id = int(data["scenario_id"].item()) if "scenario_id" in data else -1
             rollout_rows.append(
@@ -714,10 +717,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--test-scenario-start", type=int, default=None)
     parser.add_argument("--test-scenario-end", type=int, default=None)
 
-    parser.add_argument("--data-dir", default="data/continuous_phase_a")
-    parser.add_argument("--checkpoint-dir", default="checkpoints/continuous_phase_a")
-    parser.add_argument("--benchmark-dir", default="benchmarks/continuous_phase_a")
-    parser.add_argument("--run-prefix", default="phaseA_empty48")
+    parser.add_argument("--data-dir", default="data/continuous_main/raw")
+    parser.add_argument("--checkpoint-dir", default="checkpoints/continuous_main")
+    parser.add_argument("--benchmark-dir", default="benchmarks/continuous_main")
+    parser.add_argument("--run-prefix", default="continuous_main")
 
     parser.add_argument("--train-policies", nargs="+", default=["flow", "discrete"])
     parser.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2])
