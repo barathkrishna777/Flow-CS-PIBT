@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
 import numpy as np
+from scipy.ndimage import distance_transform_edt
 
 from main_pys.model_inputs import load_grid_map_from_file
 
@@ -10,6 +11,79 @@ try:
     import rvo2  # type: ignore
 except ImportError:
     rvo2 = None
+
+
+def compute_sdf(obstacle_map: np.ndarray) -> np.ndarray:
+    """Compute a signed distance field from a binary obstacle map.
+
+    Returns an array where free cells have positive distance to the nearest
+    obstacle and obstacle cells have negative distance to the nearest free cell.
+    Units are in grid cells (1 cell = 1 unit length).
+    """
+    free_mask = obstacle_map == 0
+    # Distance from each free cell to the nearest obstacle
+    dist_to_obstacle = distance_transform_edt(free_mask)
+    # Distance from each obstacle cell to the nearest free cell
+    dist_to_free = distance_transform_edt(~free_mask)
+    sdf = dist_to_obstacle - dist_to_free
+    return sdf.astype(np.float32)
+
+
+def sdf_gradient(sdf: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Compute the gradient of the SDF using central differences.
+
+    Returns (grad_row, grad_col) arrays of the same shape as sdf.
+    """
+    grad_row = np.zeros_like(sdf)
+    grad_col = np.zeros_like(sdf)
+    # Central differences, forward/backward at boundaries
+    grad_row[1:-1] = (sdf[2:] - sdf[:-2]) / 2.0
+    grad_row[0] = sdf[1] - sdf[0]
+    grad_row[-1] = sdf[-1] - sdf[-2]
+    grad_col[:, 1:-1] = (sdf[:, 2:] - sdf[:, :-2]) / 2.0
+    grad_col[:, 0] = sdf[:, 1] - sdf[:, 0]
+    grad_col[:, -1] = sdf[:, -1] - sdf[:, -2]
+    return grad_row, grad_col
+
+
+def sample_sdf_bilinear(sdf: np.ndarray, positions: np.ndarray) -> np.ndarray:
+    """Sample SDF values at continuous positions using bilinear interpolation.
+
+    Args:
+        sdf: (H, W) signed distance field.
+        positions: (N, 2) continuous positions (row, col).
+
+    Returns:
+        (N,) interpolated SDF values.
+    """
+    h, w = sdf.shape
+    r = np.clip(positions[:, 0], 0, h - 1.001)
+    c = np.clip(positions[:, 1], 0, w - 1.001)
+    r0 = np.floor(r).astype(int)
+    c0 = np.floor(c).astype(int)
+    r1 = np.minimum(r0 + 1, h - 1)
+    c1 = np.minimum(c0 + 1, w - 1)
+    dr = r - r0
+    dc = c - c0
+    val = (
+        sdf[r0, c0] * (1 - dr) * (1 - dc)
+        + sdf[r1, c0] * dr * (1 - dc)
+        + sdf[r0, c1] * (1 - dr) * dc
+        + sdf[r1, c1] * dr * dc
+    )
+    return val.astype(np.float32)
+
+
+def sample_sdf_gradient_bilinear(
+    grad_row: np.ndarray, grad_col: np.ndarray, positions: np.ndarray
+) -> np.ndarray:
+    """Sample SDF gradient at continuous positions using bilinear interpolation.
+
+    Returns (N, 2) gradient vectors (row_grad, col_grad).
+    """
+    gr = sample_sdf_bilinear(grad_row, positions)
+    gc = sample_sdf_bilinear(grad_col, positions)
+    return np.stack([gr, gc], axis=1)
 
 
 def parse_scene_file(scen_file: str, agent_num: Optional[int] = None) -> Tuple[np.ndarray, np.ndarray]:
@@ -64,7 +138,18 @@ class StepMetrics:
 
 
 class ORCAStyleShield:
-    """ORCA-backed shield with heuristic fallback."""
+    """ORCA-backed shield with SDF obstacle handling and optional priority ordering.
+
+    Supports three modes via ``project()``:
+    - ``use_priorities=False``: Standard symmetric ORCA (50/50 correction split).
+    - ``use_priorities=True``: Priority-Ordered ORCA (PO-ORCA) where agents are
+      processed sequentially in descending priority.  Higher-priority agents
+      commit their velocities first; lower-priority agents treat them as fixed
+      velocity obstacles and bear the full avoidance burden.
+
+    Obstacle handling uses a precomputed Signed Distance Field (SDF) instead of
+    per-cell polygon inflation, which correctly handles adjacent obstacle cells.
+    """
 
     def __init__(
         self,
@@ -74,6 +159,7 @@ class ORCAStyleShield:
         time_horizon: float = 2.0,
         obstacle_horizon: float = 1.0,
         iterations: int = 3,
+        obstacle_repulsion_gain: float = 2.0,
     ) -> None:
         self.agent_radius = agent_radius
         self.max_speed = max_speed
@@ -81,9 +167,14 @@ class ORCAStyleShield:
         self.time_horizon = time_horizon
         self.obstacle_horizon = obstacle_horizon
         self.iterations = iterations
+        self.obstacle_repulsion_gain = obstacle_repulsion_gain
         self.neighbor_dist = max(4.0 * agent_radius, 2.0)
         self.max_neighbors = 16
-        self._obstacle_cache = {}
+        self._sdf_cache: Dict[Tuple, Tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
     def project(
         self,
@@ -91,14 +182,53 @@ class ORCAStyleShield:
         preferred_velocities: np.ndarray,
         obstacle_map: np.ndarray,
         use_true_orca: bool = True,
+        priorities: Optional[np.ndarray] = None,
     ) -> np.ndarray:
-        if use_true_orca and rvo2 is not None:
+        """Project preferred velocities to collision-free velocities.
+
+        Args:
+            positions: (N, 2) agent positions.
+            preferred_velocities: (N, 2) desired velocities.
+            obstacle_map: (H, W) binary obstacle grid.
+            use_true_orca: If True and rvo2 is available, use rvo2 for
+                agent-agent avoidance (only when priorities is None).
+            priorities: (N,) optional priority values.  When provided, enables
+                Priority-Ordered ORCA (sequential processing, highest first).
+        """
+        use_priorities = priorities is not None
+        # rvo2 does not support asymmetric priorities, so only use it for
+        # the standard symmetric mode.
+        if not use_priorities and use_true_orca and rvo2 is not None:
             try:
                 return self._project_with_rvo2(positions, preferred_velocities, obstacle_map)
             except Exception:
-                # Keep the heuristic path available as a robust fallback.
                 pass
+
+        if use_priorities:
+            return self._project_priority_ordered(
+                positions, preferred_velocities, obstacle_map, priorities
+            )
         return self._project_heuristic(positions, preferred_velocities, obstacle_map)
+
+    # ------------------------------------------------------------------
+    # SDF helpers (cached per obstacle map)
+    # ------------------------------------------------------------------
+
+    def _get_sdf(
+        self, obstacle_map: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        key = (obstacle_map.shape, obstacle_map.data.tobytes())
+        cached = self._sdf_cache.get(key)
+        if cached is not None:
+            return cached
+        sdf = compute_sdf(obstacle_map)
+        grad_r, grad_c = sdf_gradient(sdf)
+        self._sdf_cache[key] = (sdf, grad_r, grad_c)
+        return sdf, grad_r, grad_c
+
+    # ------------------------------------------------------------------
+    # rvo2 path (symmetric, no priorities, kept for backwards compat)
+    # ------------------------------------------------------------------
 
     def _project_with_rvo2(
         self,
@@ -107,6 +237,11 @@ class ORCAStyleShield:
         obstacle_map: np.ndarray,
     ) -> np.ndarray:
         safe = np.asarray(preferred_velocities, dtype=np.float32).copy()
+        safe = self._clip_speeds(safe)
+
+        # Apply SDF obstacle constraints first, then let rvo2 handle agents
+        sdf, grad_r, grad_c = self._get_sdf(obstacle_map)
+        safe = self._apply_sdf_obstacle_constraints(positions, safe, sdf, grad_r, grad_c)
         safe = self._clip_speeds(safe)
 
         sim = rvo2.PyRVOSimulator(
@@ -118,10 +253,7 @@ class ORCAStyleShield:
             self.agent_radius,
             self.max_speed,
         )
-
-        for polygon in self._obstacle_polygons(obstacle_map):
-            sim.addObstacle(polygon)
-        sim.processObstacles()
+        # No obstacle polygons passed to rvo2 -- SDF handles obstacles
 
         for pos, vel in zip(np.asarray(positions, dtype=np.float32), safe):
             sim.addAgent(
@@ -144,6 +276,10 @@ class ORCAStyleShield:
             projected[agent_idx] = np.asarray(sim.getAgentVelocity(agent_idx), dtype=np.float32)
         return self._clip_speeds(projected)
 
+    # ------------------------------------------------------------------
+    # Heuristic path (symmetric, no priorities)
+    # ------------------------------------------------------------------
+
     def _project_heuristic(
         self,
         positions: np.ndarray,
@@ -152,38 +288,187 @@ class ORCAStyleShield:
     ) -> np.ndarray:
         safe = np.asarray(preferred_velocities, dtype=np.float32).copy()
         safe = self._clip_speeds(safe)
+        sdf, grad_r, grad_c = self._get_sdf(obstacle_map)
 
         for _ in range(self.iterations):
             safe = self._apply_pairwise_constraints(positions, safe)
-            safe = self._apply_obstacle_constraints(positions, safe, obstacle_map)
+            safe = self._apply_sdf_obstacle_constraints(positions, safe, sdf, grad_r, grad_c)
             safe = self._clip_speeds(safe)
         return safe
 
-    def _obstacle_polygons(self, obstacle_map: np.ndarray):
-        key = (obstacle_map.shape, obstacle_map.tobytes())
-        cached = self._obstacle_cache.get(key)
-        if cached is not None:
-            return cached
+    # ------------------------------------------------------------------
+    # Priority-Ordered ORCA (PO-ORCA) -- sequential processing
+    # ------------------------------------------------------------------
 
-        polygons = []
-        rows, cols = np.where(obstacle_map == 1)
-        inflate = self.agent_radius
-        for r, c in zip(rows.tolist(), cols.tolist()):
-            polygons.append(
-                [
-                    (r - inflate, c - inflate),
-                    (r - inflate, c + 1.0 + inflate),
-                    (r + 1.0 + inflate, c + 1.0 + inflate),
-                    (r + 1.0 + inflate, c - inflate),
-                ]
-            )
-        self._obstacle_cache[key] = polygons
-        return polygons
+    def _project_priority_ordered(
+        self,
+        positions: np.ndarray,
+        preferred_velocities: np.ndarray,
+        obstacle_map: np.ndarray,
+        priorities: np.ndarray,
+    ) -> np.ndarray:
+        """Process agents sequentially in descending priority order.
+
+        Higher-priority agents commit their velocities first.  When processing
+        a lower-priority agent, already-committed agents are treated as fixed
+        velocity obstacles -- the lower-priority agent bears the full
+        avoidance correction.
+        """
+        safe = np.asarray(preferred_velocities, dtype=np.float32).copy()
+        safe = self._clip_speeds(safe)
+        sdf, grad_r, grad_c = self._get_sdf(obstacle_map)
+
+        n_agents = len(positions)
+        agent_order = np.argsort(-np.asarray(priorities, dtype=np.float64))
+        committed = np.zeros(n_agents, dtype=bool)
+        min_dist = 2.0 * self.agent_radius
+        min_dist_sq = min_dist ** 2
+
+        for iteration in range(self.iterations):
+            # Reset committed flags each iteration so we re-process in order
+            committed[:] = False
+            for idx in agent_order:
+                # Apply obstacle constraint for this agent
+                safe[idx] = self._sdf_constrain_single(
+                    positions[idx], safe[idx], sdf, grad_r, grad_c
+                )
+
+                # Apply pairwise constraints against already-committed agents
+                for other in range(n_agents):
+                    if other == idx or not committed[other]:
+                        continue
+                    rel_pos = positions[other] - positions[idx]
+                    dist_sq = float(rel_pos @ rel_pos)
+                    rel_vel = safe[idx] - safe[other]
+                    next_rel = rel_pos + rel_vel * self.dt
+                    next_dist_sq = float(next_rel @ next_rel)
+                    if dist_sq > min_dist_sq and next_dist_sq > min_dist_sq:
+                        continue
+
+                    if dist_sq < 1e-8:
+                        normal = np.array([1.0, 0.0], dtype=np.float32)
+                    else:
+                        normal = rel_pos / math.sqrt(dist_sq)
+
+                    overlap = max(min_dist - math.sqrt(max(dist_sq, 1e-8)), 0.0)
+                    closing = np.dot(rel_vel, normal)
+                    correction_mag = overlap / max(self.dt, 1e-6)
+                    if closing > 0:
+                        correction_mag += closing
+                    # Full correction on the current (lower-priority) agent
+                    safe[idx] -= normal * correction_mag
+
+                # Also handle not-yet-committed agents (lower priority) symmetrically
+                # among themselves -- but with reduced weight since they'll be
+                # re-processed later.  Skip for efficiency; the next iteration
+                # will handle it once they are committed.
+
+                safe[idx] = self._clip_single(safe[idx])
+                committed[idx] = True
+
+        return safe
+
+    # ------------------------------------------------------------------
+    # SDF-based obstacle constraints (replaces polygon inflation)
+    # ------------------------------------------------------------------
+
+    def _apply_sdf_obstacle_constraints(
+        self,
+        positions: np.ndarray,
+        velocities: np.ndarray,
+        sdf: np.ndarray,
+        grad_r: np.ndarray,
+        grad_c: np.ndarray,
+    ) -> np.ndarray:
+        """Apply obstacle avoidance using the SDF.
+
+        Two mechanisms:
+        1. **Velocity rejection**: remove the velocity component pointing
+           toward the obstacle surface when the agent is within
+           ``agent_radius + safety_margin`` of the obstacle.
+        2. **Repulsive velocity**: push the agent away from the obstacle
+           proportionally to how close it is (within the safety zone).
+        """
+        adjusted = velocities.copy()
+        safety_margin = self.agent_radius * 0.5
+
+        # Sample SDF and gradient at each agent's current position
+        sdf_vals = sample_sdf_bilinear(sdf, positions)
+        grads = sample_sdf_gradient_bilinear(grad_r, grad_c, positions)
+
+        for i in range(len(positions)):
+            d = sdf_vals[i]  # positive = distance to nearest obstacle in free space
+            if d > self.agent_radius + safety_margin:
+                continue
+
+            grad = grads[i]
+            grad_norm = np.linalg.norm(grad)
+            if grad_norm < 1e-6:
+                continue
+            normal = grad / grad_norm  # points away from obstacle
+
+            # 1. Velocity rejection: remove component toward obstacle
+            vel_toward = np.dot(adjusted[i], -normal)
+            if vel_toward > 0:
+                adjusted[i] += normal * vel_toward
+
+            # 2. Repulsive push when too close
+            penetration = max(self.agent_radius - d, 0.0)
+            if penetration > 0:
+                repulse_mag = self.obstacle_repulsion_gain * penetration / max(self.dt, 1e-6)
+                adjusted[i] += normal * repulse_mag
+
+        return adjusted
+
+    def _sdf_constrain_single(
+        self,
+        position: np.ndarray,
+        velocity: np.ndarray,
+        sdf: np.ndarray,
+        grad_r: np.ndarray,
+        grad_c: np.ndarray,
+    ) -> np.ndarray:
+        """Apply SDF obstacle constraint to a single agent."""
+        pos_2d = position.reshape(1, 2)
+        d = float(sample_sdf_bilinear(sdf, pos_2d)[0])
+        safety_margin = self.agent_radius * 0.5
+
+        if d > self.agent_radius + safety_margin:
+            return velocity
+
+        grad = sample_sdf_gradient_bilinear(grad_r, grad_c, pos_2d)[0]
+        grad_norm = np.linalg.norm(grad)
+        if grad_norm < 1e-6:
+            return velocity
+
+        normal = grad / grad_norm
+        adjusted = velocity.copy()
+
+        vel_toward = np.dot(adjusted, -normal)
+        if vel_toward > 0:
+            adjusted += normal * vel_toward
+
+        penetration = max(self.agent_radius - d, 0.0)
+        if penetration > 0:
+            repulse_mag = self.obstacle_repulsion_gain * penetration / max(self.dt, 1e-6)
+            adjusted += normal * repulse_mag
+
+        return adjusted
+
+    # ------------------------------------------------------------------
+    # Symmetric pairwise constraints (unchanged, used by heuristic path)
+    # ------------------------------------------------------------------
 
     def _clip_speeds(self, velocities: np.ndarray) -> np.ndarray:
         norms = np.linalg.norm(velocities, axis=1, keepdims=True)
         scale = np.maximum(norms / max(self.max_speed, 1e-6), 1.0)
         return velocities / scale
+
+    def _clip_single(self, velocity: np.ndarray) -> np.ndarray:
+        norm = np.linalg.norm(velocity)
+        if norm > self.max_speed:
+            return velocity * (self.max_speed / norm)
+        return velocity
 
     def _apply_pairwise_constraints(self, positions: np.ndarray, velocities: np.ndarray) -> np.ndarray:
         adjusted = velocities.copy()
@@ -215,43 +500,21 @@ class ORCAStyleShield:
                 adjusted[j] += correction
         return adjusted
 
-    def _apply_obstacle_constraints(
-        self,
-        positions: np.ndarray,
-        velocities: np.ndarray,
-        obstacle_map: np.ndarray,
-    ) -> np.ndarray:
-        adjusted = velocities.copy()
-        height, width = obstacle_map.shape
-        for i, pos in enumerate(positions):
-            proposed = pos + adjusted[i] * self.dt
-            row_min = max(int(math.floor(proposed[0] - self.agent_radius)) - 1, 0)
-            row_max = min(int(math.ceil(proposed[0] + self.agent_radius)) + 1, height - 1)
-            col_min = max(int(math.floor(proposed[1] - self.agent_radius)) - 1, 0)
-            col_max = min(int(math.ceil(proposed[1] + self.agent_radius)) + 1, width - 1)
-            push = np.zeros(2, dtype=np.float32)
-            for r in range(row_min, row_max + 1):
-                for c in range(col_min, col_max + 1):
-                    if obstacle_map[r, c] == 0:
-                        continue
-                    if not circle_intersects_rect(proposed, self.agent_radius, r, c):
-                        continue
-                    nearest_r = np.clip(proposed[0], r, r + 1.0)
-                    nearest_c = np.clip(proposed[1], c, c + 1.0)
-                    diff = proposed - np.array([nearest_r, nearest_c], dtype=np.float32)
-                    dist = np.linalg.norm(diff)
-                    if dist < 1e-6:
-                        cell_center = np.array([r + 0.5, c + 0.5], dtype=np.float32)
-                        diff = proposed - cell_center
-                        dist = np.linalg.norm(diff)
-                    normal = diff / max(dist, 1e-6)
-                    push += normal * (self.agent_radius - min(dist, self.agent_radius))
-            if np.any(push):
-                adjusted[i] += push / max(self.dt, 1e-6)
-        return adjusted
-
 
 class ContinuousMAPFEnv:
+    """Continuous-space MAPF environment with priority-ordered collision shielding.
+
+    Supports shield types:
+    - ``"none"``: No collision avoidance, just speed clipping.
+    - ``"simple"``: Naive safety filter (stop on conflict).
+    - ``"orca"``: Standard symmetric ORCA (heuristic or rvo2).
+    - ``"heuristic-orca"``: Force heuristic path (no rvo2).
+    - ``"po-orca"``: Priority-Ordered ORCA with sequential processing.
+    """
+
+    DEADLOCK_CHECK_INTERVAL = 30
+    DEADLOCK_PRIORITY_BOOST = 10.0
+
     def __init__(
         self,
         obstacle_map: np.ndarray,
@@ -274,6 +537,13 @@ class ContinuousMAPFEnv:
         self.arrival_steps = None
         self.step_count = 0
 
+        # Priority state
+        self.priorities = None
+        self._goal_dist_snapshot = None
+
+        # Precompute SDF for obstacle checking
+        self._sdf = compute_sdf(self.obstacle_map)
+
     def reset(self, starts: np.ndarray, goals: np.ndarray) -> np.ndarray:
         self.positions = np.asarray(starts, dtype=np.float32).copy()
         self.goals = np.asarray(goals, dtype=np.float32).copy()
@@ -282,6 +552,13 @@ class ContinuousMAPFEnv:
         self.metrics = StepMetrics()
         self.arrival_steps = np.full(len(self.positions), -1, dtype=np.int32)
         self.step_count = 0
+
+        # Initialize priorities from Euclidean distance to goal
+        # (farther agents get higher initial priority)
+        goal_dists = np.linalg.norm(self.goals - self.positions, axis=1)
+        self.priorities = goal_dists.astype(np.float64)
+        self._goal_dist_snapshot = goal_dists.copy()
+
         return self.positions.copy()
 
     def goal_directed_velocities(self) -> np.ndarray:
@@ -305,14 +582,42 @@ class ContinuousMAPFEnv:
                 self.obstacle_map,
                 use_true_orca=False,
             )
-        if shield_type != "orca":
-            raise ValueError(f"Unsupported shield type: {shield_type}")
-        return self._shield.project(
-            self.positions,
-            preferred_velocities,
-            self.obstacle_map,
-            use_true_orca=True,
-        )
+        if shield_type == "po-orca":
+            return self._shield.project(
+                self.positions,
+                preferred_velocities,
+                self.obstacle_map,
+                use_true_orca=False,
+                priorities=self.priorities,
+            )
+        if shield_type == "orca":
+            return self._shield.project(
+                self.positions,
+                preferred_velocities,
+                self.obstacle_map,
+                use_true_orca=True,
+            )
+        raise ValueError(f"Unsupported shield type: {shield_type}")
+
+    def _update_priorities(self) -> None:
+        """Update agent priorities each timestep (mirrors PIBT's updatePriorities).
+
+        Agents not at goal get +1 priority per step (increasing urgency).
+        Agents at goal get their priority reset to 0.
+        Every ``DEADLOCK_CHECK_INTERVAL`` steps, agents that have made no
+        progress toward their goal receive a priority boost.
+        """
+        at_goal = self.agents_at_goal()
+        self.priorities[~at_goal] += 1.0
+        self.priorities[at_goal] = 0.0
+
+        # Deadlock detection: check progress every N steps
+        if self.step_count > 0 and self.step_count % self.DEADLOCK_CHECK_INTERVAL == 0:
+            current_dists = np.linalg.norm(self.goals - self.positions, axis=1)
+            no_progress = current_dists >= self._goal_dist_snapshot - 1e-3
+            stuck = no_progress & ~at_goal
+            self.priorities[stuck] += self.DEADLOCK_PRIORITY_BOOST
+            self._goal_dist_snapshot = current_dists.copy()
 
     def step(self, velocities: np.ndarray, shield_type: str = "orca") -> Tuple[np.ndarray, bool, Dict[str, float]]:
         safe_velocities = self.apply_shield(velocities, shield_type=shield_type)
@@ -334,6 +639,9 @@ class ContinuousMAPFEnv:
         self.history_positions.append(self.positions.copy())
         self.history_velocities.append(safe_velocities.copy())
         self.step_count += 1
+
+        # Update priorities after each step
+        self._update_priorities()
 
         done_mask = self.agents_at_goal()
         newly_done = (self.arrival_steps < 0) & done_mask
@@ -387,6 +695,7 @@ class ContinuousMAPFEnv:
         return safe
 
     def _position_hits_obstacle(self, position: np.ndarray) -> bool:
+        """Check if position collides with obstacle using SDF."""
         if (
             position[0] < self.agent_radius
             or position[1] < self.agent_radius
@@ -394,16 +703,8 @@ class ContinuousMAPFEnv:
             or position[1] > self.obstacle_map.shape[1] - self.agent_radius
         ):
             return True
-
-        row_min = max(int(math.floor(position[0] - self.agent_radius)) - 1, 0)
-        row_max = min(int(math.ceil(position[0] + self.agent_radius)) + 1, self.obstacle_map.shape[0] - 1)
-        col_min = max(int(math.floor(position[1] - self.agent_radius)) - 1, 0)
-        col_max = min(int(math.ceil(position[1] + self.agent_radius)) + 1, self.obstacle_map.shape[1] - 1)
-        for r in range(row_min, row_max + 1):
-            for c in range(col_min, col_max + 1):
-                if self.obstacle_map[r, c] == 1 and circle_intersects_rect(position, self.agent_radius, r, c):
-                    return True
-        return False
+        d = float(sample_sdf_bilinear(self._sdf, position.reshape(1, 2))[0])
+        return d < self.agent_radius
 
     def _count_agent_interactions(self, positions: np.ndarray) -> Tuple[int, int]:
         collisions = 0

@@ -171,11 +171,11 @@ def run_learned_policy(
     return metrics
 
 
-def run_orca_baseline(env, positions, goals, max_steps: int) -> Dict[str, float]:
+def run_orca_baseline(env, positions, goals, max_steps: int, shield_type: str = "orca") -> Dict[str, float]:
     start_time = time.time()
     env.reset(positions, goals)
     for _ in range(max_steps):
-        env.step(env.goal_directed_velocities(), shield_type="orca")
+        env.step(env.goal_directed_velocities(), shield_type=shield_type)
         if env.is_done():
             break
     metrics = env.current_metrics()
@@ -255,7 +255,7 @@ def main():
     parser.add_argument("--eval-seed", type=int, default=0)
     parser.add_argument("--output-csv", required=True)
     parser.add_argument("--viz-dir", default=None)
-    parser.add_argument("--shield-type", choices=["orca", "heuristic-orca", "simple", "none"], default="orca")
+    parser.add_argument("--shield-type", choices=["orca", "heuristic-orca", "po-orca", "simple", "none"], default="orca")
     parser.add_argument("--num-integration-steps", type=int, default=3)
     parser.add_argument("--num-consensus-samples", type=int, default=1)
     parser.add_argument("--flow-aggregation", choices=["mean", "medoid", "best"], default="mean")
@@ -303,7 +303,7 @@ def main():
                     goal_tolerance=args.goal_tolerance,
                 )
                 if args.policy == "orca":
-                    metrics = run_orca_baseline(env, starts, goals, args.max_steps)
+                    metrics = run_orca_baseline(env, starts, goals, args.max_steps, shield_type=args.shield_type)
                 else:
                     metrics = run_learned_policy(
                         model,
@@ -327,7 +327,7 @@ def main():
                     "scenario_id": scen_id,
                     "agents": agent_num,
                     "policy": args.policy,
-                    "shield_type": args.shield_type if args.policy != "orca" else "orca",
+                    "shield_type": args.shield_type,
                     "run_name": args.run_name,
                     "model_name": os.path.basename(args.model_path) if args.model_path else "",
                     "model_path": args.model_path or "",
