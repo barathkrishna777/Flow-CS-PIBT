@@ -313,6 +313,10 @@ class ORCAStyleShield:
         a lower-priority agent, already-committed agents are treated as fixed
         velocity obstacles -- the lower-priority agent bears the full
         avoidance correction.
+
+        After sequential processing, a symmetric cleanup pass resolves any
+        remaining conflicts between agents of similar priority that were not
+        handled during the sequential phase.
         """
         safe = np.asarray(preferred_velocities, dtype=np.float32).copy()
         safe = self._clip_speeds(safe)
@@ -325,7 +329,7 @@ class ORCAStyleShield:
         min_dist_sq = min_dist ** 2
 
         for iteration in range(self.iterations):
-            # Reset committed flags each iteration so we re-process in order
+            # --- Phase A: Sequential priority-ordered processing ---
             committed[:] = False
             for idx in agent_order:
                 # Apply obstacle constraint for this agent
@@ -358,13 +362,15 @@ class ORCAStyleShield:
                     # Full correction on the current (lower-priority) agent
                     safe[idx] -= normal * correction_mag
 
-                # Also handle not-yet-committed agents (lower priority) symmetrically
-                # among themselves -- but with reduced weight since they'll be
-                # re-processed later.  Skip for efficiency; the next iteration
-                # will handle it once they are committed.
-
                 safe[idx] = self._clip_single(safe[idx])
                 committed[idx] = True
+
+            # --- Phase B: Symmetric cleanup pass ---
+            # Catches remaining conflicts between agents that were processed
+            # close together in the priority order and didn't see each other.
+            safe = self._apply_pairwise_constraints(positions, safe)
+            safe = self._apply_sdf_obstacle_constraints(positions, safe, sdf, grad_r, grad_c)
+            safe = self._clip_speeds(safe)
 
         return safe
 
@@ -382,43 +388,81 @@ class ORCAStyleShield:
     ) -> np.ndarray:
         """Apply obstacle avoidance using the SDF.
 
+        Checks both the **current** position and the **proposed** position
+        (current + velocity * dt) to prevent overshooting into obstacles.
+
         Two mechanisms:
         1. **Velocity rejection**: remove the velocity component pointing
-           toward the obstacle surface when the agent is within
-           ``agent_radius + safety_margin`` of the obstacle.
+           toward the obstacle surface when the agent is within the safety zone.
         2. **Repulsive velocity**: push the agent away from the obstacle
            proportionally to how close it is (within the safety zone).
         """
         adjusted = velocities.copy()
-        safety_margin = self.agent_radius * 0.5
-
-        # Sample SDF and gradient at each agent's current position
-        sdf_vals = sample_sdf_bilinear(sdf, positions)
-        grads = sample_sdf_gradient_bilinear(grad_r, grad_c, positions)
+        safety_margin = self.agent_radius * 1.0  # wider margin for early intervention
 
         for i in range(len(positions)):
-            d = sdf_vals[i]  # positive = distance to nearest obstacle in free space
-            if d > self.agent_radius + safety_margin:
-                continue
+            # Check at current position
+            self._sdf_constrain_at_point(
+                positions[i], adjusted, i, sdf, grad_r, grad_c, safety_margin
+            )
 
-            grad = grads[i]
-            grad_norm = np.linalg.norm(grad)
-            if grad_norm < 1e-6:
-                continue
-            normal = grad / grad_norm  # points away from obstacle
+            # Also check at proposed (forward-looking) position
+            proposed = positions[i] + adjusted[i] * self.dt
+            proposed_2d = proposed.reshape(1, 2)
+            d_prop = float(sample_sdf_bilinear(sdf, proposed_2d)[0])
 
-            # 1. Velocity rejection: remove component toward obstacle
-            vel_toward = np.dot(adjusted[i], -normal)
-            if vel_toward > 0:
-                adjusted[i] += normal * vel_toward
+            if d_prop < self.agent_radius + safety_margin:
+                grad_prop = sample_sdf_gradient_bilinear(grad_r, grad_c, proposed_2d)[0]
+                grad_norm = np.linalg.norm(grad_prop)
+                if grad_norm > 1e-6:
+                    normal = grad_prop / grad_norm
 
-            # 2. Repulsive push when too close
-            penetration = max(self.agent_radius - d, 0.0)
-            if penetration > 0:
-                repulse_mag = self.obstacle_repulsion_gain * penetration / max(self.dt, 1e-6)
-                adjusted[i] += normal * repulse_mag
+                    # Velocity rejection at proposed position
+                    vel_toward = np.dot(adjusted[i], -normal)
+                    if vel_toward > 0:
+                        adjusted[i] += normal * vel_toward
+
+                    # Stronger repulsion if proposed position would penetrate
+                    penetration = max(self.agent_radius - d_prop, 0.0)
+                    if penetration > 0:
+                        repulse_mag = self.obstacle_repulsion_gain * penetration / max(self.dt, 1e-6)
+                        adjusted[i] += normal * repulse_mag
 
         return adjusted
+
+    def _sdf_constrain_at_point(
+        self,
+        position: np.ndarray,
+        velocities: np.ndarray,
+        idx: int,
+        sdf: np.ndarray,
+        grad_r: np.ndarray,
+        grad_c: np.ndarray,
+        safety_margin: float,
+    ) -> None:
+        """Apply SDF constraint at a specific position, modifying velocities[idx] in place."""
+        pos_2d = position.reshape(1, 2)
+        d = float(sample_sdf_bilinear(sdf, pos_2d)[0])
+
+        if d > self.agent_radius + safety_margin:
+            return
+
+        grad = sample_sdf_gradient_bilinear(grad_r, grad_c, pos_2d)[0]
+        grad_norm = np.linalg.norm(grad)
+        if grad_norm < 1e-6:
+            return
+        normal = grad / grad_norm  # points away from obstacle
+
+        # Velocity rejection: remove component toward obstacle
+        vel_toward = np.dot(velocities[idx], -normal)
+        if vel_toward > 0:
+            velocities[idx] += normal * vel_toward
+
+        # Repulsive push when too close
+        penetration = max(self.agent_radius - d, 0.0)
+        if penetration > 0:
+            repulse_mag = self.obstacle_repulsion_gain * penetration / max(self.dt, 1e-6)
+            velocities[idx] += normal * repulse_mag
 
     def _sdf_constrain_single(
         self,
@@ -428,30 +472,44 @@ class ORCAStyleShield:
         grad_r: np.ndarray,
         grad_c: np.ndarray,
     ) -> np.ndarray:
-        """Apply SDF obstacle constraint to a single agent."""
+        """Apply SDF obstacle constraint to a single agent (current + proposed position)."""
+        adjusted = velocity.copy()
+        safety_margin = self.agent_radius * 1.0
+
+        # --- Check at current position ---
         pos_2d = position.reshape(1, 2)
         d = float(sample_sdf_bilinear(sdf, pos_2d)[0])
-        safety_margin = self.agent_radius * 0.5
 
-        if d > self.agent_radius + safety_margin:
-            return velocity
+        if d <= self.agent_radius + safety_margin:
+            grad = sample_sdf_gradient_bilinear(grad_r, grad_c, pos_2d)[0]
+            grad_norm = np.linalg.norm(grad)
+            if grad_norm > 1e-6:
+                normal = grad / grad_norm
+                vel_toward = np.dot(adjusted, -normal)
+                if vel_toward > 0:
+                    adjusted += normal * vel_toward
+                penetration = max(self.agent_radius - d, 0.0)
+                if penetration > 0:
+                    repulse_mag = self.obstacle_repulsion_gain * penetration / max(self.dt, 1e-6)
+                    adjusted += normal * repulse_mag
 
-        grad = sample_sdf_gradient_bilinear(grad_r, grad_c, pos_2d)[0]
-        grad_norm = np.linalg.norm(grad)
-        if grad_norm < 1e-6:
-            return velocity
+        # --- Check at proposed position (forward-looking) ---
+        proposed = position + adjusted * self.dt
+        prop_2d = proposed.reshape(1, 2)
+        d_prop = float(sample_sdf_bilinear(sdf, prop_2d)[0])
 
-        normal = grad / grad_norm
-        adjusted = velocity.copy()
-
-        vel_toward = np.dot(adjusted, -normal)
-        if vel_toward > 0:
-            adjusted += normal * vel_toward
-
-        penetration = max(self.agent_radius - d, 0.0)
-        if penetration > 0:
-            repulse_mag = self.obstacle_repulsion_gain * penetration / max(self.dt, 1e-6)
-            adjusted += normal * repulse_mag
+        if d_prop <= self.agent_radius + safety_margin:
+            grad_prop = sample_sdf_gradient_bilinear(grad_r, grad_c, prop_2d)[0]
+            grad_norm = np.linalg.norm(grad_prop)
+            if grad_norm > 1e-6:
+                normal = grad_prop / grad_norm
+                vel_toward = np.dot(adjusted, -normal)
+                if vel_toward > 0:
+                    adjusted += normal * vel_toward
+                penetration = max(self.agent_radius - d_prop, 0.0)
+                if penetration > 0:
+                    repulse_mag = self.obstacle_repulsion_gain * penetration / max(self.dt, 1e-6)
+                    adjusted += normal * repulse_mag
 
         return adjusted
 
