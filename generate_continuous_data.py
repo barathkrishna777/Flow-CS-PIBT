@@ -376,7 +376,7 @@ def generate_single_rollout(task, args, eecbs_binary: Optional[str]) -> str:
             fallback_reason = "none"
 
     if positions is None or velocities is None:
-        raise RuntimeError(f"Failed to generate rollout for {map_name} {os.path.basename(scen_path)} N={agent_num}")
+        return f"[skip] {map_name} {os.path.basename(scen_path)} N={agent_num} (expert failed)"
 
     scenario_name = os.path.basename(scen_path).replace(".scen", "")
     scenario_id = scenario_id_from_path(scen_path)
