@@ -350,11 +350,6 @@ def generate_single_rollout(task, args, eecbs_binary: Optional[str]) -> str:
             else:
                 source_used = "eecbs"
         except Exception as e:
-            if args.expert_source == "eecbs":
-                raise RuntimeError(
-                    f"EECBS generation failed for {map_name} {os.path.basename(scen_path)} "
-                    f"N={agent_num}: {e}"
-                ) from e
             fallback_reason = "eecbs_failed"
             positions, velocities = None, None
 
