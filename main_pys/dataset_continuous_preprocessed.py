@@ -58,7 +58,8 @@ class PreprocessedContinuousShardDataset(Dataset):
         scenario_ids: Optional[Sequence[int]] = None,
         scenario_start: Optional[int] = None,
         scenario_end: Optional[int] = None,
-        shard_cache_size: int = 2,
+        shard_cache_size: int = 128,
+        preload: bool = False,
     ) -> None:
         self.preprocessed_dir = preprocessed_dir
         self.map_dir = map_dir
@@ -68,6 +69,7 @@ class PreprocessedContinuousShardDataset(Dataset):
         self.scenario_end = scenario_end
         self.shard_cache_size = max(1, int(shard_cache_size))
         self._shard_cache: "OrderedDict[int, Dict[str, object]]" = OrderedDict()
+        self._preloaded = False
 
         manifest_path = os.path.join(preprocessed_dir, "manifest.pt")
         if not os.path.exists(manifest_path):
@@ -84,6 +86,22 @@ class PreprocessedContinuousShardDataset(Dataset):
         self.indices = self._build_indices()
         if not self.indices:
             raise RuntimeError("No preprocessed continuous samples matched the provided filters")
+
+        if preload:
+            self._preload_all_shards()
+
+    def _preload_all_shards(self) -> None:
+        needed_shards = set()
+        for global_idx in self.indices:
+            needed_shards.add(int(self.manifest["sample_to_shard"][global_idx]))
+        print(f"Preloading {len(needed_shards)} shards into RAM ...")
+        for shard_idx in sorted(needed_shards):
+            shard_name = self.manifest["shard_files"][shard_idx]
+            shard_path = os.path.join(self.preprocessed_dir, shard_name)
+            self._shard_cache[shard_idx] = torch.load(shard_path, map_location="cpu", weights_only=False)
+        self._preloaded = True
+        self.shard_cache_size = len(self._shard_cache) + 1
+        print(f"Preloaded {len(self._shard_cache)} shards")
 
     def _load_maps(self) -> Dict[str, np.ndarray]:
         maps = {}

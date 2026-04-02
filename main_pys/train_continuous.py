@@ -165,6 +165,8 @@ def train(args):
     )
     if args.preprocessed_dir:
         dataset_kwargs["preprocessed_dir"] = args.preprocessed_dir
+        if getattr(args, "preload_shards", False):
+            dataset_kwargs["preload"] = True
     else:
         dataset_kwargs.update(
             data_dir=args.data_dir,
@@ -376,6 +378,7 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--cpu", action="store_true")
     parser.add_argument("--preprocessed-dir", default=None, help="Directory of compact continuous shard files")
+    parser.add_argument("--preload-shards", action="store_true", help="Load all needed shards into RAM at startup")
     args = parser.parse_args()
     train(args)
 
