@@ -149,6 +149,9 @@ def validate(model, loader, device, use_amp, policy_type, args, map_cache):
 
 
 def train(args):
+    if hasattr(torch.multiprocessing, "set_sharing_strategy"):
+        torch.multiprocessing.set_sharing_strategy("file_system")
+
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
     use_amp = device.type == "cuda"

@@ -46,6 +46,9 @@ def _save_shard(output_dir: str, shard_idx: int, samples: List[dict]) -> str:
 
 
 def main() -> None:
+    if hasattr(torch.multiprocessing, "set_sharing_strategy"):
+        torch.multiprocessing.set_sharing_strategy("file_system")
+
     parser = argparse.ArgumentParser(description="Precompute compact continuous PyG shards")
     parser.add_argument("--data-dir", required=True, help="Directory containing raw continuous .npz rollouts")
     parser.add_argument("--map-dir", required=True, help="Directory containing .map files")
