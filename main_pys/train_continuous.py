@@ -14,6 +14,10 @@ from tqdm import tqdm
 
 from main_pys.continuous_env import ORCAStyleShield
 from main_pys.dataset_continuous import ContinuousFlowDataset, build_continuous_weighted_sampler
+from main_pys.dataset_continuous_preprocessed import (
+    PreprocessedContinuousShardDataset,
+    build_preprocessed_continuous_weighted_sampler,
+)
 from main_pys.generative_model import FlowGNNModel
 
 
@@ -151,45 +155,39 @@ def train(args):
     data_loader_generator = torch.Generator().manual_seed(args.seed)
 
     base_dataset = None
-    if args.val_scenario_start is not None or args.val_scenario_end is not None or args.val_scenario_ids:
-        train_dataset = ContinuousFlowDataset(
+    dataset_cls = PreprocessedContinuousShardDataset if args.preprocessed_dir else ContinuousFlowDataset
+    dataset_kwargs = dict(
+        map_dir=args.map_dir,
+        expert_sources=args.expert_sources,
+    )
+    if args.preprocessed_dir:
+        dataset_kwargs["preprocessed_dir"] = args.preprocessed_dir
+    else:
+        dataset_kwargs.update(
             data_dir=args.data_dir,
-            map_dir=args.map_dir,
             k=args.k,
             m=args.m,
             num_directions=args.num_directions,
             wait_threshold=args.wait_threshold,
             max_speed=args.max_speed,
-            expert_sources=args.expert_sources,
+        )
+
+    if args.val_scenario_start is not None or args.val_scenario_end is not None or args.val_scenario_ids:
+        train_dataset = dataset_cls(
+            **dataset_kwargs,
             scenario_ids=args.train_scenario_ids,
             scenario_start=args.train_scenario_start,
             scenario_end=args.train_scenario_end,
         )
-        val_dataset = ContinuousFlowDataset(
-            data_dir=args.data_dir,
-            map_dir=args.map_dir,
-            k=args.k,
-            m=args.m,
-            num_directions=args.num_directions,
-            wait_threshold=args.wait_threshold,
-            max_speed=args.max_speed,
-            expert_sources=args.expert_sources,
+        val_dataset = dataset_cls(
+            **dataset_kwargs,
             scenario_ids=args.val_scenario_ids,
             scenario_start=args.val_scenario_start,
             scenario_end=args.val_scenario_end,
         )
         map_cache = train_dataset.maps
     else:
-        base_dataset = ContinuousFlowDataset(
-            data_dir=args.data_dir,
-            map_dir=args.map_dir,
-            k=args.k,
-            m=args.m,
-            num_directions=args.num_directions,
-            wait_threshold=args.wait_threshold,
-            max_speed=args.max_speed,
-            expert_sources=args.expert_sources,
-        )
+        base_dataset = dataset_cls(**dataset_kwargs)
         train_indices, val_indices = base_dataset.split_indices_by_rollout(args.val_split, args.seed)
         train_dataset = Subset(base_dataset, train_indices)
         val_dataset = Subset(base_dataset, val_indices) if val_indices else None
@@ -202,7 +200,12 @@ def train(args):
     if not args.no_weighted_sampling:
         sampler_base = base_dataset if isinstance(train_dataset, Subset) else train_dataset
         sampler_subset = train_dataset if isinstance(train_dataset, Subset) else None
-        sampler = build_continuous_weighted_sampler(
+        sampler_builder = (
+            build_preprocessed_continuous_weighted_sampler
+            if isinstance(sampler_base, PreprocessedContinuousShardDataset)
+            else build_continuous_weighted_sampler
+        )
+        sampler = sampler_builder(
             sampler_base,
             subset=sampler_subset,
             balance_agent_counts=True,
@@ -212,29 +215,35 @@ def train(args):
 
     batch_size = args.batch_size or (128 if device.type == "cuda" else 16)
     workers = args.num_workers or min(8, os.cpu_count() or 2)
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=sampler is None,
-        sampler=sampler,
-        num_workers=workers,
-        pin_memory=(device.type == "cuda"),
-        persistent_workers=workers > 0,
-        worker_init_fn=seed_worker if workers > 0 else None,
-        generator=data_loader_generator,
-    )
+    train_loader_kwargs = {
+        "dataset": train_dataset,
+        "batch_size": batch_size,
+        "shuffle": sampler is None,
+        "sampler": sampler,
+        "num_workers": workers,
+        "pin_memory": (device.type == "cuda"),
+        "persistent_workers": workers > 0,
+        "worker_init_fn": seed_worker if workers > 0 else None,
+        "generator": data_loader_generator,
+    }
+    if workers > 0:
+        train_loader_kwargs["prefetch_factor"] = 2
+    train_loader = DataLoader(**train_loader_kwargs)
     val_loader = None
     if val_dataset is not None:
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=batch_size,
-            shuffle=False,
-            num_workers=min(4, workers),
-            pin_memory=(device.type == "cuda"),
-            persistent_workers=workers > 0,
-            worker_init_fn=seed_worker if workers > 0 else None,
-            generator=data_loader_generator,
-        )
+        val_loader_kwargs = {
+            "dataset": val_dataset,
+            "batch_size": batch_size,
+            "shuffle": False,
+            "num_workers": min(4, workers),
+            "pin_memory": (device.type == "cuda"),
+            "persistent_workers": workers > 0,
+            "worker_init_fn": seed_worker if workers > 0 else None,
+            "generator": data_loader_generator,
+        }
+        if workers > 0:
+            val_loader_kwargs["prefetch_factor"] = 2
+        val_loader = DataLoader(**val_loader_kwargs)
 
     model = FlowGNNModel(
         k=args.k,
@@ -363,6 +372,7 @@ def main():
     parser.add_argument("--action-loss-weight", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--cpu", action="store_true")
+    parser.add_argument("--preprocessed-dir", default=None, help="Directory of compact continuous shard files")
     args = parser.parse_args()
     train(args)
 
