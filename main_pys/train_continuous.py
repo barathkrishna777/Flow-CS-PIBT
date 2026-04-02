@@ -165,8 +165,6 @@ def train(args):
     )
     if args.preprocessed_dir:
         dataset_kwargs["preprocessed_dir"] = args.preprocessed_dir
-        if getattr(args, "preload_shards", False):
-            dataset_kwargs["preload"] = True
     else:
         dataset_kwargs.update(
             data_dir=args.data_dir,
@@ -177,12 +175,14 @@ def train(args):
             max_speed=args.max_speed,
         )
 
+    preload = getattr(args, "preload_shards", False) and args.preprocessed_dir is not None
     if args.val_scenario_start is not None or args.val_scenario_end is not None or args.val_scenario_ids:
         train_dataset = dataset_cls(
             **dataset_kwargs,
             scenario_ids=args.train_scenario_ids,
             scenario_start=args.train_scenario_start,
             scenario_end=args.train_scenario_end,
+            **({"preload": True} if preload and args.preprocessed_dir else {}),
         )
         val_dataset = dataset_cls(
             **dataset_kwargs,
@@ -192,7 +192,10 @@ def train(args):
         )
         map_cache = train_dataset.maps
     else:
-        base_dataset = dataset_cls(**dataset_kwargs)
+        base_dataset = dataset_cls(
+            **dataset_kwargs,
+            **({"preload": True} if preload and args.preprocessed_dir else {}),
+        )
         train_indices, val_indices = base_dataset.split_indices_by_rollout(args.val_split, args.seed)
         train_dataset = Subset(base_dataset, train_indices)
         val_dataset = Subset(base_dataset, val_indices) if val_indices else None
