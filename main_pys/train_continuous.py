@@ -19,6 +19,7 @@ from main_pys.dataset_continuous_preprocessed import (
     build_preprocessed_continuous_weighted_sampler,
 )
 from main_pys.generative_model import FlowGNNModel
+from main_pys.transformer_model import FlowTransformerModel
 
 
 def set_seed(seed: int) -> None:
@@ -222,7 +223,7 @@ def train(args):
         )
 
     batch_size = args.batch_size or (128 if device.type == "cuda" else 16)
-    workers = args.num_workers or min(8, os.cpu_count() or 2)
+    workers = args.num_workers if args.num_workers is not None else min(8, os.cpu_count() or 2)
     train_loader_kwargs = {
         "dataset": train_dataset,
         "batch_size": batch_size,
@@ -253,14 +254,27 @@ def train(args):
             val_loader_kwargs["prefetch_factor"] = 2
         val_loader = DataLoader(**val_loader_kwargs)
 
-    model = FlowGNNModel(
-        k=args.k,
-        hidden_dim=args.hidden_dim,
-        num_layers=args.num_layers,
-        num_input_channels=4,
-        aux_feature_dim=5,
-        action_dim=args.num_directions + 1,
-    ).to(device)
+    model_type = getattr(args, "model_type", "gnn")
+    if model_type == "transformer":
+        model = FlowTransformerModel(
+            k=args.k,
+            hidden_dim=args.hidden_dim,
+            num_layers=args.num_layers,
+            num_heads=getattr(args, "num_heads", 8),
+            num_input_channels=4,
+            aux_feature_dim=5,
+            action_dim=args.num_directions + 1,
+            chunk_horizon=getattr(args, "chunk_horizon", 1),
+        ).to(device)
+    else:
+        model = FlowGNNModel(
+            k=args.k,
+            hidden_dim=args.hidden_dim,
+            num_layers=args.num_layers,
+            num_input_channels=4,
+            aux_feature_dim=5,
+            action_dim=args.num_directions + 1,
+        ).to(device)
 
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
@@ -302,14 +316,17 @@ def train(args):
             "optimizer_state_dict": optimizer.state_dict(),
             "scheduler_state_dict": scheduler.state_dict(),
             "policy_type": args.policy_type,
+            "model_type": model_type,
             "model_config": {
                 "k": args.k,
                 "hidden_dim": args.hidden_dim,
                 "num_layers": args.num_layers,
+                "num_heads": getattr(args, "num_heads", 8),
                 "num_input_channels": 4,
                 "aux_feature_dim": 5,
                 "action_dim": args.num_directions + 1,
                 "velocity_dim": 2,
+                "chunk_horizon": getattr(args, "chunk_horizon", 1),
             },
             "dataset_config": {
                 "num_directions": args.num_directions,
@@ -347,6 +364,7 @@ def main():
     parser.add_argument("--data-dir", required=True, help="Directory of continuous .npz files")
     parser.add_argument("--map-dir", required=True, help="Directory of .map files")
     parser.add_argument("--policy-type", choices=["flow", "discrete"], default="flow")
+    parser.add_argument("--model-type", choices=["gnn", "transformer"], default="gnn")
     parser.add_argument("--run-name", default="")
     parser.add_argument("--output-dir", default=".")
     parser.add_argument("--epochs", type=int, default=10)
@@ -354,6 +372,8 @@ def main():
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--hidden-dim", type=int, default=512)
     parser.add_argument("--num-layers", type=int, default=4)
+    parser.add_argument("--num-heads", type=int, default=8, help="Transformer attention heads (transformer model only)")
+    parser.add_argument("--chunk-horizon", type=int, default=1, help="Number of future steps to predict (action chunking)")
     parser.add_argument("--k", type=int, default=4)
     parser.add_argument("--m", type=int, default=5)
     parser.add_argument("--num-directions", type=int, default=8)

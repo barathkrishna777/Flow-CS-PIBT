@@ -21,6 +21,111 @@ from main_pys.model_inputs import load_grid_map_from_file, velocity_to_direction
 
 REPO_ROOT = Path(__file__).resolve().parent
 DEFAULT_EECBS_REPO = os.environ.get("EECBS_FLOW_REPO", str(REPO_ROOT.parent / "EECBS-flow"))
+DEFAULT_LACAM3_REPO = os.environ.get("LACAM3_REPO", str(REPO_ROOT.parent / "lacam3"))
+
+
+def resolve_lacam3_binary(explicit_binary: Optional[str], lacam3_repo: Optional[str]) -> str:
+    candidates = []
+    if explicit_binary:
+        candidates.append(Path(explicit_binary).expanduser())
+    if lacam3_repo:
+        repo_path = Path(lacam3_repo).expanduser()
+        candidates.extend([
+            repo_path / "build" / "main",
+            repo_path / "build" / "lacam3",
+            repo_path / "lacam3",
+        ])
+    candidates.extend([
+        REPO_ROOT / "build" / "lacam3",
+        REPO_ROOT.parent / "lacam3" / "build" / "main",
+        REPO_ROOT.parent / "lacam3" / "build" / "lacam3",
+    ])
+    seen = set()
+    for candidate in candidates:
+        candidate_str = str(candidate.resolve()) if candidate.exists() else str(candidate)
+        if candidate_str in seen:
+            continue
+        seen.add(candidate_str)
+        if os.path.exists(candidate):
+            return str(candidate)
+    checked = "\n".join(f"  - {c}" for c in seen)
+    raise FileNotFoundError(
+        "Could not find a LaCAM3 binary. Checked:\n"
+        f"{checked}\n"
+        "Pass --lacam3-binary explicitly, set LACAM3_REPO, or place the solver in ../lacam3/build/main."
+    )
+
+
+def parse_lacam3_output(file_path: str) -> np.ndarray:
+    """Parse LaCAM3 solution file into (N_agents, T, 2) array in row,col format.
+
+    LaCAM3 outputs one agent per line, each step as ``col,row`` separated by
+    semicolons.  We convert to (row, col) to match the rest of the codebase.
+    """
+    paths = []
+    with open(file_path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            coords = []
+            for pair in line.split(";"):
+                pair = pair.strip()
+                if not pair:
+                    continue
+                parts = pair.split(",")
+                if len(parts) == 2:
+                    try:
+                        col, row = float(parts[0]), float(parts[1])
+                        coords.append([row, col])  # store as (row, col)
+                    except ValueError:
+                        continue
+            if coords:
+                paths.append(np.asarray(coords, dtype=np.float32))
+    if not paths:
+        return np.zeros((0, 0, 2), dtype=np.float32)
+    max_len = max(len(p) for p in paths)
+    padded = np.zeros((len(paths), max_len, 2), dtype=np.float32)
+    for i, path in enumerate(paths):
+        padded[i, : len(path)] = path
+        padded[i, len(path) :] = path[-1]
+    return padded
+
+
+def run_lacam3(
+    map_file: str,
+    scen_file: str,
+    agent_num: int,
+    time_limit: int,
+    lacam3_binary: str,
+) -> np.ndarray:
+    """Run LaCAM3 and return (N_agents, T, 2) discrete paths in row,col."""
+    if not os.path.exists(lacam3_binary):
+        raise FileNotFoundError(f"LaCAM3 binary not found: {lacam3_binary}")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out_file = os.path.join(tmpdir, "output.txt")
+        cmd = [
+            lacam3_binary,
+            "-m", map_file,
+            "-i", scen_file,
+            "-N", str(agent_num),
+            "-t", str(time_limit),
+            "-o", out_file,
+        ]
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        if not os.path.exists(out_file):
+            raise RuntimeError(
+                "LaCAM3 finished without producing an output file. "
+                f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+            )
+        paths = parse_lacam3_output(out_file)
+        if len(paths) == 0:
+            raise RuntimeError(
+                "LaCAM3 produced an empty output file. "
+                f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+            )
+        return paths
 
 
 def parse_paths_txt(file_path: str) -> np.ndarray:
@@ -311,7 +416,7 @@ def build_map_scenario_pairs(
     return pairs
 
 
-def generate_single_rollout(task, args, eecbs_binary: Optional[str]) -> str:
+def generate_single_rollout(task, args, eecbs_binary: Optional[str], lacam3_binary: Optional[str] = None) -> str:
     map_name, map_path, scen_path, agent_num = task
     obstacle_map = load_grid_map_from_file(map_path)
     starts_grid, goals_grid = parse_scene_file(scen_path, agent_num=agent_num)
@@ -340,6 +445,22 @@ def generate_single_rollout(task, args, eecbs_binary: Optional[str]) -> str:
             # continuous-interpolated positions pass near wall boundaries.
         except Exception as e:
             fallback_reason = "eecbs_failed"
+            positions, velocities = None, None
+
+    if positions is None and args.expert_source in {"lacam3", "hybrid"} and lacam3_binary:
+        try:
+            discrete_paths = run_lacam3(
+                map_path,
+                scen_path,
+                agent_num,
+                args.time_limit,
+                lacam3_binary,
+            )
+            positions, velocities = discrete_paths_to_continuous(discrete_paths, args.dt, args.max_speed)
+            source_used = "lacam3"
+        except Exception as e:
+            if fallback_reason == "none":
+                fallback_reason = "lacam3_failed"
             positions, velocities = None, None
 
     if positions is None and args.expert_source in {"orca", "po-orca", "hybrid"}:
@@ -390,7 +511,7 @@ def main():
     parser.add_argument("--maps", nargs="*", default=None)
     parser.add_argument("--agent-counts", nargs="+", type=int, default=[100])
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--expert-source", choices=["eecbs", "orca", "po-orca", "hybrid"], default="hybrid")
+    parser.add_argument("--expert-source", choices=["eecbs", "lacam3", "orca", "po-orca", "hybrid"], default="hybrid")
     parser.add_argument("--max-scenarios", type=int, default=1)
     parser.add_argument("--scenario-ids", nargs="*", type=int, default=None)
     parser.add_argument("--scenario-start", type=int, default=None)
@@ -404,6 +525,8 @@ def main():
     parser.add_argument("--num-directions", type=int, default=8)
     parser.add_argument("--eecbs-repo", default=DEFAULT_EECBS_REPO)
     parser.add_argument("--eecbs-binary", default=None)
+    parser.add_argument("--lacam3-repo", default=DEFAULT_LACAM3_REPO)
+    parser.add_argument("--lacam3-binary", default=None)
     parser.add_argument("--suboptimality", type=float, default=1.2)
     parser.add_argument("--time-limit", type=int, default=60)
     parser.add_argument("--workers", type=int, default=1)
@@ -418,6 +541,16 @@ def main():
             if args.expert_source == "eecbs":
                 raise
             print(f"[hybrid] EECBS unavailable, will fall back to ORCA:\n{e}")
+
+    lacam3_binary = None
+    if args.expert_source in {"lacam3", "hybrid"}:
+        try:
+            lacam3_binary = resolve_lacam3_binary(args.lacam3_binary, args.lacam3_repo)
+            print(f"Using LaCAM3 binary: {lacam3_binary}")
+        except FileNotFoundError as e:
+            if args.expert_source == "lacam3":
+                raise
+            print(f"[hybrid] LaCAM3 unavailable, will skip:\n{e}")
 
     pairs = build_map_scenario_pairs(
         args.map_dir,
@@ -439,13 +572,13 @@ def main():
     workers = max(1, args.workers)
     if workers == 1:
         for task in tasks:
-            print(generate_single_rollout(task, args, eecbs_binary))
+            print(generate_single_rollout(task, args, eecbs_binary, lacam3_binary))
         return
 
     worker_count = min(workers, cpu_count(), len(tasks))
     print(f"Generating {len(tasks)} rollouts with {worker_count} workers")
     with Pool(worker_count) as pool:
-        worker_fn = partial(generate_single_rollout, args=args, eecbs_binary=eecbs_binary)
+        worker_fn = partial(generate_single_rollout, args=args, eecbs_binary=eecbs_binary, lacam3_binary=lacam3_binary)
         for message in pool.imap_unordered(worker_fn, tasks, chunksize=1):
             print(message)
 

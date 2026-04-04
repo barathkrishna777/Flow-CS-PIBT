@@ -12,6 +12,7 @@ import torch
 from main_pys.continuous_env import load_env_from_files
 from main_pys.continuous_scenarios import scenario_id_from_path, select_scenarios
 from main_pys.generative_model import FlowGNNModel
+from main_pys.transformer_model import FlowTransformerModel
 from main_pys.model_inputs import (
     create_continuous_data_object,
     labels_to_direction_vectors,
@@ -100,6 +101,7 @@ def aggregate_flow_samples(candidate_velocities: List[np.ndarray], aggregation: 
 
 def load_model(model_path: str, device: torch.device):
     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+    model_type = checkpoint.get("model_type", "gnn")
     config = checkpoint.get(
         "model_config",
         {
@@ -112,7 +114,14 @@ def load_model(model_path: str, device: torch.device):
             "velocity_dim": 2,
         },
     )
-    model = FlowGNNModel(**config).to(device)
+    if model_type == "transformer":
+        # FlowTransformerModel accepts num_heads and chunk_horizon
+        model = FlowTransformerModel(**config).to(device)
+    else:
+        # Strip transformer-only keys for GNN compatibility
+        gnn_keys = {"k", "hidden_dim", "num_layers", "num_input_channels", "aux_feature_dim", "action_dim", "velocity_dim"}
+        gnn_config = {k: v for k, v in config.items() if k in gnn_keys}
+        model = FlowGNNModel(**gnn_config).to(device)
     model.load_state_dict(checkpoint["model_state_dict"] if "model_state_dict" in checkpoint else checkpoint, strict=False)
     model.eval()
     return model, checkpoint
@@ -255,7 +264,7 @@ def main():
     parser.add_argument("--eval-seed", type=int, default=0)
     parser.add_argument("--output-csv", required=True)
     parser.add_argument("--viz-dir", default=None)
-    parser.add_argument("--shield-type", choices=["orca", "heuristic-orca", "po-orca", "simple", "none"], default="orca")
+    parser.add_argument("--shield-type", choices=["orca", "heuristic-orca", "po-orca", "epibt", "simple", "none"], default="orca")
     parser.add_argument("--num-integration-steps", type=int, default=3)
     parser.add_argument("--num-consensus-samples", type=int, default=1)
     parser.add_argument("--flow-aggregation", choices=["mean", "medoid", "best"], default="mean")

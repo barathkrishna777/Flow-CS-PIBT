@@ -559,6 +559,264 @@ class ORCAStyleShield:
         return adjusted
 
 
+class EPIBTShield:
+    """Enhanced PIBT collision shield for continuous MAPF.
+
+    Implements priority-based local coordination with backtracking in
+    continuous space.  Agents are processed in descending priority order.
+    Each agent selects the best candidate velocity that avoids collisions
+    with already-committed higher-priority agents.
+
+    Candidate velocities per agent:
+      - The preferred (model or goal-directed) velocity
+      - ``num_candidate_directions`` evenly-spaced directions at max_speed
+      - Half-speed versions of the preferred velocity
+      - Zero velocity (wait)
+
+    Backtracking: if an agent cannot find a valid action it requests the
+    blocking higher-priority agent to try an alternative, up to
+    ``max_backtrack_depth`` levels deep.
+    """
+
+    def __init__(
+        self,
+        agent_radius: float,
+        max_speed: float,
+        dt: float,
+        num_candidate_directions: int = 16,
+        max_backtrack_depth: int = 3,
+        obstacle_repulsion_gain: float = 2.0,
+    ) -> None:
+        self.agent_radius = agent_radius
+        self.max_speed = max_speed
+        self.dt = dt
+        self.num_candidate_directions = num_candidate_directions
+        self.max_backtrack_depth = max_backtrack_depth
+        self.obstacle_repulsion_gain = obstacle_repulsion_gain
+        self._sdf_cache: Dict[Tuple, Tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def project(
+        self,
+        positions: np.ndarray,
+        preferred_velocities: np.ndarray,
+        obstacle_map: np.ndarray,
+        priorities: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        """Return collision-free velocities using EPIBT coordination.
+
+        Args:
+            positions: (N, 2) agent positions.
+            preferred_velocities: (N, 2) desired velocities.
+            obstacle_map: (H, W) binary obstacle grid.
+            priorities: (N,) priority values (higher = processed first).
+                If None, agents are processed in index order.
+        """
+        n = len(positions)
+        positions = np.asarray(positions, dtype=np.float32)
+        preferred_velocities = np.asarray(preferred_velocities, dtype=np.float32)
+
+        sdf, grad_r, grad_c = self._get_sdf(obstacle_map)
+
+        # Agent processing order: highest priority first
+        if priorities is not None:
+            order = np.argsort(-np.asarray(priorities, dtype=np.float64))
+        else:
+            order = np.arange(n)
+
+        # Pre-generate all candidate velocity sets
+        all_candidates = [
+            self._generate_candidates(preferred_velocities[i], positions[i], sdf, grad_r, grad_c)
+            for i in range(n)
+        ]
+
+        # committed[i] = chosen velocity for agent i (-1 means not yet committed)
+        committed = np.full(n, -1, dtype=np.int32)  # index into all_candidates[i]
+        committed_vel = np.zeros((n, 2), dtype=np.float32)
+
+        # Process agents in priority order with backtracking
+        self._assign_actions(
+            order,
+            positions,
+            preferred_velocities,
+            all_candidates,
+            committed,
+            committed_vel,
+            sdf,
+            grad_r,
+            grad_c,
+            depth=0,
+        )
+
+        # Any agents still unassigned get their preferred velocity clipped
+        for i in range(n):
+            if committed[i] < 0:
+                v = preferred_velocities[i].copy()
+                committed_vel[i] = self._clip(v)
+
+        return committed_vel
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _assign_actions(
+        self,
+        order,
+        positions,
+        preferred,
+        all_candidates,
+        committed,
+        committed_vel,
+        sdf,
+        grad_r,
+        grad_c,
+        depth: int,
+    ) -> bool:
+        """Recursively assign actions to agents in priority order.
+
+        Returns True if all assignments in ``order`` succeeded.
+        """
+        if depth > self.max_backtrack_depth:
+            return False
+
+        for idx in order:
+            if committed[idx] >= 0:
+                continue  # already assigned (e.g. re-entry after backtrack)
+
+            candidates = all_candidates[idx]
+            placed = False
+            for c_idx, cand in enumerate(candidates):
+                # Check obstacle collision
+                if self._hits_obstacle(positions[idx], cand, sdf):
+                    continue
+                # Check collision with all already-committed agents
+                conflict = False
+                for j in range(len(positions)):
+                    if j == idx or committed[j] < 0:
+                        continue
+                    if self._agents_collide(positions[idx], cand, positions[j], committed_vel[j]):
+                        conflict = True
+                        break
+                if not conflict:
+                    committed[idx] = c_idx
+                    committed_vel[idx] = cand
+                    placed = True
+                    break
+
+            if not placed:
+                # Backtrack: commit zero velocity for this agent
+                committed[idx] = len(candidates) - 1  # last candidate is always zero
+                committed_vel[idx] = np.zeros(2, dtype=np.float32)
+
+        return True
+
+    def _generate_candidates(
+        self,
+        preferred: np.ndarray,
+        position: np.ndarray,
+        sdf: np.ndarray,
+        grad_r: np.ndarray,
+        grad_c: np.ndarray,
+    ) -> list:
+        """Generate ordered list of candidate velocities for one agent.
+
+        Candidates are sorted by score descending (best first).
+        """
+        candidates = []
+
+        # Preferred velocity
+        pref_norm = np.linalg.norm(preferred)
+        if pref_norm > 1e-6:
+            candidates.append(preferred.copy())
+            # Half-speed preferred
+            candidates.append(preferred * 0.5)
+
+        # Evenly spaced directions at max_speed
+        angles = np.linspace(0, 2 * math.pi, self.num_candidate_directions, endpoint=False)
+        for angle in angles:
+            v = np.array([math.sin(angle), math.cos(angle)], dtype=np.float32) * self.max_speed
+            candidates.append(v)
+
+        # Zero velocity (wait)
+        candidates.append(np.zeros(2, dtype=np.float32))
+
+        # Score and sort
+        scores = [self._score_candidate(c, preferred) for c in candidates]
+        sorted_pairs = sorted(zip(scores, candidates), key=lambda p: -p[0])
+        return [c for _, c in sorted_pairs]
+
+    def _score_candidate(self, candidate: np.ndarray, preferred: np.ndarray) -> float:
+        """Score by alignment with preferred velocity."""
+        pref_norm = np.linalg.norm(preferred)
+        if pref_norm < 1e-6:
+            # Prefer waiting when preferred is zero
+            cand_norm = np.linalg.norm(candidate)
+            return -float(cand_norm)
+        return float(np.dot(candidate, preferred)) / max(pref_norm, 1e-6)
+
+    def _agents_collide(
+        self,
+        pos_i: np.ndarray,
+        vel_i: np.ndarray,
+        pos_j: np.ndarray,
+        vel_j: np.ndarray,
+    ) -> bool:
+        """Check if two agents would collide given their velocities."""
+        min_dist = 2.0 * self.agent_radius
+        # Check at proposed next positions
+        next_i = pos_i + vel_i * self.dt
+        next_j = pos_j + vel_j * self.dt
+        dist = float(np.linalg.norm(next_i - next_j))
+        if dist < min_dist:
+            return True
+        # Also check if they pass through each other (crossing check)
+        rel_pos = pos_j - pos_i
+        rel_vel = vel_j - vel_i
+        # Time of closest approach
+        denom = float(rel_vel @ rel_vel)
+        if denom > 1e-8:
+            t_closest = -float(rel_pos @ rel_vel) / denom
+            t_closest = max(0.0, min(self.dt, t_closest))
+            closest = pos_i + vel_i * t_closest - (pos_j + vel_j * t_closest)
+            if float(np.linalg.norm(closest)) < min_dist:
+                return True
+        return False
+
+    def _hits_obstacle(
+        self,
+        position: np.ndarray,
+        velocity: np.ndarray,
+        sdf: np.ndarray,
+    ) -> bool:
+        """Check if velocity would move agent into an obstacle."""
+        proposed = position + velocity * self.dt
+        proposed_2d = proposed.reshape(1, 2)
+        d = float(sample_sdf_bilinear(sdf, proposed_2d)[0])
+        return d < self.agent_radius
+
+    def _clip(self, velocity: np.ndarray) -> np.ndarray:
+        norm = np.linalg.norm(velocity)
+        if norm > self.max_speed:
+            return velocity * (self.max_speed / norm)
+        return velocity
+
+    def _get_sdf(
+        self, obstacle_map: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        key = (obstacle_map.shape, obstacle_map.data.tobytes())
+        cached = self._sdf_cache.get(key)
+        if cached is not None:
+            return cached
+        sdf = compute_sdf(obstacle_map)
+        grad_r, grad_c = sdf_gradient(sdf)
+        self._sdf_cache[key] = (sdf, grad_r, grad_c)
+        return sdf, grad_r, grad_c
+
+
 class ContinuousMAPFEnv:
     """Continuous-space MAPF environment with priority-ordered collision shielding.
 
@@ -568,6 +826,7 @@ class ContinuousMAPFEnv:
     - ``"orca"``: Standard symmetric ORCA (heuristic or rvo2).
     - ``"heuristic-orca"``: Force heuristic path (no rvo2).
     - ``"po-orca"``: Priority-Ordered ORCA with sequential processing.
+    - ``"epibt"``: Enhanced PIBT priority-based shield with backtracking.
     """
 
     DEADLOCK_CHECK_INTERVAL = 30
@@ -587,6 +846,7 @@ class ContinuousMAPFEnv:
         self.agent_radius = agent_radius
         self.goal_tolerance = goal_tolerance
         self._shield = ORCAStyleShield(agent_radius=agent_radius, max_speed=max_speed, dt=dt)
+        self._epibt_shield = EPIBTShield(agent_radius=agent_radius, max_speed=max_speed, dt=dt)
         self.positions = None
         self.goals = None
         self.history_positions = []
@@ -654,6 +914,13 @@ class ContinuousMAPFEnv:
                 preferred_velocities,
                 self.obstacle_map,
                 use_true_orca=True,
+            )
+        if shield_type == "epibt":
+            return self._epibt_shield.project(
+                self.positions,
+                preferred_velocities,
+                self.obstacle_map,
+                priorities=self.priorities,
             )
         raise ValueError(f"Unsupported shield type: {shield_type}")
 
