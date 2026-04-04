@@ -21,7 +21,7 @@ from typing import Dict, List
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import ConcatDataset, DataLoader
 from tqdm import tqdm
 
 from main_pys.dataset_continuous import ContinuousFlowDataset
@@ -50,7 +50,7 @@ def main() -> None:
         torch.multiprocessing.set_sharing_strategy("file_system")
 
     parser = argparse.ArgumentParser(description="Precompute compact continuous PyG shards")
-    parser.add_argument("--data-dir", required=True, help="Directory containing raw continuous .npz rollouts")
+    parser.add_argument("--data-dir", nargs="+", required=True, help="One or more directories containing raw continuous .npz rollouts")
     parser.add_argument("--map-dir", required=True, help="Directory containing .map files")
     parser.add_argument("--out", required=True, help="Output directory for shard files and manifest")
     parser.add_argument("--k", type=int, default=4)
@@ -78,8 +78,7 @@ def main() -> None:
     for name in existing:
         os.remove(os.path.join(args.out, name))
 
-    dataset = ContinuousFlowDataset(
-        data_dir=args.data_dir,
+    ds_kwargs = dict(
         map_dir=args.map_dir,
         k=args.k,
         m=args.m,
@@ -91,6 +90,12 @@ def main() -> None:
         scenario_start=args.scenario_start,
         scenario_end=args.scenario_end,
     )
+    if len(args.data_dir) == 1:
+        dataset = ContinuousFlowDataset(data_dir=args.data_dir[0], **ds_kwargs)
+    else:
+        parts = [ContinuousFlowDataset(data_dir=d, **ds_kwargs) for d in args.data_dir]
+        dataset = ConcatDataset(parts)
+        print(f"Combined {len(args.data_dir)} data directories: {sum(len(p) for p in parts):,} total samples")
 
     loader_kwargs = {
         "dataset": dataset,
