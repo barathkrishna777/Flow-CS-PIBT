@@ -59,37 +59,57 @@ def resolve_lacam3_binary(explicit_binary: Optional[str], lacam3_repo: Optional[
 def parse_lacam3_output(file_path: str) -> np.ndarray:
     """Parse LaCAM3 solution file into (N_agents, T, 2) array in row,col format.
 
-    LaCAM3 outputs one agent per line, each step as ``col,row`` separated by
-    semicolons.  We convert to (row, col) to match the rest of the codebase.
+    LaCAM3 output format (timestep-major):
+        agents=64
+        ...header lines...
+        solution=
+        0:(col0,row0),(col1,row1),...   <- timestep 0, all agents
+        1:(col0,row0),(col1,row1),...   <- timestep 1, all agents
+        ...
+
+    Coordinates are (col, row); we convert to (row, col) to match the codebase.
+    Returns array of shape (N_agents, T_steps, 2).
     """
-    paths = []
+    import re
+    timesteps = {}  # t -> list of (row, col) for each agent
+    in_solution = False
+
     with open(file_path, "r") as f:
         for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
+            line = line.rstrip()
+            if line.startswith("solution="):
+                in_solution = True
                 continue
-            coords = []
-            for pair in line.split(";"):
-                pair = pair.strip()
-                if not pair:
-                    continue
-                parts = pair.split(",")
-                if len(parts) == 2:
-                    try:
-                        col, row = float(parts[0]), float(parts[1])
-                        coords.append([row, col])  # store as (row, col)
-                    except ValueError:
-                        continue
-            if coords:
-                paths.append(np.asarray(coords, dtype=np.float32))
-    if not paths:
+            if not in_solution:
+                continue
+            if not line:
+                continue
+            # Format: "T:(c0,r0),(c1,r1),..."
+            colon_idx = line.index(":")
+            t = int(line[:colon_idx])
+            coords_str = line[colon_idx + 1:]
+            pairs = re.findall(r'\((\d+),(\d+)\)', coords_str)
+            timesteps[t] = [(int(r), int(c)) for c, r in pairs]  # swap to (row, col)
+
+    if not timesteps:
         return np.zeros((0, 0, 2), dtype=np.float32)
-    max_len = max(len(p) for p in paths)
-    padded = np.zeros((len(paths), max_len, 2), dtype=np.float32)
-    for i, path in enumerate(paths):
-        padded[i, : len(path)] = path
-        padded[i, len(path) :] = path[-1]
-    return padded
+
+    T = max(timesteps.keys()) + 1
+    N = len(next(iter(timesteps.values())))
+    paths = np.zeros((N, T, 2), dtype=np.float32)
+    for t, coords in timesteps.items():
+        for agent_idx, (row, col) in enumerate(coords):
+            paths[agent_idx, t, 0] = row
+            paths[agent_idx, t, 1] = col
+
+    # Forward-fill any missing timesteps (shouldn't happen but be safe)
+    for t in range(1, T):
+        if t not in timesteps:
+            paths[:, t] = paths[:, t - 1]
+
+    # Shape: (N_agents, T, 2) — transpose to match discrete_paths_to_continuous
+    # which expects (N_agents, T, 2) with time as axis 1
+    return paths
 
 
 def run_lacam3(
