@@ -21,7 +21,7 @@ from typing import Dict, List
 
 import numpy as np
 import torch
-from torch.utils.data import ConcatDataset, DataLoader
+from torch.utils.data import ConcatDataset, DataLoader, Subset
 from tqdm import tqdm
 
 from main_pys.dataset_continuous import ContinuousFlowDataset
@@ -66,17 +66,28 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=64, help="Number of samples fetched per loader batch")
     parser.add_argument("--shard-size", type=int, default=2048, help="Samples per shard file")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite output dir if it already contains shards")
+    parser.add_argument("--resume", action="store_true", help="Resume from existing partial shards instead of erroring or overwriting")
     args = parser.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
-    existing = [name for name in os.listdir(args.out) if name.startswith("shard_") or name == "manifest.pt"]
-    if existing and not args.overwrite:
+    existing_shards = sorted(
+        name for name in os.listdir(args.out)
+        if name.startswith("shard_") and name.endswith(".pt")
+    )
+    has_manifest = os.path.exists(os.path.join(args.out, "manifest.pt"))
+
+    if (existing_shards or has_manifest) and not args.overwrite and not args.resume:
         raise RuntimeError(
             f"Output directory {args.out} already contains shard data. "
-            "Pass --overwrite or choose a new directory."
+            "Pass --overwrite to restart from scratch or --resume to continue."
         )
-    for name in existing:
-        os.remove(os.path.join(args.out, name))
+
+    if args.overwrite:
+        for name in existing_shards:
+            os.remove(os.path.join(args.out, name))
+        if has_manifest:
+            os.remove(os.path.join(args.out, "manifest.pt"))
+        existing_shards = []
 
     ds_kwargs = dict(
         map_dir=args.map_dir,
@@ -97,8 +108,20 @@ def main() -> None:
         dataset = ConcatDataset(parts)
         print(f"Combined {len(args.data_dir)} data directories: {sum(len(p) for p in parts):,} total samples")
 
+    # Resume: skip samples that are already written to complete shards.
+    # shuffle=False guarantees samples are processed in a fixed order, so
+    # the first (num_complete_shards * shard_size) samples are already on disk.
+    num_complete_shards = len(existing_shards)
+    skip_samples = num_complete_shards * args.shard_size
+    if args.resume and num_complete_shards > 0:
+        print(f"Resuming: {num_complete_shards} shards already written, skipping {skip_samples:,} samples.")
+        active_dataset = Subset(dataset, range(skip_samples, len(dataset)))
+    else:
+        active_dataset = dataset
+        skip_samples = 0
+
     loader_kwargs = {
-        "dataset": dataset,
+        "dataset": active_dataset,
         "batch_size": args.batch_size,
         "shuffle": False,
         "num_workers": args.workers,
@@ -109,17 +132,19 @@ def main() -> None:
         loader_kwargs["prefetch_factor"] = 2
     loader = DataLoader(**loader_kwargs)
 
-    shard_files: List[str] = []
+    shard_files: List[str] = [f"shard_{i:05d}.pt" for i in range(num_complete_shards)]
     samples_in_shard: List[dict] = []
-    sample_to_shard: List[int] = []
-    sample_to_offset: List[int] = []
-    scenario_ids: List[int] = []
-    agent_counts: List[int] = []
-    difficulty: List[float] = []
-    rollout_ids: List[int] = []
-    map_ids: List[int] = []
-    source_ids: List[int] = []
-    scenario_name_ids: List[int] = []
+    # Metadata for already-skipped samples: use neutral placeholder values.
+    # These shards exist on disk; placeholders only affect weighted sampling weights.
+    sample_to_shard: List[int] = [i // args.shard_size for i in range(skip_samples)]
+    sample_to_offset: List[int] = [i % args.shard_size for i in range(skip_samples)]
+    scenario_ids: List[int] = [0] * skip_samples
+    agent_counts: List[int] = [0] * skip_samples
+    difficulty: List[float] = [1.0] * skip_samples
+    rollout_ids: List[int] = [0] * skip_samples
+    map_ids: List[int] = [0] * skip_samples
+    source_ids: List[int] = [0] * skip_samples
+    scenario_name_ids: List[int] = [0] * skip_samples
 
     map_vocab: List[str] = []
     map_vocab_map: Dict[str, int] = {}
@@ -128,9 +153,9 @@ def main() -> None:
     scenario_name_vocab: List[str] = []
     scenario_name_vocab_map: Dict[str, int] = {}
 
-    shard_idx = 0
-    sample_idx = 0
-    progress = tqdm(total=len(dataset), desc="Preprocessing continuous shards")
+    shard_idx = num_complete_shards
+    sample_idx = skip_samples
+    progress = tqdm(total=len(dataset), desc="Preprocessing continuous shards", initial=skip_samples)
     for batch in loader:
         for data in batch:
             compact_sample = compact_continuous_sample(data)
