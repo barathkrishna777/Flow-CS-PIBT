@@ -177,6 +177,7 @@ def train(args):
         )
 
     preload = getattr(args, "preload_shards", False) and args.preprocessed_dir is not None
+    val_preprocessed_dir = getattr(args, "val_preprocessed_dir", None)
     if args.val_scenario_start is not None or args.val_scenario_end is not None or args.val_scenario_ids:
         train_dataset = dataset_cls(
             **dataset_kwargs,
@@ -185,12 +186,19 @@ def train(args):
             scenario_end=args.train_scenario_end,
             **({"preload": True} if preload and args.preprocessed_dir else {}),
         )
-        val_dataset = dataset_cls(
-            **dataset_kwargs,
-            scenario_ids=args.val_scenario_ids,
-            scenario_start=args.val_scenario_start,
-            scenario_end=args.val_scenario_end,
-        )
+        # If a separate val shard dir was provided, use it (ignoring scenario filters
+        # since those were baked in during preprocessing).
+        if val_preprocessed_dir and args.preprocessed_dir:
+            val_kwargs = dict(dataset_kwargs)
+            val_kwargs["preprocessed_dir"] = val_preprocessed_dir
+            val_dataset = PreprocessedContinuousShardDataset(**val_kwargs)
+        else:
+            val_dataset = dataset_cls(
+                **dataset_kwargs,
+                scenario_ids=args.val_scenario_ids,
+                scenario_start=args.val_scenario_start,
+                scenario_end=args.val_scenario_end,
+            )
         map_cache = train_dataset.maps
     else:
         base_dataset = dataset_cls(
@@ -401,6 +409,7 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--cpu", action="store_true")
     parser.add_argument("--preprocessed-dir", default=None, help="Directory of compact continuous shard files")
+    parser.add_argument("--val-preprocessed-dir", default=None, help="Separate shard directory for validation (e.g. built with different scenario range)")
     parser.add_argument("--preload-shards", action="store_true", help="Load all needed shards into RAM at startup")
     args = parser.parse_args()
     train(args)
