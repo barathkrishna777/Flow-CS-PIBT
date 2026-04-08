@@ -246,11 +246,12 @@ def train(args):
     if workers > 0:
         train_loader_kwargs["prefetch_factor"] = 2
     train_loader = DataLoader(**train_loader_kwargs)
+    val_batch_size = getattr(args, "val_batch_size", None) or batch_size
     val_loader = None
     if val_dataset is not None:
         val_loader_kwargs = {
             "dataset": val_dataset,
-            "batch_size": batch_size,
+            "batch_size": val_batch_size,
             "shuffle": False,
             "num_workers": min(4, workers),
             "pin_memory": (device.type == "cuda"),
@@ -410,6 +411,7 @@ def main():
     parser.add_argument("--cpu", action="store_true")
     parser.add_argument("--preprocessed-dir", default=None, help="Directory of compact continuous shard files")
     parser.add_argument("--val-preprocessed-dir", default=None, help="Separate shard directory for validation (e.g. built with different scenario range)")
+    parser.add_argument("--val-batch-size", type=int, default=None, help="Batch size for validation (defaults to --batch-size; reduce for large-agent val sets)")
     parser.add_argument("--preload-shards", action="store_true", help="Load all needed shards into RAM at startup")
     args = parser.parse_args()
     train(args)
