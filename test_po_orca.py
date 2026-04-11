@@ -18,6 +18,7 @@ from main_pys.continuous_env import (
 
 PASS = 0
 FAIL = 0
+SKIP = 0
 
 
 def report(name: str, passed: bool, detail: str = ""):
@@ -28,6 +29,15 @@ def report(name: str, passed: bool, detail: str = ""):
     else:
         FAIL += 1
     msg = f"[{status}] {name}"
+    if detail:
+        msg += f"  --  {detail}"
+    print(msg)
+
+
+def report_skip(name: str, detail: str = ""):
+    global SKIP
+    SKIP += 1
+    msg = f"[SKIP] {name}"
     if detail:
         msg += f"  --  {detail}"
     print(msg)
@@ -261,6 +271,49 @@ def test_obstacle_map():
 
 
 # ---------------------------------------------------------------
+# Test 7: picbf-cs adapter smoke test
+# ---------------------------------------------------------------
+def test_picbf_cs_adapter():
+    grid = np.zeros((20, 20), dtype=np.int8)
+    starts = np.array([
+        [5.5, 10.5],
+        [14.5, 10.5],
+        [10.5, 5.5],
+        [10.5, 14.5],
+    ], dtype=np.float32)
+    goals = np.array([
+        [14.5, 10.5],
+        [5.5, 10.5],
+        [10.5, 14.5],
+        [10.5, 5.5],
+    ], dtype=np.float32)
+
+    env = ContinuousMAPFEnv(grid, agent_radius=0.3)
+    env.reset(starts, goals)
+    try:
+        for _ in range(120):
+            env.step(env.goal_directed_velocities(), shield_type="picbf-cs")
+            if env.is_done():
+                break
+    except ImportError as exc:
+        report_skip("picbf-cs adapter", str(exc))
+        return
+
+    m = env.current_metrics()
+    passed = (
+        m["agent_fraction_at_goal"] == 1.0
+        and m["collisions"] == 0
+        and m["obstacle_hits"] == 0
+    )
+    report(
+        "picbf-cs crossing: agents reach goals without collisions",
+        passed,
+        f"at_goal={m['agent_fraction_at_goal']:.3f}, collisions={m['collisions']:.0f}, "
+        f"obstacle_hits={m['obstacle_hits']:.0f}",
+    )
+
+
+# ---------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------
 if __name__ == "__main__":
@@ -286,7 +339,10 @@ if __name__ == "__main__":
     print("\n--- Test 6: Obstacle Map ---")
     test_obstacle_map()
 
+    print("\n--- Test 7: picbf-cs Adapter ---")
+    test_picbf_cs_adapter()
+
     print("\n" + "=" * 60)
-    print(f"Results: {PASS} passed, {FAIL} failed")
+    print(f"Results: {PASS} passed, {FAIL} failed, {SKIP} skipped")
     print("=" * 60)
     sys.exit(1 if FAIL > 0 else 0)

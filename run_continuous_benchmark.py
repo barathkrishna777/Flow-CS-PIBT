@@ -748,7 +748,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--eecbs-repo", default=str(REPO_ROOT.parent / "EECBS-flow"))
     parser.add_argument("--eecbs-binary", default=None)
 
-    parser.add_argument("--shield-type", choices=["orca", "heuristic-orca", "simple", "none"], default="orca")
+    parser.add_argument(
+        "--shield-type",
+        choices=["orca", "heuristic-orca", "po-orca", "epibt", "picbf-cs", "simple", "none"],
+        default="orca",
+    )
     parser.add_argument("--num-integration-steps", type=int, default=3)
     parser.add_argument("--default-consensus-samples", type=int, default=3)
     parser.add_argument("--default-flow-aggregation", choices=["mean", "medoid", "best"], default="mean")

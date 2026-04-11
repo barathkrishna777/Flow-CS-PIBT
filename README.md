@@ -160,6 +160,21 @@ python3 run_continuous_benchmark.py \
 
 The benchmark runner orchestrates shared data generation, 3-seed training for flow and the discretized continuous baseline, ORCA/learned-policy evaluation, optional `1/3/5` consensus sweeps, and summary plots/tables.
 
+To evaluate with the external `picbf-cs` CBF shield, install the
+`continuous-collision-shield` package or point `PICBF_CS_PATH` at that repo,
+then pass `--shield-type picbf-cs`:
+
+```sh
+PICBF_CS_PATH=/path/to/picbf-cs python3 eval_continuous.py \
+  --map-dir data/mapf-map \
+  --scen-dir data/scen-random \
+  --maps empty-48-48 \
+  --agent-counts 32 64 \
+  --policy orca \
+  --shield-type picbf-cs \
+  --output-csv evals/continuous_picbf_cs_orca.csv
+```
+
 ### Visualization
 ```sh
 python -m main_pys.visualize_path empty-48-48 logs/paths.npy --scenName=empty-48-48-random-1.scen

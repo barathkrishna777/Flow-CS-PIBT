@@ -1,11 +1,12 @@
+import importlib
 import math
+import os
+import sys
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
 import numpy as np
 from scipy.ndimage import distance_transform_edt
-
-from main_pys.model_inputs import load_grid_map_from_file
 
 try:
     import rvo2  # type: ignore
@@ -135,6 +136,195 @@ class StepMetrics:
     collisions: int = 0
     near_collisions: int = 0
     obstacle_hits: int = 0
+
+
+def _import_picbf_cs():
+    """Import picbf-cs from the environment or PICBF_CS_PATH.
+
+    ``picbf-cs`` is developed in a sibling repo during experiments, so the
+    eval process can either install it normally or set PICBF_CS_PATH to the
+    repo root (or directly to its ``src`` directory).
+    """
+
+    try:
+        module = importlib.import_module("continuous_collision_shield")
+    except ImportError as first_error:
+        picbf_path = os.environ.get("PICBF_CS_PATH")
+        if not picbf_path:
+            raise ImportError(
+                "shield_type='picbf-cs' requires the continuous-collision-shield package. "
+                "Install picbf-cs or set PICBF_CS_PATH to the picbf-cs repo root/src directory."
+            ) from first_error
+
+        candidate = os.path.abspath(os.path.expanduser(picbf_path))
+        candidate_src = os.path.join(candidate, "src")
+        src_dir = candidate_src if os.path.isdir(candidate_src) else candidate
+        if src_dir not in sys.path:
+            sys.path.insert(0, src_dir)
+        try:
+            module = importlib.import_module("continuous_collision_shield")
+        except ImportError as second_error:
+            raise ImportError(
+                f"Unable to import continuous_collision_shield from PICBF_CS_PATH={picbf_path!r}"
+            ) from second_error
+
+    return (
+        module.ContinuousCBFShield,
+        module.AgentState,
+        module.AABBObstacle,
+        module.ShieldConfig,
+    )
+
+
+class PICBFCSShield:
+    """Adapter from this repo's row/col arrays to picbf-cs AgentState inputs."""
+
+    def __init__(
+        self,
+        agent_radius: float,
+        max_speed: float,
+        dt: float,
+        safety_margin: float = 0.05,
+        alpha: float = 2.0,
+    ) -> None:
+        (
+            ContinuousCBFShield,
+            AgentState,
+            AABBObstacle,
+            ShieldConfig,
+        ) = _import_picbf_cs()
+        self.agent_radius = agent_radius
+        self.max_speed = max_speed
+        self.dt = dt
+        self._agent_state_cls = AgentState
+        self._aabb_obstacle_cls = AABBObstacle
+        self._config = ShieldConfig(dt=dt, safety_margin=safety_margin, alpha=alpha)
+        self._shield = ContinuousCBFShield(self._config)
+        self._obstacle_cache: Dict[Tuple, Tuple] = {}
+
+    def project(
+        self,
+        positions: np.ndarray,
+        preferred_velocities: np.ndarray,
+        obstacle_map: np.ndarray,
+        goals: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        positions = np.asarray(positions, dtype=np.float32)
+        preferred_velocities = self._clip_speeds(
+            np.asarray(preferred_velocities, dtype=np.float32)
+        )
+        goals = None if goals is None else np.asarray(goals, dtype=np.float32)
+
+        agents = []
+        for idx, position in enumerate(positions):
+            goal = None
+            if goals is not None:
+                goal = tuple(float(x) for x in goals[idx])
+            agents.append(
+                self._agent_state_cls(
+                    position=tuple(float(x) for x in position),
+                    radius=self.agent_radius,
+                    max_speed=self.max_speed,
+                    goal=goal,
+                )
+            )
+
+        result = self._shield.step(
+            agents,
+            [tuple(float(x) for x in velocity) for velocity in preferred_velocities],
+            obstacles=self._get_obstacles(obstacle_map),
+        )
+        projected = np.asarray(result.velocities, dtype=np.float32)
+        return self._clip_speeds(projected)
+
+    def _get_obstacles(self, obstacle_map: np.ndarray) -> Tuple:
+        obstacle_map = np.asarray(obstacle_map)
+        key = (obstacle_map.shape, obstacle_map.data.tobytes())
+        cached = self._obstacle_cache.get(key)
+        if cached is not None:
+            return cached
+
+        obstacles = list(self._blocked_cells_to_aabbs(obstacle_map))
+        rows, cols = obstacle_map.shape
+        obstacles.extend(
+            [
+                self._aabb_obstacle_cls(
+                    min_corner=(-1.0, 0.0),
+                    max_corner=(0.0, float(cols)),
+                ),
+                self._aabb_obstacle_cls(
+                    min_corner=(float(rows), 0.0),
+                    max_corner=(float(rows + 1), float(cols)),
+                ),
+                self._aabb_obstacle_cls(
+                    min_corner=(0.0, -1.0),
+                    max_corner=(float(rows), 0.0),
+                ),
+                self._aabb_obstacle_cls(
+                    min_corner=(0.0, float(cols)),
+                    max_corner=(float(rows), float(cols + 1)),
+                ),
+            ]
+        )
+        cached = tuple(obstacles)
+        self._obstacle_cache[key] = cached
+        return cached
+
+    def _blocked_cells_to_aabbs(self, obstacle_map: np.ndarray) -> Tuple:
+        # Match this environment's SDF sampling frame: grid index (r, c) is the
+        # obstacle center, so the blocked cell spans [r-0.5, r+0.5].
+        active_runs = {}
+        finished = []
+        for row_idx in range(obstacle_map.shape[0]):
+            row_runs = self._blocked_runs(obstacle_map[row_idx])
+            next_active = {}
+            for col_start, col_end in row_runs:
+                key = (col_start, col_end)
+                if key in active_runs:
+                    old_row_min, old_row_max = active_runs[key]
+                    if abs(float(row_idx) - old_row_max) <= 1.0e-12:
+                        next_active[key] = (old_row_min, float(row_idx + 1))
+                        continue
+                next_active[key] = (float(row_idx), float(row_idx + 1))
+            for key, (row_min, row_max) in active_runs.items():
+                if key not in next_active:
+                    finished.append(
+                        self._aabb_obstacle_cls(
+                            min_corner=(row_min - 0.5, float(key[0]) - 0.5),
+                            max_corner=(row_max - 0.5, float(key[1]) - 0.5),
+                        )
+                    )
+            active_runs = next_active
+
+        for key, (row_min, row_max) in active_runs.items():
+            finished.append(
+                self._aabb_obstacle_cls(
+                    min_corner=(row_min - 0.5, float(key[0]) - 0.5),
+                    max_corner=(row_max - 0.5, float(key[1]) - 0.5),
+                )
+            )
+        return tuple(
+            sorted(finished, key=lambda obstacle: (obstacle.min_corner, obstacle.max_corner))
+        )
+
+    @staticmethod
+    def _blocked_runs(row: np.ndarray) -> Tuple[Tuple[int, int], ...]:
+        runs = []
+        start = None
+        for col_idx, value in enumerate(row):
+            if value != 0 and start is None:
+                start = col_idx
+            elif value == 0 and start is not None:
+                runs.append((start, col_idx))
+                start = None
+        if start is not None:
+            runs.append((start, len(row)))
+        return tuple(runs)
+
+    def _clip_speeds(self, velocities: np.ndarray) -> np.ndarray:
+        norms = np.linalg.norm(velocities, axis=1, keepdims=True)
+        scale = np.maximum(norms / max(self.max_speed, 1e-6), 1.0)
+        return velocities / scale
 
 
 class ORCAStyleShield:
@@ -827,6 +1017,7 @@ class ContinuousMAPFEnv:
     - ``"heuristic-orca"``: Force heuristic path (no rvo2).
     - ``"po-orca"``: Priority-Ordered ORCA with sequential processing.
     - ``"epibt"``: Enhanced PIBT priority-based shield with backtracking.
+    - ``"picbf-cs"``: CBF shield from the external picbf-cs package.
     """
 
     DEADLOCK_CHECK_INTERVAL = 30
@@ -847,6 +1038,7 @@ class ContinuousMAPFEnv:
         self.goal_tolerance = goal_tolerance
         self._shield = ORCAStyleShield(agent_radius=agent_radius, max_speed=max_speed, dt=dt)
         self._epibt_shield = EPIBTShield(agent_radius=agent_radius, max_speed=max_speed, dt=dt)
+        self._picbf_shield = None
         self.positions = None
         self.goals = None
         self.history_positions = []
@@ -921,6 +1113,19 @@ class ContinuousMAPFEnv:
                 preferred_velocities,
                 self.obstacle_map,
                 priorities=self.priorities,
+            )
+        if shield_type in {"picbf-cs", "picbf"}:
+            if self._picbf_shield is None:
+                self._picbf_shield = PICBFCSShield(
+                    agent_radius=self.agent_radius,
+                    max_speed=self.max_speed,
+                    dt=self.dt,
+                )
+            return self._picbf_shield.project(
+                self.positions,
+                preferred_velocities,
+                self.obstacle_map,
+                goals=self.goals,
             )
         raise ValueError(f"Unsupported shield type: {shield_type}")
 
@@ -1055,6 +1260,8 @@ def load_env_from_files(
     agent_radius: float = 0.3,
     goal_tolerance: float = 0.25,
 ) -> Tuple[ContinuousMAPFEnv, np.ndarray, np.ndarray]:
+    from main_pys.model_inputs import load_grid_map_from_file
+
     obstacle_map = load_grid_map_from_file(map_file)
     starts, goals = parse_scene_file(scen_file, agent_num=agent_num)
     env = ContinuousMAPFEnv(

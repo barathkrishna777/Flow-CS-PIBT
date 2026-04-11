@@ -264,7 +264,11 @@ def main():
     parser.add_argument("--eval-seed", type=int, default=0)
     parser.add_argument("--output-csv", required=True)
     parser.add_argument("--viz-dir", default=None)
-    parser.add_argument("--shield-type", choices=["orca", "heuristic-orca", "po-orca", "epibt", "simple", "none"], default="orca")
+    parser.add_argument(
+        "--shield-type",
+        choices=["orca", "heuristic-orca", "po-orca", "epibt", "picbf-cs", "simple", "none"],
+        default="orca",
+    )
     parser.add_argument("--num-integration-steps", type=int, default=3)
     parser.add_argument("--num-consensus-samples", type=int, default=1)
     parser.add_argument("--flow-aggregation", choices=["mean", "medoid", "best"], default="mean")
