@@ -536,6 +536,8 @@ def build_eval_command(
         "--goal-tolerance",
         str(args.goal_tolerance),
     ]
+    if args.picbf_communication_radius is not None:
+        cmd.extend(["--picbf-communication-radius", str(args.picbf_communication_radius)])
     if args.test_scenario_start is not None:
         cmd.extend(["--scenario-start", str(args.test_scenario_start)])
     if args.test_scenario_end is not None:
@@ -755,6 +757,15 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["orca", "heuristic-orca", "po-orca", "epibt", "picbf-cs", "simple", "none"],
         default="orca",
     )
+    parser.add_argument(
+        "--picbf-communication-radius",
+        type=float,
+        default=None,
+        help=(
+            "Communication radius forwarded to eval_continuous.py for "
+            "--shield-type picbf-cs. Defaults to eval_continuous.py auto-compute."
+        ),
+    )
     parser.add_argument("--num-integration-steps", type=int, default=3)
     parser.add_argument("--default-consensus-samples", type=int, default=3)
     parser.add_argument("--default-flow-aggregation", choices=["mean", "medoid", "best"], default="mean")
@@ -789,6 +800,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+    if args.picbf_communication_radius is not None and args.picbf_communication_radius <= 0.0:
+        parser.error("--picbf-communication-radius must be positive")
     apply_funnel_stage_defaults(args)
     stages = set(args.stages)
     python_bin = sys.executable

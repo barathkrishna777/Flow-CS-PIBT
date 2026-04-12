@@ -291,15 +291,32 @@ def test_picbf_cs_adapter():
     env = ContinuousMAPFEnv(grid, agent_radius=0.3)
     env.reset(starts, goals)
     try:
-        for _ in range(120):
+        env.step(env.goal_directed_velocities(), shield_type="picbf-cs")
+        first_step_velocities = env.history_velocities[-1]
+        first_debug = env.last_shield_debug_info or {}
+        for _ in range(119):
             env.step(env.goal_directed_velocities(), shield_type="picbf-cs")
             if env.is_done():
                 break
-    except ImportError as exc:
+    except (ImportError, RuntimeError) as exc:
         report_skip("picbf-cs adapter", str(exc))
         return
 
     m = env.current_metrics()
+    report(
+        "picbf-cs local output: one velocity per stable agent index",
+        first_step_velocities.shape == starts.shape,
+        f"velocity_shape={first_step_velocities.shape}",
+    )
+    debug_passed = (
+        int(first_debug.get("component_count", 0)) >= 1
+        and 1 <= int(first_debug.get("max_component_size", 0)) <= len(starts)
+    )
+    report(
+        "picbf-cs local debug: component stats available",
+        debug_passed,
+        f"debug={first_debug}",
+    )
     passed = (
         m["agent_fraction_at_goal"] == 1.0
         and m["collisions"] == 0

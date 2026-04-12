@@ -138,6 +138,20 @@ class StepMetrics:
     obstacle_hits: int = 0
 
 
+def default_picbf_communication_radius(
+    agent_radius: float,
+    max_speed: float,
+    dt: float,
+    safety_margin: float,
+) -> float:
+    return (
+        2.0 * float(agent_radius)
+        + float(safety_margin)
+        + 2.0 * float(max_speed) * float(dt)
+        + max(0.4, 4.0 * float(safety_margin))
+    )
+
+
 def _import_picbf_cs():
     """Import picbf-cs from the environment or PICBF_CS_PATH.
 
@@ -145,6 +159,13 @@ def _import_picbf_cs():
     eval process can either install it normally or set PICBF_CS_PATH to the
     repo root (or directly to its ``src`` directory).
     """
+
+    if sys.version_info < (3, 11):
+        raise RuntimeError(
+            "shield_type='picbf-cs' requires Python 3.11 or newer because the current "
+            "picbf-cs package declares requires-python >=3.11. Run evals with python3.11 "
+            "or apply a separate picbf-cs compatibility patch."
+        )
 
     try:
         module = importlib.import_module("continuous_collision_shield")
@@ -168,10 +189,28 @@ def _import_picbf_cs():
                 f"Unable to import continuous_collision_shield from PICBF_CS_PATH={picbf_path!r}"
             ) from second_error
 
+    required_names = (
+        "LocalJointCBFShield",
+        "LocalAgentState",
+        "AgentState",
+        "AABBObstacle",
+        "ObstacleIndex",
+        "ShieldConfig",
+    )
+    missing = [name for name in required_names if not hasattr(module, name)]
+    if missing:
+        raise ImportError(
+            "Installed continuous_collision_shield is too old for shield_type='picbf-cs'; "
+            f"missing {', '.join(missing)}. Pull/update picbf-cs so it exposes "
+            "LocalJointCBFShield, LocalAgentState, ObstacleIndex, and ShieldConfig."
+        )
+
     return (
-        module.ContinuousCBFShield,
+        module.LocalJointCBFShield,
+        module.LocalAgentState,
         module.AgentState,
         module.AABBObstacle,
+        module.ObstacleIndex,
         module.ShieldConfig,
     )
 
@@ -186,21 +225,40 @@ class PICBFCSShield:
         dt: float,
         safety_margin: float = 0.05,
         alpha: float = 2.0,
+        communication_radius: Optional[float] = None,
     ) -> None:
         (
-            ContinuousCBFShield,
+            LocalJointCBFShield,
+            LocalAgentState,
             AgentState,
             AABBObstacle,
+            ObstacleIndex,
             ShieldConfig,
         ) = _import_picbf_cs()
-        self.agent_radius = agent_radius
-        self.max_speed = max_speed
-        self.dt = dt
+        self.agent_radius = float(agent_radius)
+        self.max_speed = float(max_speed)
+        self.dt = float(dt)
+        self.safety_margin = float(safety_margin)
+        if communication_radius is None:
+            communication_radius = default_picbf_communication_radius(
+                self.agent_radius,
+                self.max_speed,
+                self.dt,
+                self.safety_margin,
+            )
+        communication_radius = float(communication_radius)
+        if communication_radius <= 0.0:
+            raise ValueError("picbf communication_radius must be positive")
+        self.communication_radius = communication_radius
+        self._shield_cls = LocalJointCBFShield
+        self._local_agent_state_cls = LocalAgentState
         self._agent_state_cls = AgentState
         self._aabb_obstacle_cls = AABBObstacle
-        self._config = ShieldConfig(dt=dt, safety_margin=safety_margin, alpha=alpha)
-        self._shield = ContinuousCBFShield(self._config)
+        self._obstacle_index_cls = ObstacleIndex
+        self._config = ShieldConfig(dt=self.dt, safety_margin=self.safety_margin, alpha=alpha)
         self._obstacle_cache: Dict[Tuple, Tuple] = {}
+        self._shield_cache: Dict[Tuple, object] = {}
+        self.last_debug_info: Dict[str, object] = {}
 
     def project(
         self,
@@ -216,30 +274,51 @@ class PICBFCSShield:
         goals = None if goals is None else np.asarray(goals, dtype=np.float32)
 
         agents = []
+        nominal_velocities = {}
         for idx, position in enumerate(positions):
             goal = None
             if goals is not None:
                 goal = tuple(float(x) for x in goals[idx])
+            agent_state = self._agent_state_cls(
+                position=tuple(float(x) for x in position),
+                radius=self.agent_radius,
+                max_speed=self.max_speed,
+                goal=goal,
+            )
             agents.append(
-                self._agent_state_cls(
-                    position=tuple(float(x) for x in position),
-                    radius=self.agent_radius,
-                    max_speed=self.max_speed,
-                    goal=goal,
+                self._local_agent_state_cls(
+                    agent_id=idx,
+                    state=agent_state,
                 )
             )
+            nominal_velocities[idx] = tuple(float(x) for x in preferred_velocities[idx])
 
-        result = self._shield.step(
-            agents,
-            [tuple(float(x) for x in velocity) for velocity in preferred_velocities],
-            obstacles=self._get_obstacles(obstacle_map),
+        result = self._get_shield(obstacle_map).step(agents, nominal_velocities)
+        self.last_debug_info = self._debug_info_from_result(result)
+        projected = np.asarray(
+            [result.velocities_by_id[idx] for idx in range(len(positions))],
+            dtype=np.float32,
         )
-        projected = np.asarray(result.velocities, dtype=np.float32)
         return self._clip_speeds(projected)
 
-    def _get_obstacles(self, obstacle_map: np.ndarray) -> Tuple:
+    def _get_shield(self, obstacle_map: np.ndarray):
+        key = self._obstacle_cache_key(obstacle_map)
+        cached = self._shield_cache.get(key)
+        if cached is not None:
+            return cached
+        obstacles, obstacle_index = self._get_obstacle_data(obstacle_map, key=key)
+        shield = self._shield_cls(
+            self._config,
+            self.communication_radius,
+            obstacles=obstacles,
+            obstacle_index=obstacle_index,
+        )
+        self._shield_cache[key] = shield
+        return shield
+
+    def _get_obstacle_data(self, obstacle_map: np.ndarray, key: Optional[Tuple] = None) -> Tuple:
         obstacle_map = np.asarray(obstacle_map)
-        key = (obstacle_map.shape, obstacle_map.data.tobytes())
+        key = self._obstacle_cache_key(obstacle_map) if key is None else key
         cached = self._obstacle_cache.get(key)
         if cached is not None:
             return cached
@@ -266,9 +345,39 @@ class PICBFCSShield:
                 ),
             ]
         )
-        cached = tuple(obstacles)
+        obstacle_tuple = tuple(obstacles)
+        cached = (obstacle_tuple, self._obstacle_index_cls(obstacle_tuple))
         self._obstacle_cache[key] = cached
         return cached
+
+    @staticmethod
+    def _obstacle_cache_key(obstacle_map: np.ndarray) -> Tuple:
+        obstacle_map = np.asarray(obstacle_map)
+        return (obstacle_map.shape, np.ascontiguousarray(obstacle_map).tobytes())
+
+    @staticmethod
+    def _debug_info_from_result(result) -> Dict[str, object]:
+        components = tuple(getattr(result, "components", ()))
+        component_sizes = [len(component.agent_ids) for component in components]
+        status_counts: Dict[str, int] = {}
+        total_solve_time = 0.0
+        for component in components:
+            component_result = getattr(component, "result", None)
+            if component_result is None:
+                continue
+            total_solve_time += float(getattr(component_result, "solve_time_s", 0.0))
+            status = getattr(component_result, "status", None)
+            if status is not None:
+                status_key = getattr(status, "value", str(status))
+                status_counts[status_key] = status_counts.get(status_key, 0) + 1
+        debug_info: Dict[str, object] = {
+            "component_count": len(components),
+            "max_component_size": max(component_sizes, default=0),
+            "total_local_solver_time": total_solve_time,
+        }
+        if status_counts:
+            debug_info["status_counts"] = status_counts
+        return debug_info
 
     def _blocked_cells_to_aabbs(self, obstacle_map: np.ndarray) -> Tuple:
         # Match this environment's SDF sampling frame: grid index (r, c) is the
@@ -1030,15 +1139,20 @@ class ContinuousMAPFEnv:
         max_speed: float = 1.0,
         agent_radius: float = 0.3,
         goal_tolerance: float = 0.25,
+        picbf_communication_radius: Optional[float] = None,
     ) -> None:
+        if picbf_communication_radius is not None and picbf_communication_radius <= 0.0:
+            raise ValueError("picbf_communication_radius must be positive")
         self.obstacle_map = np.asarray(obstacle_map, dtype=np.int8)
         self.dt = dt
         self.max_speed = max_speed
         self.agent_radius = agent_radius
         self.goal_tolerance = goal_tolerance
+        self.picbf_communication_radius = picbf_communication_radius
         self._shield = ORCAStyleShield(agent_radius=agent_radius, max_speed=max_speed, dt=dt)
         self._epibt_shield = EPIBTShield(agent_radius=agent_radius, max_speed=max_speed, dt=dt)
         self._picbf_shield = None
+        self.last_shield_debug_info: Optional[Dict[str, object]] = None
         self.positions = None
         self.goals = None
         self.history_positions = []
@@ -1062,6 +1176,7 @@ class ContinuousMAPFEnv:
         self.metrics = StepMetrics()
         self.arrival_steps = np.full(len(self.positions), -1, dtype=np.int32)
         self.step_count = 0
+        self.last_shield_debug_info = None
 
         # Initialize priorities from Euclidean distance to goal
         # (farther agents get higher initial priority)
@@ -1081,6 +1196,7 @@ class ContinuousMAPFEnv:
 
     def apply_shield(self, preferred_velocities: np.ndarray, shield_type: str = "orca") -> np.ndarray:
         preferred_velocities = np.asarray(preferred_velocities, dtype=np.float32)
+        self.last_shield_debug_info = None
         if shield_type == "none":
             return self._clip_speeds(preferred_velocities)
         if shield_type == "simple":
@@ -1120,13 +1236,16 @@ class ContinuousMAPFEnv:
                     agent_radius=self.agent_radius,
                     max_speed=self.max_speed,
                     dt=self.dt,
+                    communication_radius=self.picbf_communication_radius,
                 )
-            return self._picbf_shield.project(
+            safe_velocities = self._picbf_shield.project(
                 self.positions,
                 preferred_velocities,
                 self.obstacle_map,
                 goals=self.goals,
             )
+            self.last_shield_debug_info = self._picbf_shield.last_debug_info
+            return safe_velocities
         raise ValueError(f"Unsupported shield type: {shield_type}")
 
     def _update_priorities(self) -> None:

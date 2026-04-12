@@ -222,6 +222,7 @@ def run_orca_baseline(
 def log_rollout_step(env, progress_label: str, step: int, max_steps: int, start_time: float, step_start: float) -> None:
     at_goal = env.agents_at_goal()
     label = f"{progress_label} " if progress_label else ""
+    shield_debug = format_shield_debug_info(getattr(env, "last_shield_debug_info", None))
     log_progress(
         f"{label}step={step}/{max_steps} "
         f"elapsed={time.time() - start_time:.1f}s "
@@ -230,7 +231,27 @@ def log_rollout_step(env, progress_label: str, step: int, max_steps: int, start_
         f"collisions={env.metrics.collisions} "
         f"near={env.metrics.near_collisions} "
         f"obstacle_hits={env.metrics.obstacle_hits}"
+        f"{shield_debug}"
     )
+
+
+def format_shield_debug_info(debug_info) -> str:
+    if not debug_info:
+        return ""
+    parts = []
+    if "component_count" in debug_info:
+        parts.append(f"picbf_components={int(debug_info['component_count'])}")
+    if "max_component_size" in debug_info:
+        parts.append(f"picbf_max_component={int(debug_info['max_component_size'])}")
+    if "total_local_solver_time" in debug_info:
+        parts.append(f"picbf_solver_time={float(debug_info['total_local_solver_time']):.4f}s")
+    status_counts = debug_info.get("status_counts")
+    if status_counts:
+        status_text = ",".join(
+            f"{status}:{count}" for status, count in sorted(status_counts.items())
+        )
+        parts.append(f"picbf_status={status_text}")
+    return "" if not parts else " " + " ".join(parts)
 
 
 def visualize_trajectory(env, output_path: str, title: str) -> None:
@@ -310,6 +331,15 @@ def main():
         choices=["orca", "heuristic-orca", "po-orca", "epibt", "picbf-cs", "simple", "none"],
         default="orca",
     )
+    parser.add_argument(
+        "--picbf-communication-radius",
+        type=float,
+        default=None,
+        help=(
+            "Communication radius for --shield-type picbf-cs. Defaults to an automatic "
+            "value based on agent radius, safety margin, max speed, and dt."
+        ),
+    )
     parser.add_argument("--num-integration-steps", type=int, default=3)
     parser.add_argument("--num-consensus-samples", type=int, default=1)
     parser.add_argument("--flow-aggregation", choices=["mean", "medoid", "best"], default="mean")
@@ -329,6 +359,8 @@ def main():
     )
     parser.add_argument("--cpu", action="store_true")
     args = parser.parse_args()
+    if args.picbf_communication_radius is not None and args.picbf_communication_radius <= 0.0:
+        parser.error("--picbf-communication-radius must be positive")
 
     set_seed(args.eval_seed)
     device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
@@ -393,6 +425,7 @@ def main():
                     max_speed=args.max_speed,
                     agent_radius=args.agent_radius,
                     goal_tolerance=args.goal_tolerance,
+                    picbf_communication_radius=args.picbf_communication_radius,
                 )
                 starts = starts_all[:agent_num]
                 goals = goals_all[:agent_num]
