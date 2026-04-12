@@ -380,8 +380,8 @@ class PICBFCSShield:
         return debug_info
 
     def _blocked_cells_to_aabbs(self, obstacle_map: np.ndarray) -> Tuple:
-        # Match this environment's SDF sampling frame: grid index (r, c) is the
-        # obstacle center, so the blocked cell spans [r-0.5, r+0.5].
+        # Scenario grid coordinates are converted to continuous cell centers via
+        # ``grid + 0.5``, so blocked cell (r, c) spans [r, r+1] x [c, c+1].
         active_runs = {}
         finished = []
         for row_idx in range(obstacle_map.shape[0]):
@@ -399,8 +399,8 @@ class PICBFCSShield:
                 if key not in next_active:
                     finished.append(
                         self._aabb_obstacle_cls(
-                            min_corner=(row_min - 0.5, float(key[0]) - 0.5),
-                            max_corner=(row_max - 0.5, float(key[1]) - 0.5),
+                            min_corner=(row_min, float(key[0])),
+                            max_corner=(row_max, float(key[1])),
                         )
                     )
             active_runs = next_active
@@ -408,8 +408,8 @@ class PICBFCSShield:
         for key, (row_min, row_max) in active_runs.items():
             finished.append(
                 self._aabb_obstacle_cls(
-                    min_corner=(row_min - 0.5, float(key[0]) - 0.5),
-                    max_corner=(row_max - 0.5, float(key[1]) - 0.5),
+                    min_corner=(row_min, float(key[0])),
+                    max_corner=(row_max, float(key[1])),
                 )
             )
         return tuple(
@@ -1344,7 +1344,7 @@ class ContinuousMAPFEnv:
         return safe
 
     def _position_hits_obstacle(self, position: np.ndarray) -> bool:
-        """Check if position collides with obstacle using SDF."""
+        """Check exact circle-vs-blocked-cell obstacle collision."""
         if (
             position[0] < self.agent_radius
             or position[1] < self.agent_radius
@@ -1352,8 +1352,17 @@ class ContinuousMAPFEnv:
             or position[1] > self.obstacle_map.shape[1] - self.agent_radius
         ):
             return True
-        d = float(sample_sdf_bilinear(self._sdf, position.reshape(1, 2))[0])
-        return d < self.agent_radius
+        row_min = max(0, int(np.floor(position[0] - self.agent_radius)))
+        row_max = min(self.obstacle_map.shape[0] - 1, int(np.floor(position[0] + self.agent_radius)))
+        col_min = max(0, int(np.floor(position[1] - self.agent_radius)))
+        col_max = min(self.obstacle_map.shape[1] - 1, int(np.floor(position[1] + self.agent_radius)))
+        for row in range(row_min, row_max + 1):
+            for col in range(col_min, col_max + 1):
+                if self.obstacle_map[row, col] != 0 and circle_intersects_rect(
+                    position, self.agent_radius, row, col
+                ):
+                    return True
+        return False
 
     def _count_agent_interactions(self, positions: np.ndarray) -> Tuple[int, int]:
         collisions = 0
