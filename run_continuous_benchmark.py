@@ -525,6 +525,8 @@ def build_eval_command(
         str(args.m),
         "--max-steps",
         str(args.max_eval_steps),
+        "--log-interval",
+        str(args.log_interval),
         "--dt",
         str(args.dt),
         "--max-speed",
@@ -762,6 +764,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--aggregation-sweep", nargs="+", choices=["mean", "medoid", "best"], default=["mean", "medoid", "best"])
     parser.add_argument("--tau", type=float, default=0.3)
     parser.add_argument("--max-eval-steps", type=int, default=256)
+    parser.add_argument("--log-interval", type=int, default=10)
     parser.add_argument("--eval-seed", type=int, default=0)
 
     parser.add_argument("--k", type=int, default=4)

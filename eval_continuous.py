@@ -9,13 +9,18 @@ from typing import Dict, Iterable, List, Optional, Tuple
 import numpy as np
 import torch
 
-from main_pys.continuous_env import load_env_from_files
+from main_pys.continuous_env import (
+    ContinuousMAPFEnv,
+    grid_starts_to_continuous,
+    parse_scene_file,
+)
 from main_pys.continuous_scenarios import scenario_id_from_path, select_scenarios
 from main_pys.generative_model import FlowGNNModel
 from main_pys.transformer_model import FlowTransformerModel
 from main_pys.model_inputs import (
     create_continuous_data_object,
     labels_to_direction_vectors,
+    load_grid_map_from_file,
     normalize_continuous_graph_data,
 )
 
@@ -36,6 +41,10 @@ def set_seed(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def log_progress(message: str) -> None:
+    print(f"[eval] {message}", flush=True)
 
 
 def find_scenarios(
@@ -142,10 +151,13 @@ def run_learned_policy(
     num_consensus_samples: int,
     tau: float,
     flow_aggregation: str,
+    progress_label: str = "",
+    log_interval: int = 10,
 ) -> Dict[str, float]:
     start_time = time.time()
     env.reset(positions, goals)
-    for _ in range(max_steps):
+    for step_idx in range(max_steps):
+        step_start = time.time()
         data = create_continuous_data_object(env.positions, goals, env.obstacle_map, k=k, m=m, max_speed=env.max_speed)
         data = normalize_continuous_graph_data(data, k=k, max_speed=env.max_speed)
         data = data.to(device)
@@ -172,7 +184,10 @@ def run_learned_policy(
                 velocities = labels_to_direction_vectors(labels, num_directions=action_logits.shape[1] - 1) * env.max_speed
 
         env.step(velocities, shield_type=shield_type)
-        if env.is_done():
+        done = env.is_done()
+        if log_interval > 0 and ((step_idx + 1) % log_interval == 0 or done):
+            log_rollout_step(env, progress_label, step_idx + 1, max_steps, start_time, step_start)
+        if done:
             break
 
     metrics = env.current_metrics()
@@ -180,16 +195,42 @@ def run_learned_policy(
     return metrics
 
 
-def run_orca_baseline(env, positions, goals, max_steps: int, shield_type: str = "orca") -> Dict[str, float]:
+def run_orca_baseline(
+    env,
+    positions,
+    goals,
+    max_steps: int,
+    shield_type: str = "orca",
+    progress_label: str = "",
+    log_interval: int = 10,
+) -> Dict[str, float]:
     start_time = time.time()
     env.reset(positions, goals)
-    for _ in range(max_steps):
+    for step_idx in range(max_steps):
+        step_start = time.time()
         env.step(env.goal_directed_velocities(), shield_type=shield_type)
-        if env.is_done():
+        done = env.is_done()
+        if log_interval > 0 and ((step_idx + 1) % log_interval == 0 or done):
+            log_rollout_step(env, progress_label, step_idx + 1, max_steps, start_time, step_start)
+        if done:
             break
     metrics = env.current_metrics()
     metrics["runtime"] = time.time() - start_time
     return metrics
+
+
+def log_rollout_step(env, progress_label: str, step: int, max_steps: int, start_time: float, step_start: float) -> None:
+    at_goal = env.agents_at_goal()
+    label = f"{progress_label} " if progress_label else ""
+    log_progress(
+        f"{label}step={step}/{max_steps} "
+        f"elapsed={time.time() - start_time:.1f}s "
+        f"last_step={time.time() - step_start:.2f}s "
+        f"at_goal={float(np.mean(at_goal)):.3f} "
+        f"collisions={env.metrics.collisions} "
+        f"near={env.metrics.near_collisions} "
+        f"obstacle_hits={env.metrics.obstacle_hits}"
+    )
 
 
 def visualize_trajectory(env, output_path: str, title: str) -> None:
@@ -280,6 +321,12 @@ def main():
     parser.add_argument("--max-speed", type=float, default=1.0)
     parser.add_argument("--agent-radius", type=float, default=0.3)
     parser.add_argument("--goal-tolerance", type=float, default=0.25)
+    parser.add_argument(
+        "--log-interval",
+        type=int,
+        default=10,
+        help="Print rollout progress every N steps; use 0 to disable step logs.",
+    )
     parser.add_argument("--cpu", action="store_true")
     args = parser.parse_args()
 
@@ -291,10 +338,13 @@ def main():
             raise ValueError("--model-path is required for learned policies")
         model, _ = load_model(args.model_path, device)
 
-    rows = []
+    total_cases = 0
+    completed_cases = 0
+    max_agent_num = max(args.agent_counts)
+    eval_start = time.time()
+    scenario_files_by_map = {}
     for map_name in args.maps:
-        map_file = os.path.join(args.map_dir, f"{map_name}.map")
-        scenarios = find_scenarios(
+        scenario_files_by_map[map_name] = find_scenarios(
             args.scen_dir,
             map_name,
             args.max_scenarios,
@@ -302,21 +352,61 @@ def main():
             scenario_start=args.scenario_start,
             scenario_end=args.scenario_end,
         )
+        total_cases += len(scenario_files_by_map[map_name]) * len(args.agent_counts)
+
+    for map_name in args.maps:
+        map_file = os.path.join(args.map_dir, f"{map_name}.map")
+        map_load_start = time.time()
+        obstacle_map = load_grid_map_from_file(map_file)
+        scenarios = scenario_files_by_map[map_name]
+        log_progress(
+            f"loaded map={map_name} shape={obstacle_map.shape} "
+            f"scenarios={len(scenarios)} in {time.time() - map_load_start:.2f}s"
+        )
         for scen_file in scenarios:
+            parse_start = time.time()
             scen_name = os.path.basename(scen_file).replace(".scen", "")
             scen_id = scenario_id_from_path(scen_file)
+            starts_all, goals_all = parse_scene_file(scen_file, agent_num=max_agent_num)
+            if len(starts_all) < max_agent_num:
+                raise ValueError(
+                    f"{scen_file} has {len(starts_all)} starts, need {max_agent_num}"
+                )
+            starts_all = grid_starts_to_continuous(starts_all)
+            goals_all = grid_starts_to_continuous(goals_all)
+            log_progress(
+                f"parsed scenario={scen_name} id={scen_id} "
+                f"agents_available={len(starts_all)} in {time.time() - parse_start:.2f}s"
+            )
             for agent_num in args.agent_counts:
-                env, starts, goals = load_env_from_files(
-                    map_file,
-                    scen_file,
-                    agent_num=agent_num,
+                completed_cases += 1
+                case_label = (
+                    f"case={completed_cases}/{total_cases} map={map_name} "
+                    f"scenario={scen_name} N={agent_num} "
+                    f"policy={args.policy} shield={args.shield_type}"
+                )
+                log_progress(f"start {case_label}")
+                setup_start = time.time()
+                env = ContinuousMAPFEnv(
+                    obstacle_map=obstacle_map,
                     dt=args.dt,
                     max_speed=args.max_speed,
                     agent_radius=args.agent_radius,
                     goal_tolerance=args.goal_tolerance,
                 )
+                starts = starts_all[:agent_num]
+                goals = goals_all[:agent_num]
+                log_progress(f"{case_label} setup={time.time() - setup_start:.2f}s")
                 if args.policy == "orca":
-                    metrics = run_orca_baseline(env, starts, goals, args.max_steps, shield_type=args.shield_type)
+                    metrics = run_orca_baseline(
+                        env,
+                        starts,
+                        goals,
+                        args.max_steps,
+                        shield_type=args.shield_type,
+                        progress_label=case_label,
+                        log_interval=args.log_interval,
+                    )
                 else:
                     metrics = run_learned_policy(
                         model,
@@ -333,6 +423,8 @@ def main():
                         args.num_consensus_samples,
                         args.tau,
                         args.flow_aggregation,
+                        progress_label=case_label,
+                        log_interval=args.log_interval,
                     )
                 row = {
                     "map": map_name,
@@ -352,13 +444,20 @@ def main():
                     "flow_aggregation": args.flow_aggregation if args.policy == "flow" else "",
                     **metrics,
                 }
-                rows.append(row)
-                print(f"{map_name} {scen_name} N={agent_num} {args.policy}: success={metrics['success']:.0f} at_goal={metrics['agent_fraction_at_goal']:.3f}")
+                write_rows(args.output_csv, [row])
+                log_progress(
+                    f"done {case_label} success={metrics['success']:.0f} "
+                    f"at_goal={metrics['agent_fraction_at_goal']:.3f} "
+                    f"collisions={metrics['collisions']:.0f} "
+                    f"obstacle_hits={metrics['obstacle_hits']:.0f} "
+                    f"runtime={metrics['runtime']:.1f}s "
+                    f"csv={args.output_csv}"
+                )
 
                 if args.viz_dir:
                     out_png = os.path.join(args.viz_dir, f"{map_name}_{scen_name}_{agent_num}_{args.policy}.png")
                     visualize_trajectory(env, out_png, f"{map_name} | {scen_name} | N={agent_num} | {args.policy}")
-    write_rows(args.output_csv, rows)
+    log_progress(f"finished {completed_cases} cases in {time.time() - eval_start:.1f}s")
 
 
 if __name__ == "__main__":
