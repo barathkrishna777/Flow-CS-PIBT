@@ -35,6 +35,7 @@ MAP_NPZ_CANDIDATES = [
 ]
 BD_DIR_CANDIDATES = [
     "data/bd_npzs/large_scale",
+    "data/constant_npzs",
     "data/constant_npzs/bd_npzs",
     "data/bd_npzs",
 ]
