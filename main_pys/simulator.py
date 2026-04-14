@@ -4,6 +4,7 @@ import pdb
 from typing import Any
 import numpy as np
 import torch 
+import torch.nn as nn
 import csv 
 from collections import deque, defaultdict 
 import cProfile 
@@ -294,11 +295,18 @@ def runNNOnState(cur_locs, bd, grid_map, k, m, model, device, goal_locations, ti
 
         n_agents = cur_locs.shape[0]
 
-        if args.useActionHead:
+        if args.policyType == "classifier":
+            timer.start("forward_pass")
+            _, predictions = model(data)
+            probs = torch.softmax(predictions, dim=1).cpu().numpy()
+            timer.stop("forward_pass")
+        elif args.useActionHead:
             # Direct action prediction via auxiliary head (single forward pass)
             v_dummy = torch.zeros(n_agents, 2, device=device)
             t_dummy = torch.full((n_agents, 1), 0.5, device=device)
+            timer.start("forward_pass")
             _, action_logits = model(v_dummy, t_dummy, data, return_action_logits=True)
+            timer.stop("forward_pass")
             scores = action_logits.cpu().numpy()
             scores = scores / args.tau
             scores = scores - np.max(scores, axis=1, keepdims=True)
@@ -314,7 +322,9 @@ def runNNOnState(cur_locs, bd, grid_map, k, m, model, device, goal_locations, ti
                 v = torch.randn(n_agents, 2, device=device)
                 for step in range(num_steps):
                     t = torch.full((n_agents, 1), step * dt, device=device)
+                    timer.start("forward_pass")
                     flow = model(v, t, data)
+                    timer.stop("forward_pass")
                     v = v + flow * dt
                 all_velocities += v
             predicted_velocity = (all_velocities / num_samples).cpu().numpy()
@@ -335,6 +345,45 @@ def runNNOnState(cur_locs, bd, grid_map, k, m, model, device, goal_locations, ti
             probs[should_wait, 0] = 0.96  # action 0 = wait
 
     return probs
+
+def load_flow_model(args, device, k):
+    model = FlowGNNModel(k=k, hidden_dim=args.hiddenDim, num_layers=args.numLayers).to(device)
+
+    checkpoint = torch.load(args.modelPath, map_location=device, weights_only=False)
+    if 'model_state_dict' in checkpoint:
+        model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+    else:
+        model.load_state_dict(checkpoint, strict=False)
+    return model
+
+def load_classifier_model(args, device, k):
+    checkpoint = torch.load(args.modelPath, map_location=device, weights_only=False)
+
+    if isinstance(checkpoint, nn.Module):
+        return checkpoint.to(device)
+
+    if isinstance(checkpoint, dict):
+        for key in ("model", "net", "module"):
+            maybe_model = checkpoint.get(key)
+            if isinstance(maybe_model, nn.Module):
+                return maybe_model.to(device)
+        state_dict = checkpoint.get("model_state_dict", checkpoint)
+    else:
+        state_dict = checkpoint
+
+    linear_dim = args.classifierLinearDim
+    if linear_dim <= 0:
+        patch_width = 2 * k + 1
+        linear_dim = (patch_width - 2) ** 2 * args.classifierInChannels + 5
+    model = GNNStack(
+        linear_dim,
+        args.classifierInChannels,
+        args.classifierHiddenDim,
+        args.classifierOutputDim,
+        args.classifierReluType,
+    ).to(device)
+    model.load_state_dict(state_dict, strict=False)
+    return model
 
 class WrapperBDGetActionPrefs:
     def __init__(self, bd, grid_map, k, m, num_agents) -> None:
@@ -484,13 +533,12 @@ def main(args: argparse.ArgumentParser):
     if not os.path.exists(args.modelPath):
         raise FileNotFoundError('Model file: {} not found.'.format(args.modelPath))
     
-    model = FlowGNNModel(k=k, hidden_dim=args.hiddenDim, num_layers=args.numLayers).to(device) 
-    
-    checkpoint = torch.load(args.modelPath, map_location=device, weights_only=False)
-    if 'model_state_dict' in checkpoint:
-        model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+    if args.policyType == "flow":
+        model = load_flow_model(args, device, k)
+    elif args.policyType == "classifier":
+        model = load_classifier_model(args, device, k)
     else:
-        model.load_state_dict(checkpoint, strict=False)
+        raise ValueError(f"Unknown policyType: {args.policyType}")
         
     model.eval()
 
@@ -568,8 +616,20 @@ if __name__ == '__main__':
     parser.add_argument('--waitThreshold', type=float, help="Wait magnitude threshold (default 0.25)", default=0.25)
     parser.add_argument('--numConsensusSamples', type=int, help="Number of flow samples to average (default 3)", default=3)
     parser.add_argument('--useActionHead', type=lambda x: bool(str2bool(x)), help="Use auxiliary action head instead of flow (default False)", default=False)
+    parser.add_argument('--policyType', '--policy-type', dest='policyType', type=str, choices=['flow', 'classifier'], default='flow',
+                        help="Policy/model family to load: flow for FlowGNNModel, classifier for Rishi/SSIL GNNStack")
     parser.add_argument('--hiddenDim', type=int, help="Model hidden dimension (default 1024)", default=1024)
     parser.add_argument('--numLayers', type=int, help="Number of GNN layers (default 6)", default=6)
+    parser.add_argument('--classifierLinearDim', type=int, default=-1,
+                        help="Classifier GNN linear dimension; <=0 computes the standard SSIL value from k/channels")
+    parser.add_argument('--classifierInChannels', type=int, default=3,
+                        help="Classifier local patch channels (default: 3)")
+    parser.add_argument('--classifierHiddenDim', type=int, default=64,
+                        help="Classifier hidden dimension, only used for state_dict checkpoints")
+    parser.add_argument('--classifierOutputDim', type=int, default=5,
+                        help="Classifier output dimension (default: 5)")
+    parser.add_argument('--classifierReluType', type=str, default='relu',
+                        help="Classifier activation type, only used for state_dict checkpoints")
     args = parser.parse_args()
 
     if args.mapName.endswith('.map'): 

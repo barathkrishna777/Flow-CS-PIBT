@@ -69,6 +69,8 @@ def main():
     p.add_argument("--consensus", type=int, default=3)
     p.add_argument("--tau", type=float, default=0.3)
     p.add_argument("--wait-thresh", type=float, default=0.25)
+    p.add_argument("--policy-type", choices=["flow", "classifier"], default="flow",
+                   help="Policy/model family to pass to simulator (default: flow)")
     p.add_argument("--hidden-dim", type=int, default=1024)
     p.add_argument("--num-layers", type=int, default=6)
     args = p.parse_args()
@@ -152,6 +154,7 @@ def main():
             f"--tau={args.tau}",
             f"--waitThreshold={args.wait_thresh}",
             f"--numConsensusSamples={args.consensus}",
+            f"--policyType={args.policy_type}",
             f"--hiddenDim={args.hidden_dim}",
             f"--numLayers={args.num_layers}",
         ]
