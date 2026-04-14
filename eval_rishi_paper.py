@@ -25,6 +25,9 @@ import glob
 import os
 import subprocess
 import sys
+from collections import deque
+
+import numpy as np
 
 MAP_NPZ_CANDIDATES = [
     "data/all_maps.npz",
@@ -75,6 +78,64 @@ def _bd_candidates(map_name: str, scenario_base_name: str) -> list[str]:
     return paths
 
 
+def _parse_scenario_goals(scen_path: str, max_agents: int = 1000) -> np.ndarray:
+    goals = []
+    with open(scen_path) as f:
+        f.readline()
+        for line in f:
+            parts = line.rstrip().split("\t")
+            if len(parts) >= 8:
+                goals.append((int(parts[7]), int(parts[6])))
+            if len(goals) >= max_agents:
+                break
+    return np.asarray(goals, dtype=np.int64)
+
+
+def _compute_bd_for_goals(map_grid: np.ndarray, goals: np.ndarray) -> np.ndarray:
+    height, width = map_grid.shape
+    bd = np.full((len(goals), height, width), 10000, dtype=np.int16)
+    moves = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+
+    for i, (goal_row, goal_col) in enumerate(goals):
+        if map_grid[goal_row, goal_col] == 1:
+            continue
+        queue = deque([(goal_row, goal_col)])
+        bd[i, goal_row, goal_col] = 0
+        while queue:
+            row, col = queue.popleft()
+            next_dist = int(bd[i, row, col]) + 1
+            for drow, dcol in moves:
+                nrow, ncol = row + drow, col + dcol
+                if 0 <= nrow < height and 0 <= ncol < width:
+                    if map_grid[nrow, ncol] == 0 and bd[i, nrow, ncol] == 10000:
+                        bd[i, nrow, ncol] = next_dist
+                        queue.append((nrow, ncol))
+    return bd
+
+
+def _generate_bd(map_npz_path: str, map_name: str, scen_path: str) -> str:
+    out_dir = "data/bd_npzs/large_scale"
+    os.makedirs(out_dir, exist_ok=True)
+    scenario_base = os.path.basename(scen_path).replace(".scen", "")
+    out_path = os.path.join(out_dir, f"{scenario_base}_bds.npz")
+    if os.path.exists(out_path):
+        return out_path
+
+    map_key = f"{map_name}.map"
+    map_npz = np.load(map_npz_path)
+    if map_key not in map_npz:
+        raise KeyError(f"Map key {map_key} not found in {map_npz_path}")
+    goals = _parse_scenario_goals(scen_path)
+    print(f"Generating missing BD: {out_path} ({len(goals)} goals)")
+    bd = _compute_bd_for_goals(map_npz[map_key], goals)
+    scen_num = scen_path.split("-")[-1].split(".")[0]
+    bd_key = f"{map_name}-random-{scen_num}"
+    tmp_path = f"{out_path}.{os.getpid()}.tmp.npz"
+    np.savez_compressed(tmp_path, **{bd_key: bd})
+    os.replace(tmp_path, out_path)
+    return out_path
+
+
 def main():
     p = argparse.ArgumentParser(description="Rishi paper held-out benchmark (8 maps)")
     p.add_argument("-m", "--model", required=True, help="Checkpoint .pt path")
@@ -96,6 +157,8 @@ def main():
     p.add_argument("--wait-thresh", type=float, default=0.25)
     p.add_argument("--policy-type", choices=["flow", "classifier"], default="flow",
                    help="Policy/model family to pass to simulator (default: flow)")
+    p.add_argument("--generate-missing-bd", action="store_true",
+                   help="Generate missing BD heuristic npzs from map/scenario files")
     p.add_argument("--hidden-dim", type=int, default=1024)
     p.add_argument("--num-layers", type=int, default=6)
     args = p.parse_args()
@@ -134,10 +197,14 @@ def main():
             bn = os.path.basename(scen_path).replace(".scen", "")
             bd_path = _first_existing_path(_bd_candidates(map_name, bn))
             if not os.path.isfile(bd_path):
-                print(f"WARNING: missing BD for {map_name} {bn}; tried:")
-                for candidate in _bd_candidates(map_name, bn):
-                    print(f"  - {candidate}")
-                continue
+                if args.generate_missing_bd:
+                    bd_path = _generate_bd(map_npz, map_name, scen_path)
+                else:
+                    print(f"WARNING: missing BD for {map_name} {bn}; tried:")
+                    for candidate in _bd_candidates(map_name, bn):
+                        print(f"  - {candidate}")
+                    print("  Tip: rerun with --generate-missing-bd or download the BD bundle.")
+                    continue
             max_avail = _max_agents_in_scen(scen_path)
             for n in agent_counts:
                 if n > max_avail:
