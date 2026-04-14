@@ -26,9 +26,19 @@ import os
 import subprocess
 import sys
 
-MAP_NPZ = "data/all_maps.npz"
-BD_DIR = "data/bd_npzs/large_scale"
-SCEN_DIR = "data/scen-random"
+MAP_NPZ_CANDIDATES = [
+    "data/all_maps.npz",
+    "data/constant_npzs/all_maps.npz",
+]
+BD_DIR_CANDIDATES = [
+    "data/bd_npzs/large_scale",
+    "data/constant_npzs/bd_npzs",
+    "data/bd_npzs",
+]
+SCEN_DIR_CANDIDATES = [
+    "data/scen-random",
+    "data/mapf-scen-random",
+]
 
 # Same 8 maps as generate_and_preprocess.HELD_OUT_TEST (paper protocol)
 RISHI_HELD_OUT_MAPS = [
@@ -48,6 +58,21 @@ DEFAULT_AGENT_COUNTS = list(range(100, 1001, 100))
 def _max_agents_in_scen(scen_path: str) -> int:
     with open(scen_path) as f:
         return max(0, len(f.readlines()) - 1)
+
+
+def _first_existing_path(candidates: list[str]) -> str:
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return candidates[0]
+
+
+def _bd_candidates(map_name: str, scenario_base_name: str) -> list[str]:
+    paths = []
+    for bd_dir in BD_DIR_CANDIDATES:
+        paths.append(os.path.join(bd_dir, f"{scenario_base_name}_bds.npz"))
+        paths.append(os.path.join(bd_dir, f"{map_name}_bds.npz"))
+    return paths
 
 
 def main():
@@ -85,6 +110,11 @@ def main():
     except ImportError:
         use_gpu = False
 
+    map_npz = _first_existing_path(MAP_NPZ_CANDIDATES)
+    scen_dir = _first_existing_path(SCEN_DIR_CANDIDATES)
+    print(f"Map NPZ: {map_npz}")
+    print(f"Scenario dir: {scen_dir}")
+
     maps = args.maps if args.maps else RISHI_HELD_OUT_MAPS
     for m in maps:
         if m not in RISHI_HELD_OUT_MAPS:
@@ -95,16 +125,18 @@ def main():
 
     runs = []
     for map_name in maps:
-        pattern = os.path.join(SCEN_DIR, f"{map_name}-random-*.scen")
+        pattern = os.path.join(scen_dir, f"{map_name}-random-*.scen")
         scens = sorted(glob.glob(pattern))[:max_scen]
         if not scens:
             print(f"WARNING: no scenarios for {map_name}, skip")
             continue
         for scen_path in scens:
             bn = os.path.basename(scen_path).replace(".scen", "")
-            bd_path = os.path.join(BD_DIR, f"{bn}_bds.npz")
+            bd_path = _first_existing_path(_bd_candidates(map_name, bn))
             if not os.path.isfile(bd_path):
-                print(f"WARNING: missing BD {bd_path}, skip")
+                print(f"WARNING: missing BD for {map_name} {bn}; tried:")
+                for candidate in _bd_candidates(map_name, bn):
+                    print(f"  - {candidate}")
                 continue
             max_avail = _max_agents_in_scen(scen_path)
             for n in agent_counts:
@@ -138,7 +170,7 @@ def main():
         print(f"[{i}/{total}] {map_name} | {scen_tag} | {n} ag", flush=True)
         cmd = [
             sys.executable, "-m", "main_pys.simulator",
-            f"--mapNpzFile={MAP_NPZ}",
+            f"--mapNpzFile={map_npz}",
             f"--mapName={map_name}",
             f"--scenFile={scen_path}",
             f"--bdNpzFile={bd_path}",

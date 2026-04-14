@@ -19,6 +19,8 @@ def _truthy(value: str) -> bool:
 
 
 def _load_rows(path: str) -> list[dict[str, str]]:
+    if not os.path.exists(path):
+        raise SystemExit(f"Missing CSV: {path}")
     with open(path, newline="") as f:
         return list(csv.DictReader(f))
 
