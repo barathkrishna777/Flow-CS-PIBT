@@ -1,9 +1,10 @@
 """
 Held-out benchmark aligned with Veerapaneni et al. (Work Smarter, Not Harder).
 
-Evaluates all 8 paper held-out maps, with the same scenario sweep and density
-ladder used in prior project batch evals (e.g. batch_results_wave5_best.csv):
-  - Maps: HELD_OUT_TEST set (8 maps)
+Evaluates named Rishi-style map presets, with the same scenario sweep and
+density ladder used in prior project batch evals (e.g. batch_results_wave5_best.csv):
+  - Default maps: HELD_OUT_TEST set (8 maps)
+  - Optional maps: 12-map panel from Rishi's reported evals
   - Scenarios: random-1 .. random-N per map (default N=25, matching scen-random caps)
   - Agents: 100, 200, ..., 1000
 
@@ -17,6 +18,8 @@ Usage:
   python eval_rishi_paper.py -m model.pt --quick --output logs/rishi_quick.csv
 
   # Paper-scale run is large (8 maps x 25 scens x 10 agent levels = 2000 sims).
+  # Rishi's 12-map panel is larger:
+  python eval_rishi_paper.py -m model.pt --map-set rishi12 --output logs/rishi12.csv
 """
 from __future__ import annotations
 
@@ -42,6 +45,26 @@ RISHI_HELD_OUT_MAPS = [
     "den520d",
 ]
 
+RISHI_12_MAPS = [
+    "Berlin_1_256",
+    "empty-32-32",
+    "maze-32-32-4",
+    "random-64-64-20",
+    "warehouse-20-40-10-2-1",
+    "room-64-64-16",
+    "Paris_1_256",
+    "empty-48-48",
+    "maze-128-128-2",
+    "random-64-64-10",
+    "warehouse-10-20-10-2-1",
+    "den312d",
+]
+
+MAP_PRESETS = {
+    "rishi8": RISHI_HELD_OUT_MAPS,
+    "rishi12": RISHI_12_MAPS,
+}
+
 DEFAULT_AGENT_COUNTS = list(range(100, 1001, 100))
 
 
@@ -50,12 +73,21 @@ def _max_agents_in_scen(scen_path: str) -> int:
         return max(0, len(f.readlines()) - 1)
 
 
+def _print_preflight(preflight: list[tuple[str, int, int, int]]) -> None:
+    print("Preflight by map:")
+    for map_name, scen_count, bd_count, run_count in preflight:
+        status = "skip" if run_count == 0 else "ok"
+        print(f"  {status:4} {map_name}: scenarios={scen_count} bds={bd_count} runs={run_count}")
+
+
 def main():
-    p = argparse.ArgumentParser(description="Rishi paper held-out benchmark (8 maps)")
+    p = argparse.ArgumentParser(description="Rishi-style grid benchmark")
     p.add_argument("-m", "--model", required=True, help="Checkpoint .pt path")
     p.add_argument("--output", "-o", required=True, help="Output CSV (simulator format)")
+    p.add_argument("--map-set", choices=sorted(MAP_PRESETS), default="rishi8",
+                   help="Named map preset (default: rishi8). Ignored when --maps is set.")
     p.add_argument("--maps", nargs="*", default=None,
-                   help="Subset of map names (default: all 8 held-out)")
+                   help="Explicit map names. Overrides --map-set.")
     p.add_argument("--max-scenario", type=int, default=25,
                    help="Use random-1.scen .. random-N.scen per map (default 25)")
     p.add_argument("--agents", nargs="*", type=int, default=DEFAULT_AGENT_COUNTS,
@@ -85,7 +117,8 @@ def main():
     except ImportError:
         use_gpu = False
 
-    maps = args.maps if args.maps else RISHI_HELD_OUT_MAPS
+    maps = args.maps if args.maps else MAP_PRESETS[args.map_set]
+    map_source = "custom --maps" if args.maps else args.map_set
     for m in maps:
         if m not in RISHI_HELD_OUT_MAPS:
             print(f"WARNING: {m} is not in the standard 8 held-out maps; continuing anyway.")
@@ -94,25 +127,33 @@ def main():
     max_scen = 1 if args.quick else args.max_scenario
 
     runs = []
+    preflight = []
     for map_name in maps:
         pattern = os.path.join(SCEN_DIR, f"{map_name}-random-*.scen")
         scens = sorted(glob.glob(pattern))[:max_scen]
         if not scens:
             print(f"WARNING: no scenarios for {map_name}, skip")
+            preflight.append((map_name, 0, 0, 0))
             continue
+        available_bd = 0
+        scheduled_runs = 0
         for scen_path in scens:
             bn = os.path.basename(scen_path).replace(".scen", "")
             bd_path = os.path.join(BD_DIR, f"{bn}_bds.npz")
             if not os.path.isfile(bd_path):
                 print(f"WARNING: missing BD {bd_path}, skip")
                 continue
+            available_bd += 1
             max_avail = _max_agents_in_scen(scen_path)
             for n in agent_counts:
                 if n > max_avail:
                     continue
                 runs.append((map_name, scen_path, bd_path, n))
+                scheduled_runs += 1
+        preflight.append((map_name, len(scens), available_bd, scheduled_runs))
 
     if not runs:
+        _print_preflight(preflight)
         print("ERROR: no runs to execute.", file=sys.stderr)
         sys.exit(1)
 
@@ -124,12 +165,14 @@ def main():
 
     total = len(runs)
     print("=" * 60)
-    print("Rishi held-out benchmark (8-map protocol)")
+    print("Rishi-style grid benchmark")
     print(f"Model: {args.model}")
-    print(f"Maps: {len(maps)} | Scenarios/map: <= {max_scen} | Agents: {agent_counts[0]}..{agent_counts[-1]}")
+    print(f"Map set: {map_source} | Requested maps: {len(maps)}")
+    print(f"Scenarios/map: <= {max_scen} | Agents: {agent_counts[0]}..{agent_counts[-1]}")
     print(f"Policy: {args.policy_type}")
     print(f"steps={args.num_integration_steps} consensus={args.consensus} tau={args.tau}")
     print(f"timeLimit={args.time_limit}s maxSteps={args.max_steps_multiplier} | GPU: {use_gpu}")
+    _print_preflight(preflight)
     print(f"Total runs: {total}")
     print(f"Output: {args.output}")
     print("=" * 60)

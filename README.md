@@ -314,7 +314,13 @@ python eval_full.py large_scale_flow_my_flow_best.pt \
 
 ### Rishi Paper Held-Out Benchmark
 
-The default held-out test maps are:
+`eval_rishi_paper.py` supports named map presets:
+
+- `rishi8` is the default strict held-out protocol.
+- `rishi12` is the 12-map panel from Rishi's reported evals, useful for
+  checking whether familiar map topology helps Flow.
+
+The default `rishi8` held-out test maps are:
 
 ```text
 Paris_1_256
@@ -326,6 +332,27 @@ warehouse-10-20-10-2-1
 den312d
 den520d
 ```
+
+The `rishi12` panel maps are:
+
+```text
+Berlin_1_256
+empty-32-32
+maze-32-32-4
+random-64-64-20
+warehouse-20-40-10-2-1
+room-64-64-16
+Paris_1_256
+empty-48-48
+maze-128-128-2
+random-64-64-10
+warehouse-10-20-10-2-1
+den312d
+```
+
+`rishi12` is not a pure held-out-topology test if any of those maps appeared in
+training trajectories. Use it as a topology-familiarity comparison against the
+strict `rishi8` run.
 
 A quick smoke test uses one scenario and agent counts `100, 400, 800`:
 
@@ -354,14 +381,29 @@ mkdir -p logs evals
 CUDA_VISIBLE_DEVICES=0 nohup python eval_rishi_paper.py \
   -m large_scale_flow_my_flow_best.pt \
   -o evals/rishi_full_flow.csv \
+  --map-set rishi8 \
   --policy-type flow \
   > logs/rishi_full_flow.log 2>&1 &
 
 CUDA_VISIBLE_DEVICES=1 nohup python eval_rishi_paper.py \
   -m data/model/ssil_model.pt \
   -o evals/rishi_full_ssil_classifier.csv \
+  --map-set rishi8 \
   --policy-type classifier \
   > logs/rishi_full_ssil_classifier.log 2>&1 &
+```
+
+For the 12-map topology comparison on Lambda:
+
+```sh
+mkdir -p logs evals
+
+CUDA_VISIBLE_DEVICES=0 nohup python eval_rishi_paper.py \
+  -m large_scale_flow_my_flow_best.pt \
+  -o evals/rishi12_full_flow.csv \
+  --map-set rishi12 \
+  --policy-type flow \
+  > logs/rishi12_full_flow.log 2>&1 &
 ```
 
 Monitor:
