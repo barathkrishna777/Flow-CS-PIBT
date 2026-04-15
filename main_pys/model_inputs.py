@@ -7,6 +7,49 @@ from torch_geometric.data import Data
 import numpy as np
 import pdb
 
+DISCRETE_ACTION_DELTAS = {
+    (0, 0): 0,    # wait
+    (0, 1): 1,    # right
+    (1, 0): 2,    # down
+    (-1, 0): 3,   # up
+    (0, -1): 4,   # left
+}
+
+
+def discrete_action_labels_from_positions(discrete_positions, t_step):
+    """Return exact next-action labels from integer MAPF positions.
+
+    Label mapping is 0=wait, 1=right, 2=down, 3=up, 4=left. The final
+    timestep has no next position, so all agents are labeled wait.
+    """
+    positions = np.asarray(discrete_positions)
+    if positions.ndim != 3 or positions.shape[-1] != 2:
+        raise ValueError(
+            "discrete_positions must have shape (num_agents, timesteps, 2)"
+        )
+
+    if t_step < 0 or t_step >= positions.shape[1]:
+        raise IndexError(f"t_step {t_step} outside trajectory length {positions.shape[1]}")
+
+    if t_step + 1 >= positions.shape[1]:
+        deltas = np.zeros((positions.shape[0], 2), dtype=np.int64)
+    else:
+        deltas = positions[:, t_step + 1, :] - positions[:, t_step, :]
+        deltas = np.rint(deltas).astype(np.int64, copy=False)
+
+    labels = np.full(deltas.shape[0], -1, dtype=np.int64)
+    for delta, action in DISCRETE_ACTION_DELTAS.items():
+        mask = (deltas[:, 0] == delta[0]) & (deltas[:, 1] == delta[1])
+        labels[mask] = action
+
+    invalid = np.flatnonzero(labels < 0)
+    if invalid.size > 0:
+        examples = deltas[invalid[:5]].tolist()
+        raise ValueError(f"Unexpected non-cardinal action deltas at timestep {t_step}: {examples}")
+
+    return labels
+
+
 def create_data_object(pos_list, bd_list, grid, k, m, goal_locs, labels=np.array([]), debug_checks=False):
     """
     pos_list: (N,2) positions

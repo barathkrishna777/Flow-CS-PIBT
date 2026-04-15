@@ -39,11 +39,22 @@ def velocity_to_action_labels(expert_velocities, device):
     return labels
 
 
-def compute_flow_loss(model, batch, device, use_amp, action_loss_weight=0.3):
+def compute_flow_loss(
+    model,
+    batch,
+    device,
+    use_amp,
+    action_loss_weight=0.3,
+    unweighted_action_loss=False,
+    unweighted_flow_loss=False,
+):
     """Shared flow matching loss computation for train and val, with optional auxiliary action loss."""
     batch = batch.to(device)
     x_1 = batch.y.view(-1, 2)
-    node_weights = batch.node_weights.view(-1, 1)
+    if hasattr(batch, "node_weights") and batch.node_weights is not None:
+        node_weights = batch.node_weights.view(-1, 1)
+    else:
+        node_weights = torch.ones(x_1.shape[0], 1, device=device)
 
     num_graphs = batch.batch.max().item() + 1
     t_per_graph = torch.sigmoid(torch.randn(num_graphs, 1, device=device))
@@ -56,26 +67,51 @@ def compute_flow_loss(model, batch, device, use_amp, action_loss_weight=0.3):
         predicted_flow, action_logits = model(x_t, t, batch, return_action_logits=True)
         target_flow = x_1 - x_0
         base_loss = F.mse_loss(predicted_flow, target_flow, reduction='none')
-        flow_loss = (base_loss * node_weights).mean()
+        if unweighted_flow_loss:
+            flow_loss = base_loss.mean()
+        else:
+            flow_loss = (base_loss * node_weights).mean()
 
         # Auxiliary action classification loss
-        expert_actions = velocity_to_action_labels(x_1, device)
+        if hasattr(batch, "action_y") and batch.action_y is not None:
+            expert_actions = batch.action_y.view(-1).long().to(device)
+        else:
+            expert_actions = velocity_to_action_labels(x_1, device)
         action_loss = F.cross_entropy(action_logits, expert_actions, reduction='none')
-        action_loss = (action_loss * node_weights.squeeze(1)).mean()
+        if unweighted_action_loss:
+            action_loss = action_loss.mean()
+        else:
+            action_loss = (action_loss * node_weights.squeeze(1)).mean()
 
         loss = flow_loss + action_loss_weight * action_loss
 
     return loss
 
 
-def validate(model, val_loader, device, use_amp):
+def validate(
+    model,
+    val_loader,
+    device,
+    use_amp,
+    action_loss_weight,
+    unweighted_action_loss,
+    unweighted_flow_loss,
+):
     """Run validation and return average loss."""
     model.eval()
     total_loss = 0.0
     num_batches = 0
     with torch.no_grad():
         for batch in val_loader:
-            loss = compute_flow_loss(model, batch, device, use_amp)
+            loss = compute_flow_loss(
+                model,
+                batch,
+                device,
+                use_amp,
+                action_loss_weight=action_loss_weight,
+                unweighted_action_loss=unweighted_action_loss,
+                unweighted_flow_loss=unweighted_flow_loss,
+            )
             total_loss += loss.item()
             num_batches += 1
     return total_loss / max(num_batches, 1)
@@ -83,7 +119,9 @@ def validate(model, val_loader, device, use_amp):
 
 def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", wandb_entity=None,
           preprocessed_dir=None, no_weighted_sampling=False, val_split=0.05, patience=0,
-          resume=None, start_epoch=0, hidden_dim=1024, num_layers=6):
+          resume=None, start_epoch=0, hidden_dim=1024, num_layers=6,
+          action_loss_weight=0.3, unweighted_action_loss=False,
+          unweighted_flow_loss=False, epochs=10):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_amp = device.type == "cuda"
     print(f"Device: {device} | AMP: {use_amp}")
@@ -166,7 +204,7 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
     model = FlowGNNModel(hidden_dim=hidden_dim, num_layers=num_layers).to(device)
     optimizer = AdamW(model.parameters(), lr=1e-4, weight_decay=1e-4)
 
-    epochs = 1 if quick else 10
+    epochs = 1 if quick else epochs
     # Gentle cosine decay: LR goes from 1e-4 -> ~0 over all epochs
     scheduler = CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
 
@@ -219,11 +257,20 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
             "weighted_sampling": sampler is not None,
             "val_split": val_split,
             "patience": patience,
+            "action_loss_weight": action_loss_weight,
+            "unweighted_action_loss": unweighted_action_loss,
+            "unweighted_flow_loss": unweighted_flow_loss,
         })
 
     log_batch_every = 10
     print(f"Batch size: {batch_size} | Workers: {cpu_cores} | Epochs: {epochs}")
     print(f"Weighted sampling: {'ON' if sampler else 'OFF'}")
+    print(
+        "Loss weighting: "
+        f"flow={'unweighted' if unweighted_flow_loss else 'weighted'}, "
+        f"action={'unweighted' if unweighted_action_loss else 'weighted'}, "
+        f"action_loss_weight={action_loss_weight}"
+    )
 
     # Initialize best_val_loss (may be overridden by resume checkpoint above)
     if 'best_val_loss' not in dir():
@@ -243,7 +290,15 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}")
 
         for batch_idx, batch in enumerate(pbar):
-            loss = compute_flow_loss(model, batch, device, use_amp)
+            loss = compute_flow_loss(
+                model,
+                batch,
+                device,
+                use_amp,
+                action_loss_weight=action_loss_weight,
+                unweighted_action_loss=unweighted_action_loss,
+                unweighted_flow_loss=unweighted_flow_loss,
+            )
 
             optimizer.zero_grad()
             scaler.scale(loss).backward()
@@ -281,7 +336,15 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
         # ── Validation ──
         val_loss = None
         if val_loader is not None:
-            val_loss = validate(model, val_loader, device, use_amp)
+            val_loss = validate(
+                model,
+                val_loader,
+                device,
+                use_amp,
+                action_loss_weight=action_loss_weight,
+                unweighted_action_loss=unweighted_action_loss,
+                unweighted_flow_loss=unweighted_flow_loss,
+            )
             val_str = f" | Val Loss: {val_loss:.4f}"
 
             # Track best model
@@ -385,6 +448,14 @@ if __name__ == "__main__":
                         help="Model hidden dimension (default: 1024)")
     parser.add_argument("--num-layers", type=int, default=6,
                         help="Number of GNN layers (default: 6)")
+    parser.add_argument("--action-loss-weight", type=float, default=0.3,
+                        help="Weight for auxiliary/exact discrete action cross entropy")
+    parser.add_argument("--unweighted-action-loss", action="store_true",
+                        help="Do not apply node_weights to the action cross entropy loss")
+    parser.add_argument("--unweighted-flow-loss", action="store_true",
+                        help="Do not apply node_weights to the flow MSE loss")
+    parser.add_argument("--epochs", type=int, default=10,
+                        help="Number of training epochs; --quick still forces 1 epoch")
     args = parser.parse_args()
     train(run_name=args.run_name, quick=args.quick, use_wandb=not args.no_wandb,
           wandb_project=args.wandb_project, wandb_entity=args.wandb_entity,
@@ -392,4 +463,8 @@ if __name__ == "__main__":
           no_weighted_sampling=args.no_weighted_sampling,
           val_split=args.val_split, patience=args.patience,
           resume=args.resume, start_epoch=args.start_epoch,
-          hidden_dim=args.hidden_dim, num_layers=args.num_layers)
+          hidden_dim=args.hidden_dim, num_layers=args.num_layers,
+          action_loss_weight=args.action_loss_weight,
+          unweighted_action_loss=args.unweighted_action_loss,
+          unweighted_flow_loss=args.unweighted_flow_loss,
+          epochs=args.epochs)

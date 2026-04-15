@@ -5,7 +5,11 @@ import numpy as np
 import random
 from torch.utils.data import Dataset
 from functools import lru_cache
-from main_pys.model_inputs import create_data_object, normalize_graph_data
+from main_pys.model_inputs import (
+    create_data_object,
+    discrete_action_labels_from_positions,
+    normalize_graph_data,
+)
 
 # --- OOM CRASH FIX: Reduced maxsize from 32 to 2 ---
 @lru_cache(maxsize=2)
@@ -85,6 +89,7 @@ class FlowMAPFDataset(Dataset):
         cur_locs_discrete[:, 1] = np.clip(cur_locs_discrete[:, 1], self.k, max_c)
 
         target_velocity = expert_velocities[:, t_step, :]
+        action_labels = discrete_action_labels_from_positions(discrete_positions, t_step)
 
         speeds = np.linalg.norm(target_velocity, axis=1)
         is_parked = speeds < 0.01
@@ -112,6 +117,7 @@ class FlowMAPFDataset(Dataset):
         graph_data = normalize_graph_data(graph_data, self.k)
 
         graph_data.y = torch.tensor(target_velocity, dtype=torch.float32)
+        graph_data.action_y = torch.tensor(action_labels, dtype=torch.long)
         graph_data.node_weights = torch.tensor(weights, dtype=torch.float32)
 
         return graph_data

@@ -69,8 +69,8 @@ def main():
     p.add_argument("--consensus", type=int, default=3)
     p.add_argument("--tau", type=float, default=0.3)
     p.add_argument("--wait-thresh", type=float, default=0.25)
-    p.add_argument("--policy-type", choices=["flow", "classifier"], default="flow",
-                   help="Policy/model family to pass to simulator (default: flow)")
+    p.add_argument("--policy-type", choices=["flow", "classifier", "flow_action_head", "local_classifier"], default="flow",
+                   help="Policy/model family to evaluate. flow_action_head loads a flow model and uses its action logits; local_classifier loads the repo's Rishi-like classifier.")
     p.add_argument("--hidden-dim", type=int, default=1024)
     p.add_argument("--num-layers", type=int, default=6)
     args = p.parse_args()
@@ -127,11 +127,15 @@ def main():
     print("Rishi held-out benchmark (8-map protocol)")
     print(f"Model: {args.model}")
     print(f"Maps: {len(maps)} | Scenarios/map: <= {max_scen} | Agents: {agent_counts[0]}..{agent_counts[-1]}")
+    print(f"Policy: {args.policy_type}")
     print(f"steps={args.num_integration_steps} consensus={args.consensus} tau={args.tau}")
     print(f"timeLimit={args.time_limit}s maxSteps={args.max_steps_multiplier} | GPU: {use_gpu}")
     print(f"Total runs: {total}")
     print(f"Output: {args.output}")
     print("=" * 60)
+
+    simulator_policy_type = "flow" if args.policy_type == "flow_action_head" else args.policy_type
+    use_action_head = args.policy_type == "flow_action_head"
 
     for i, (map_name, scen_path, bd_path, n) in enumerate(runs, 1):
         scen_tag = os.path.basename(scen_path)
@@ -154,7 +158,8 @@ def main():
             f"--tau={args.tau}",
             f"--waitThreshold={args.wait_thresh}",
             f"--numConsensusSamples={args.consensus}",
-            f"--policyType={args.policy_type}",
+            f"--policyType={simulator_policy_type}",
+            f"--useActionHead={'True' if use_action_head else 'False'}",
             f"--hiddenDim={args.hidden_dim}",
             f"--numLayers={args.num_layers}",
         ]

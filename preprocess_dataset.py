@@ -20,7 +20,11 @@ from multiprocessing import Pool, cpu_count
 from functools import partial
 from tqdm import tqdm
 
-from main_pys.model_inputs import create_data_object, normalize_graph_data
+from main_pys.model_inputs import (
+    create_data_object,
+    discrete_action_labels_from_positions,
+    normalize_graph_data,
+)
 
 
 # ── Map loading (same logic as dataset.py) ──────────────────────────────────
@@ -68,6 +72,7 @@ def process_sample(args, maps, k, m, out_dir):
         cur_locs_discrete[:, 1] = np.clip(cur_locs_discrete[:, 1], k, max_c)
 
         target_velocity = expert_velocities[:, t_step, :]
+        action_labels = discrete_action_labels_from_positions(discrete_positions, t_step)
 
         # Goal weighting
         speeds = np.linalg.norm(target_velocity, axis=1)
@@ -93,6 +98,7 @@ def process_sample(args, maps, k, m, out_dir):
         graph_data = create_data_object(cur_locs_discrete, bd_grid, grid_map, k, m, dummy_goals)
         graph_data = normalize_graph_data(graph_data, k)
         graph_data.y = torch.tensor(target_velocity, dtype=torch.float32)
+        graph_data.action_y = torch.tensor(action_labels, dtype=torch.long)
         graph_data.node_weights = torch.tensor(weights, dtype=torch.float32)
 
         torch.save(graph_data, out_path)

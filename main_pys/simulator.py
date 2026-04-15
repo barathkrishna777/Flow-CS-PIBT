@@ -16,6 +16,7 @@ from main_pys.model import GNNStack, CustomConv
 from main_pys.model_inputs import create_data_object, normalize_graph_data, get_bd_prefs
 from main_pys.custom_timer import CustomTimer
 from main_pys.generative_model import FlowGNNModel
+from main_pys.rishi_like_model import RishiLikeClassifier
 
 def str2bool(v: str) -> bool:
     return v.lower() in ("yes", "true", "t", "1")
@@ -295,12 +296,12 @@ def runNNOnState(cur_locs, bd, grid_map, k, m, model, device, goal_locations, ti
 
         n_agents = cur_locs.shape[0]
 
-        if args.policyType == "classifier":
+        if args.policyType in ("classifier", "local_classifier"):
             timer.start("forward_pass")
             _, predictions = model(data)
             probs = torch.softmax(predictions, dim=1).cpu().numpy()
             timer.stop("forward_pass")
-        elif args.useActionHead:
+        elif args.useActionHead or args.policyType == "flow_action_head":
             # Direct action prediction via auxiliary head (single forward pass)
             v_dummy = torch.zeros(n_agents, 2, device=device)
             t_dummy = torch.full((n_agents, 1), 0.5, device=device)
@@ -381,6 +382,26 @@ def load_classifier_model(args, device, k):
         args.classifierHiddenDim,
         args.classifierOutputDim,
         args.classifierReluType,
+    ).to(device)
+    model.load_state_dict(state_dict, strict=False)
+    return model
+
+def load_local_classifier_model(args, device, k):
+    checkpoint = torch.load(args.modelPath, map_location=device, weights_only=False)
+    if isinstance(checkpoint, nn.Module):
+        return checkpoint.to(device)
+
+    config = checkpoint.get("model_config", {}) if isinstance(checkpoint, dict) else {}
+    state_dict = checkpoint.get("model_state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint
+
+    model = RishiLikeClassifier(
+        k=config.get("k", k),
+        hidden_dim=config.get("hidden_dim", args.localClassifierHiddenDim),
+        num_layers=config.get("num_layers", args.localClassifierNumLayers),
+        dropout=config.get("dropout", args.localClassifierDropout),
+        in_channels=config.get("in_channels", args.localClassifierInChannels),
+        aux_feature_dim=config.get("aux_feature_dim", 5),
+        action_dim=config.get("action_dim", 5),
     ).to(device)
     model.load_state_dict(state_dict, strict=False)
     return model
@@ -533,10 +554,12 @@ def main(args: argparse.ArgumentParser):
     if not os.path.exists(args.modelPath):
         raise FileNotFoundError('Model file: {} not found.'.format(args.modelPath))
     
-    if args.policyType == "flow":
+    if args.policyType in ("flow", "flow_action_head"):
         model = load_flow_model(args, device, k)
     elif args.policyType == "classifier":
         model = load_classifier_model(args, device, k)
+    elif args.policyType == "local_classifier":
+        model = load_local_classifier_model(args, device, k)
     else:
         raise ValueError(f"Unknown policyType: {args.policyType}")
         
@@ -616,8 +639,8 @@ if __name__ == '__main__':
     parser.add_argument('--waitThreshold', type=float, help="Wait magnitude threshold (default 0.25)", default=0.25)
     parser.add_argument('--numConsensusSamples', type=int, help="Number of flow samples to average (default 3)", default=3)
     parser.add_argument('--useActionHead', type=lambda x: bool(str2bool(x)), help="Use auxiliary action head instead of flow (default False)", default=False)
-    parser.add_argument('--policyType', '--policy-type', dest='policyType', type=str, choices=['flow', 'classifier'], default='flow',
-                        help="Policy/model family to load: flow for FlowGNNModel, classifier for Rishi/SSIL GNNStack")
+    parser.add_argument('--policyType', '--policy-type', dest='policyType', type=str, choices=['flow', 'classifier', 'flow_action_head', 'local_classifier'], default='flow',
+                        help="Policy/model family to load: flow for FlowGNNModel, classifier for Rishi/SSIL GNNStack, flow_action_head for FlowGNNModel action logits, local_classifier for RishiLikeClassifier")
     parser.add_argument('--hiddenDim', type=int, help="Model hidden dimension (default 1024)", default=1024)
     parser.add_argument('--numLayers', type=int, help="Number of GNN layers (default 6)", default=6)
     parser.add_argument('--classifierLinearDim', type=int, default=-1,
@@ -630,10 +653,20 @@ if __name__ == '__main__':
                         help="Classifier output dimension (default: 5)")
     parser.add_argument('--classifierReluType', type=str, default='relu',
                         help="Classifier activation type, only used for state_dict checkpoints")
+    parser.add_argument('--localClassifierHiddenDim', type=int, default=128,
+                        help="Local Rishi-like classifier hidden dimension (default: 128)")
+    parser.add_argument('--localClassifierNumLayers', type=int, default=3,
+                        help="Local Rishi-like classifier SageConv layers (default: 3)")
+    parser.add_argument('--localClassifierDropout', type=float, default=0.25,
+                        help="Local Rishi-like classifier dropout (default: 0.25)")
+    parser.add_argument('--localClassifierInChannels', type=int, default=3,
+                        help="Local Rishi-like classifier input channels (default: 3)")
     args = parser.parse_args()
 
     if args.mapName.endswith('.map'): 
         args.mapName = args.mapName.removesuffix('.map')
+    if args.policyType == "flow_action_head":
+        args.useActionHead = True
     if args.shieldType == "LaCAM" and args.lacamLookahead == 0:
         raise ValueError('LaCAM lookahead must be set when using LaCAM shield type.')
     if args.shieldType == "Real-Time-LaCAM":

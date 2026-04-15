@@ -40,6 +40,9 @@ def _upcast_compact(data):
     if hasattr(data, 'bd_pred') and data.bd_pred is not None:
         if data.bd_pred.dtype == torch.float16:
             data.bd_pred = data.bd_pred.float()
+    if hasattr(data, 'action_y') and data.action_y is not None:
+        if data.action_y.dtype != torch.long:
+            data.action_y = data.action_y.long()
     return data
 
 
