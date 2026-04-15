@@ -1,6 +1,7 @@
 import os
 import subprocess
 import re
+import argparse
 import numpy as np
 from scipy.signal import savgol_filter
 import glob
@@ -24,10 +25,24 @@ HELD_OUT_TEST = {
 
 WINDOW_LENGTH = 3 
 POLY_ORDER = 2    
-MAX_WORKERS = os.cpu_count()
 
 os.makedirs(OUTPUT_NPZ_DIR, exist_ok=True)
 os.makedirs(BD_DIR, exist_ok=True)
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Generate grid-world Flow-CS expert trajectories and BD heuristics."
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=os.cpu_count() or 1,
+        help="Number of parallel worker processes (default: all reported CPU cores).",
+    )
+    return parser.parse_args()
+
+def print_log(message):
+    print(message, flush=True)
 
 def parse_paths_txt(file_path):
     with open(file_path, "r") as f:
@@ -110,7 +125,7 @@ def generate_scenario_bd(map_path, scen_path):
     if os.path.exists(out_bd_file):
         return f"BD exists: {scen_name}"
         
-    print(f"--> Building Heuristic Grid: {scen_name} (Takes ~30s)")
+    print_log(f"--> Building Heuristic Grid: {scen_name} (Takes ~30s)")
     try:
         map_data = read_map(map_path)
         goals = parse_scenario_goals(scen_path, max_agents=1000)
@@ -161,7 +176,7 @@ def generate_scenario_trajectory(map_path, scen_path, num_agents):
 # ==========================================
 # EXECUTION PIPELINE
 # ==========================================
-def process_benchmark_parallel():
+def process_benchmark_parallel(max_workers):
     map_files = glob.glob(os.path.join(MAP_DIR, "*.map"))
     agent_counts = [20, 50, 100, 200, 400, 600, 800, 1000]
     
@@ -188,21 +203,29 @@ def process_benchmark_parallel():
                     if n > 200 and "32-32" in map_name: continue
                     traj_jobs.append((map_path, scen_path, n))
 
+    cpu_count = os.cpu_count() or 1
+    print_log(
+        f"Using {max_workers} workers (Python reports {cpu_count} CPU cores)."
+    )
+
     # Run Phase 1
-    print(f"--- PHASE 1: Generating Heuristics ({len(bd_jobs)} files) ---")
-    with ProcessPoolExecutor(max_workers=MAX_WORKERS) as executor:
+    print_log(f"--- PHASE 1: Generating Heuristics ({len(bd_jobs)} files) ---")
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = [executor.submit(generate_scenario_bd, m, s) for m, s in bd_jobs]
         for future in as_completed(futures):
             # Print instantly when a job finishes
-            print(future.result())
+            print_log(future.result())
 
     # Run Phase 2
-    print(f"\n--- PHASE 2: Generating Expert Trajectories ({len(traj_jobs)} files) ---")
-    with ProcessPoolExecutor(max_workers=MAX_WORKERS) as executor:
+    print_log(f"\n--- PHASE 2: Generating Expert Trajectories ({len(traj_jobs)} files) ---")
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(generate_scenario_trajectory, m, s, a): (m, s, a) for m, s, a in traj_jobs}
         for i, future in enumerate(as_completed(futures)):
             if i % 50 == 0: 
-                print(f"Progress: {i}/{len(traj_jobs)} | {future.result()}")
+                print_log(f"Progress: {i}/{len(traj_jobs)} | {future.result()}")
 
 if __name__ == "__main__":
-    process_benchmark_parallel()
+    args = parse_args()
+    if args.workers < 1:
+        raise ValueError("--workers must be at least 1")
+    process_benchmark_parallel(args.workers)
