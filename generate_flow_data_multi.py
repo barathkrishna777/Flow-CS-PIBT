@@ -9,7 +9,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from collections import deque
 
 # Configuration
-EECBS_BIN = "./build/eecbs"
+DEFAULT_EECBS_BIN = "./build/eecbs"
 DATA_DIR = "data"
 MAP_DIR = os.path.join(DATA_DIR, "mapf-map")
 SCEN_DIR = os.path.join(DATA_DIR, "scen-random")
@@ -38,6 +38,11 @@ def parse_args():
         type=int,
         default=os.cpu_count() or 1,
         help="Number of parallel worker processes (default: all reported CPU cores).",
+    )
+    parser.add_argument(
+        "--eecbs-bin",
+        default=os.environ.get("EECBS_BIN", DEFAULT_EECBS_BIN),
+        help="Path to the EECBS executable (default: ./build/eecbs or EECBS_BIN env var).",
     )
     return parser.parse_args()
 
@@ -143,7 +148,7 @@ def generate_scenario_bd(map_path, scen_path):
 # ==========================================
 # PHASE 2: Generate EECBS Trajectories
 # ==========================================
-def generate_scenario_trajectory(map_path, scen_path, num_agents):
+def generate_scenario_trajectory(map_path, scen_path, num_agents, eecbs_bin):
     scen_name = os.path.basename(scen_path).replace(".scen", "")
     out_traj_file = os.path.join(OUTPUT_NPZ_DIR, f"{scen_name}_{num_agents}.npz")
     tmp_path_file = f"tmp_{scen_name}_{num_agents}_{os.getpid()}.txt" 
@@ -152,7 +157,7 @@ def generate_scenario_trajectory(map_path, scen_path, num_agents):
         return f"Traj Exists: {scen_name} (N={num_agents})"
         
     cmd = [
-        EECBS_BIN, "-m", map_path, "-a", scen_path, "-k", str(num_agents),
+        eecbs_bin, "-m", map_path, "-a", scen_path, "-k", str(num_agents),
         "--outputPaths", tmp_path_file, "--suboptimality", "2.0"
     ]
     
@@ -176,7 +181,7 @@ def generate_scenario_trajectory(map_path, scen_path, num_agents):
 # ==========================================
 # EXECUTION PIPELINE
 # ==========================================
-def process_benchmark_parallel(max_workers):
+def process_benchmark_parallel(max_workers, eecbs_bin):
     map_files = glob.glob(os.path.join(MAP_DIR, "*.map"))
     agent_counts = [20, 50, 100, 200, 400, 600, 800, 1000]
     
@@ -207,6 +212,7 @@ def process_benchmark_parallel(max_workers):
     print_log(
         f"Using {max_workers} workers (Python reports {cpu_count} CPU cores)."
     )
+    print_log(f"Using EECBS binary: {eecbs_bin}")
 
     # Run Phase 1
     print_log(f"--- PHASE 1: Generating Heuristics ({len(bd_jobs)} files) ---")
@@ -218,8 +224,12 @@ def process_benchmark_parallel(max_workers):
 
     # Run Phase 2
     print_log(f"\n--- PHASE 2: Generating Expert Trajectories ({len(traj_jobs)} files) ---")
+    if traj_jobs and not os.path.isfile(eecbs_bin):
+        raise FileNotFoundError(
+            f"EECBS binary not found: {eecbs_bin}. Pass --eecbs-bin or set EECBS_BIN."
+        )
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(generate_scenario_trajectory, m, s, a): (m, s, a) for m, s, a in traj_jobs}
+        futures = {executor.submit(generate_scenario_trajectory, m, s, a, eecbs_bin): (m, s, a) for m, s, a in traj_jobs}
         for i, future in enumerate(as_completed(futures)):
             if i % 50 == 0: 
                 print_log(f"Progress: {i}/{len(traj_jobs)} | {future.result()}")
@@ -228,4 +238,4 @@ if __name__ == "__main__":
     args = parse_args()
     if args.workers < 1:
         raise ValueError("--workers must be at least 1")
-    process_benchmark_parallel(args.workers)
+    process_benchmark_parallel(args.workers, args.eecbs_bin)
