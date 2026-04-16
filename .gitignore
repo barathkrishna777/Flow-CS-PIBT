@@ -1,9 +1,36 @@
 __pycache__/
-*.pdf
-*.pt
+*.py[cod]
+*$py.class
+.Python
+
+# Generated / large artifacts (weights already ignored via *.pt)
 wandb/
-# Project specific folders and files
 data/
 logs/
-test.ipynb
+*.pt
+*.pdf
 *.html
+test.ipynb
+
+# Local secrets / env
+.env
+.env.*
+!.env.example
+
+# OS / editor noise
+.DS_Store
+.claude/
+
+# One-off zip / Drive drops (dated archive folders at repo root)
+/evals-20*/
+/checkpoints-20*/
+
+# Stray chat exports / example images
+CHAT_EXPORT*.md
+example_*.png
+
+# CMake build products inside vendored EECBS (sources stay trackable)
+third_party/**/CMakeCache.txt
+third_party/**/CMakeFiles/
+third_party/**/cmake_install.cmake
+third_party/**/Makefile
