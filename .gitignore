@@ -7,3 +7,4 @@ data/
 logs/
 test.ipynb
 *.html
+__pycache__/
