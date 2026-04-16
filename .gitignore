@@ -29,8 +29,7 @@ test.ipynb
 CHAT_EXPORT*.md
 example_*.png
 
-# CMake build products inside vendored EECBS (sources stay trackable)
+# CMake build products inside vendored EECBS (keep CMakeLists + sources)
 third_party/**/CMakeCache.txt
 third_party/**/CMakeFiles/
 third_party/**/cmake_install.cmake
-third_party/**/Makefile
