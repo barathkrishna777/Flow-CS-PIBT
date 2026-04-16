@@ -1,3 +1,0 @@
-map,scenario,agents,policy,shield_type,success,agents_at_goal,agent_fraction_at_goal,path_length,path_length_ratio,smoothness,collisions,near_collisions,obstacle_hits,mean_arrival_step,runtime
-empty-48-48,empty-48-48-random-1,96,orca,orca,0.0,94.0,0.9791666666666666,2441.730224609375,0.9976785106316971,0.008586074225604534,24.0,593.0,0.0,127.30208333333333,7.785830974578857
-empty-48-48,empty-48-48-random-1,128,orca,orca,0.0,126.0,0.984375,3186.55224609375,1.006452433754561,0.013549108058214188,77.0,1007.0,0.0,124.78125,13.615596294403076

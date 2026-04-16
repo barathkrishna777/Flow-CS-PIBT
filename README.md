@@ -26,8 +26,6 @@ the classifier baseline on the paper's held-out maps.
 - `eval_rishi_paper.py`: Rishi-paper held-out grid-world benchmark.
 - `analysis_scripts/summarize_grid_eval.py`: summarize simulator CSVs into
   readable tables.
-- `generate_and_preprocess_continuous.py`, `main_pys/train_continuous.py`, and
-  `eval_continuous.py`: separate continuous-space experiments.
 
 ## Setup
 
@@ -424,106 +422,6 @@ python -m analysis_scripts.summarize_grid_eval \
 
 The summarizer prints per-run, per-map, and overall success tables.
 
-## Continuous MAPF
-
-The continuous-space stack is separate from the grid simulator.
-
-- `main_pys/continuous_env.py` implements continuous dynamics, obstacle checks,
-  and an ORCA-style local safety shield.
-- `generate_and_preprocess_continuous.py` creates a continuous-space dataset
-  root and manifest.
-- `generate_continuous_data.py` converts EECBS-flow plans into continuous
-  trajectories and can fall back to an ORCA-style expert.
-- `main_pys/train_continuous.py` trains either a continuous flow model or an
-  8-direction discrete baseline.
-- `eval_continuous.py` evaluates ORCA, continuous flow, or the discrete
-  baseline and can save trajectory plots.
-
-Generate a continuous dataset:
-
-```sh
-python generate_and_preprocess_continuous.py \
-  --map-dir data/mapf-map \
-  --scen-dir data/scen-random \
-  --maps empty-48-48 \
-  --agent-counts 16 32 64 96 128 160 \
-  --dataset-root data/continuous_main \
-  --expert-source hybrid
-```
-
-Train a continuous flow policy:
-
-```sh
-python -m main_pys.train_continuous \
-  --data-dir data/continuous_main/raw \
-  --map-dir data/mapf-map \
-  --policy-type flow \
-  --run-name conti_flow_v1 \
-  --output-dir checkpoints/continuous \
-  --seed 0
-```
-
-Train the continuous discrete baseline:
-
-```sh
-python -m main_pys.train_continuous \
-  --data-dir data/continuous_main/raw \
-  --map-dir data/mapf-map \
-  --policy-type discrete \
-  --run-name conti_disc_v1 \
-  --output-dir checkpoints/continuous \
-  --seed 0
-```
-
-Evaluate a learned continuous policy:
-
-```sh
-python eval_continuous.py \
-  --map-dir data/mapf-map \
-  --scen-dir data/scen-random \
-  --maps empty-48-48 random-32-32-10 \
-  --agent-counts 100 200 \
-  --policy flow \
-  --model-path checkpoints/continuous/continuous_flow_conti_flow_v1_best.pt \
-  --run-name conti_flow_v1 \
-  --train-seed 0 \
-  --output-csv evals/continuous_flow_eval.csv \
-  --viz-dir logs/continuous_viz
-```
-
-Run the packaged benchmark:
-
-```sh
-python run_continuous_benchmark.py \
-  --map-dir data/mapf-map \
-  --scen-dir data/scen-random \
-  --maps empty-48-48 \
-  --agent-counts 32 64 96 128 \
-  --max-scenarios 5 \
-  --data-dir data/continuous_phase_a \
-  --checkpoint-dir checkpoints/continuous_phase_a \
-  --benchmark-dir benchmarks/continuous_phase_a \
-  --run-prefix phaseA_empty48 \
-  --epochs 30 \
-  --seeds 0 1 2 \
-  --enable-consensus-sweep \
-  --make-viz
-```
-
-To evaluate with the external `picbf-cs` CBF shield, install the
-`continuous-collision-shield` package or point `PICBF_CS_PATH` at that repo:
-
-```sh
-PICBF_CS_PATH=/path/to/picbf-cs python eval_continuous.py \
-  --map-dir data/mapf-map \
-  --scen-dir data/scen-random \
-  --maps empty-48-48 \
-  --agent-counts 32 64 \
-  --policy orca \
-  --shield-type picbf-cs \
-  --output-csv evals/continuous_picbf_cs_orca.csv
-```
-
 ## Visualization
 
 Visualize saved grid paths:
@@ -534,8 +432,6 @@ python -m main_pys.visualize_path \
   logs/paths.npy \
   --scenName=empty-48-48-random-1.scen
 ```
-
-Continuous evals can save trajectory plots directly with `--viz-dir`.
 
 ## Troubleshooting
 
@@ -597,8 +493,6 @@ Flow-CS-PIBT/
 ├── train_full.py
 ├── eval_full.py
 ├── eval_rishi_paper.py
-├── eval_continuous.py
-├── run_continuous_benchmark.py
 └── download_assets.bash
 ```
 
