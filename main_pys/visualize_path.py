@@ -7,12 +7,14 @@ import argparse
 from PIL import Image
 import pdb
 import tqdm
+import shutil
+import tempfile
 
 '''
 This script animates the paths of agents in the map.
 '''
 
-def create_gif(image_folder, output_path, duration=100, end_frame_duration=2000):
+def create_gif(image_folder, output_path, duration=100, end_frame_duration=2000, cleanup=True):
     images: list[Image.Image] = []
     for file_name in sorted(os.listdir(image_folder)):
         if file_name.endswith(('png')):
@@ -24,11 +26,12 @@ def create_gif(image_folder, output_path, duration=100, end_frame_duration=2000)
         images[0].save(output_path, save_all=True, append_images=images[1:], duration=duration, loop=0)
     else:
         print("No images found in the folder")
-    
-    image_names = [img for img in os.listdir(image_folder) if img.endswith(".png")]
-    for image_name in image_names:
-        image_path = os.path.join(image_folder, image_name)
-        os.remove(image_path)
+
+    if cleanup:
+        image_names = [img for img in os.listdir(image_folder) if img.endswith(".png")]
+        for image_name in image_names:
+            image_path = os.path.join(image_folder, image_name)
+            os.remove(image_path)
 
 
 def parse_scene(scen_file):
@@ -95,32 +98,95 @@ def createAnimation(args):
     else:
         success = None
         textColor = 'black'
+        id2goal = None
     outputFilePath = args.outputGif
-    
+
     tmpFolder = args.tmpFolderToSaveImages
+    if tmpFolder is None:
+        tmpFolder = tempfile.mkdtemp(prefix="flow_cs_pibt_frames_")
+        cleanup_tmp_dir = True
+    else:
+        cleanup_tmp_dir = False
     os.makedirs(tmpFolder, exist_ok=True)
-    
-    colors = ['r', 'b', 'm', 'g']
-    last_row = id2plan[-1]
-    repeated_rows = np.tile(last_row, (40, 1, 1))
-    id2plan = np.vstack([id2plan, repeated_rows])
-    for t in tqdm.tqdm(range(0, max_plan_length), desc="Creating visualization"):
-        plt.imshow(mapdata, cmap="Greys")
-        plt.xticks([])
-        plt.yticks([])
+
+    cmap = plt.get_cmap(args.agentCmap, num_agents)
+    frames = list(range(0, max_plan_length, max(args.frameStride, 1)))
+    if frames[-1] != max_plan_length - 1:
+        frames.append(max_plan_length - 1)
+
+    fig, ax = plt.subplots(figsize=(args.figureSize, args.figureSize))
+    for frame_idx, t in enumerate(tqdm.tqdm(frames, desc="Creating visualization")):
+        ax.clear()
+        ax.imshow(mapdata, cmap="Greys", origin="upper", interpolation="nearest")
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_xlim(-0.5, mapdata.shape[1] - 0.5)
+        ax.set_ylim(mapdata.shape[0] - 0.5, -0.5)
+
+        if id2goal is not None:
+            goals = id2goal[:num_agents]
+            ax.scatter(
+                goals[:, 1],
+                goals[:, 0],
+                s=args.goalSize,
+                marker="*",
+                c=[cmap(i) for i in range(num_agents)],
+                edgecolors="black",
+                linewidths=0.25,
+                alpha=0.8,
+                zorder=3,
+            )
+
         for i in range(num_agents):
             plan = id2plan[:, i]
-            if success is not None and np.all(plan[t] == id2goal[i]):
-                plt.scatter(plan[t][1], plan[t][0], s=3, c="grey")
-            else:
-                plt.scatter(plan[t][1], plan[t][0], s=3, c=colors[i % len(colors)])
-        plt.subplots_adjust(top=0.85)
+            color = cmap(i)
+            trail_start = max(0, t - args.trailLength)
+            if t > trail_start:
+                trail = plan[trail_start : t + 1]
+                ax.plot(
+                    trail[:, 1],
+                    trail[:, 0],
+                    linewidth=args.trailWidth,
+                    c=color,
+                    alpha=0.35,
+                    zorder=2,
+                )
+            at_goal = id2goal is not None and np.all(plan[t] == id2goal[i])
+            ax.scatter(
+                plan[t][1],
+                plan[t][0],
+                s=args.agentSize,
+                c=[color if not at_goal else "lightgrey"],
+                edgecolors="black",
+                linewidths=0.2,
+                zorder=4,
+            )
+            if args.labelAgents and num_agents <= args.maxLabeledAgents:
+                ax.text(
+                    plan[t][1],
+                    plan[t][0],
+                    str(i),
+                    fontsize=5,
+                    ha="center",
+                    va="center",
+                    zorder=5,
+                )
+        fig.subplots_adjust(top=0.88)
         name = "{}/{:03d}.png".format(tmpFolder, t)
-        plt.title(f"{mapName}: t = {t}", color=textColor)
-        plt.savefig(name)
-        plt.cla()
-    
-    create_gif(tmpFolder, outputFilePath)
+        ax.set_title(f"{mapName}: t = {t} / {max_plan_length - 1}", color=textColor)
+        fig.savefig(name, dpi=args.dpi)
+    plt.close(fig)
+
+    os.makedirs(os.path.dirname(outputFilePath) or ".", exist_ok=True)
+    create_gif(
+        tmpFolder,
+        outputFilePath,
+        duration=args.frameDurationMs,
+        end_frame_duration=args.endFrameDurationMs,
+        cleanup=not cleanup_tmp_dir,
+    )
+    if cleanup_tmp_dir:
+        shutil.rmtree(tmpFolder, ignore_errors=True)
 
 
 """
@@ -134,7 +200,19 @@ if __name__ == '__main__':
     parser.add_argument("--scenName", help="scen name with .scen", type=str, default=None) # Note: Positional is required
     parser.add_argument("--mapFolder", help="folder containing maps", type=str, default="data/mapf-map")
     parser.add_argument("--sceneFile", help="folder containing maps", type=str, default="data/mapf-scen-random")
-    parser.add_argument('--tmpFolderToSaveImages', type=str, help='temporary folder to save images', default="data/tmpFolder")
+    parser.add_argument('--tmpFolderToSaveImages', type=str, help='temporary folder to save images', default=None)
     parser.add_argument('--outputGif', type=str, help='Path to the output gif file', default="logs/paths.gif")
+    parser.add_argument('--frameStride', type=int, default=2, help='Render every Nth timestep')
+    parser.add_argument('--trailLength', type=int, default=25, help='Number of previous timesteps to draw as trails')
+    parser.add_argument('--agentSize', type=float, default=14.0)
+    parser.add_argument('--goalSize', type=float, default=28.0)
+    parser.add_argument('--trailWidth', type=float, default=0.7)
+    parser.add_argument('--figureSize', type=float, default=7.0)
+    parser.add_argument('--dpi', type=int, default=120)
+    parser.add_argument('--frameDurationMs', type=int, default=80)
+    parser.add_argument('--endFrameDurationMs', type=int, default=1600)
+    parser.add_argument('--agentCmap', type=str, default='turbo')
+    parser.add_argument('--labelAgents', action='store_true')
+    parser.add_argument('--maxLabeledAgents', type=int, default=30)
     args = parser.parse_args()
     createAnimation(args)
