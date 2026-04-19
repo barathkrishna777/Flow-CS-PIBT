@@ -24,20 +24,20 @@ import json
 import os
 import sys
 import time
+from functools import partial
 from multiprocessing import Pool, cpu_count
 
 import torch
 import numpy as np
 from tqdm import tqdm
 
+from main_pys.grid_actions import get_action_vectors
 
-# Action vectors: 0=wait(0,0), 1=right(0,1), 2=down(1,0), 3=up(-1,0), 4=left(0,-1)
-ACTION_VECS = torch.tensor([[0, 0], [0, 1], [1, 0], [-1, 0], [0, -1]], dtype=torch.float32)
 WAIT_MAGNITUDE_THRESH = 0.3  # velocities below this norm → wait
 
 
-def derive_discrete_actions(velocities: torch.Tensor) -> torch.Tensor:
-    """Map continuous velocity targets to discrete action labels (0-4).
+def derive_discrete_actions(velocities: torch.Tensor, action_mode: str = "grid4") -> torch.Tensor:
+    """Map continuous velocity targets to discrete action labels.
 
     Args:
         velocities: (N, 2) float tensor of expert velocities.
@@ -46,7 +46,8 @@ def derive_discrete_actions(velocities: torch.Tensor) -> torch.Tensor:
         (N,) int8 tensor of action labels.
     """
     # Dot product with cardinal direction vectors
-    scores = velocities.float() @ ACTION_VECS.T  # (N, 5)
+    action_vecs = torch.as_tensor(get_action_vectors(action_mode, normalize=True), dtype=torch.float32)
+    scores = velocities.float() @ action_vecs.T
     actions = scores.argmax(dim=1)  # (N,)
 
     # Near-zero velocity → wait (action 0)
@@ -56,7 +57,7 @@ def derive_discrete_actions(velocities: torch.Tensor) -> torch.Tensor:
     return actions.to(torch.int8)
 
 
-def compact_one_file(filepath: str) -> tuple[str, int, int, str | None]:
+def compact_one_file(filepath: str, action_mode: str = "grid4") -> tuple[str, int, int, str | None]:
     """Load a .pt file, compress dtypes, add action labels, save back.
 
     Returns:
@@ -85,8 +86,13 @@ def compact_one_file(filepath: str) -> tuple[str, int, int, str | None]:
                 data.bd_pred = data.bd_pred.half()
 
         # --- Add discrete action labels ---
-        if not hasattr(data, 'action_label') or data.action_label is None:
-            data.action_label = derive_discrete_actions(data.y)
+        if (
+            not hasattr(data, 'action_label')
+            or data.action_label is None
+            or getattr(data, 'action_mode', None) != action_mode
+        ):
+            data.action_label = derive_discrete_actions(data.y, action_mode=action_mode)
+            data.action_mode = action_mode
 
         # --- Mark as compact format ---
         data.compact_version = 1
@@ -126,6 +132,8 @@ def main():
                         help="Number of parallel workers (default: all CPU cores)")
     parser.add_argument("--verify-count", type=int, default=5,
                         help="Number of random files to verify after compaction")
+    parser.add_argument("--action-mode", choices=["grid4", "grid8"], default="grid4",
+                        help="Discrete action mode for newly derived action labels")
     args = parser.parse_args()
 
     num_workers = args.workers if args.workers > 0 else cpu_count()
@@ -234,8 +242,8 @@ def main():
         t0 = time.time()
 
         with Pool(num_workers) as pool:
-            results_iter = pool.imap_unordered(compact_one_file, to_compact,
-                                               chunksize=64)
+            compact_fn = partial(compact_one_file, action_mode=args.action_mode)
+            results_iter = pool.imap_unordered(compact_fn, to_compact, chunksize=64)
             for i, (basename, old_sz, new_sz, err) in enumerate(results_iter):
                 if err is not None:
                     errors += 1

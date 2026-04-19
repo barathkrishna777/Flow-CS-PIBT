@@ -72,7 +72,7 @@ class FlowGNNModel(nn.Module):
             nn.Linear(hidden_dim // 2, velocity_dim)
         )
 
-        # --- 4. Auxiliary Action Head (5-class: wait, right, down, up, left) ---
+        # --- 4. Auxiliary Action Head (grid4/grid8 action logits) ---
         action_head_dim = min(hidden_dim, 256)
         self.action_head = nn.Sequential(
             nn.Linear(hidden_dim, action_head_dim),

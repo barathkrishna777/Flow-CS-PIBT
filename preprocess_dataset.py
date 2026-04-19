@@ -25,6 +25,7 @@ from main_pys.model_inputs import (
     discrete_action_labels_from_positions,
     normalize_graph_data,
 )
+from main_pys.grid_actions import get_action_dim
 
 
 # ── Map loading (same logic as dataset.py) ──────────────────────────────────
@@ -44,12 +45,23 @@ def read_map(map_file, k):
 
 
 # ── Process one (file, timestep) pair ───────────────────────────────────────
-def process_sample(args, maps, k, m, out_dir):
+def process_sample(args, maps, k, m, out_dir, action_mode):
     """Build and save one PyG Data object. Returns output path or None on error."""
     npz_path, t_step, sample_idx = args
     out_path = os.path.join(out_dir, f"sample_{sample_idx:08d}.pt")
     if os.path.exists(out_path) and os.path.getsize(out_path) >= 100:
-        return out_path  # already processed and not corrupt, skip
+        if action_mode == "grid4":
+            return out_path  # legacy files are grid4-compatible
+        try:
+            existing = torch.load(out_path, map_location="cpu", weights_only=False)
+            if (
+                getattr(existing, "action_mode", None) == action_mode
+                and hasattr(existing, "bd_pred")
+                and existing.bd_pred.shape[1] == get_action_dim(action_mode)
+            ):
+                return out_path
+        except Exception:
+            pass
     try:
         with np.load(npz_path) as data:
             discrete_positions = data['discrete_positions']
@@ -72,7 +84,11 @@ def process_sample(args, maps, k, m, out_dir):
         cur_locs_discrete[:, 1] = np.clip(cur_locs_discrete[:, 1], k, max_c)
 
         target_velocity = expert_velocities[:, t_step, :]
-        action_labels = discrete_action_labels_from_positions(discrete_positions, t_step)
+        action_labels = discrete_action_labels_from_positions(
+            discrete_positions,
+            t_step,
+            action_mode=action_mode,
+        )
 
         # Goal weighting
         speeds = np.linalg.norm(target_velocity, axis=1)
@@ -95,11 +111,20 @@ def process_sample(args, maps, k, m, out_dir):
 
         dummy_goals = np.zeros_like(cur_locs_discrete)
 
-        graph_data = create_data_object(cur_locs_discrete, bd_grid, grid_map, k, m, dummy_goals)
+        graph_data = create_data_object(
+            cur_locs_discrete,
+            bd_grid,
+            grid_map,
+            k,
+            m,
+            dummy_goals,
+            action_mode=action_mode,
+        )
         graph_data = normalize_graph_data(graph_data, k)
         graph_data.y = torch.tensor(target_velocity, dtype=torch.float32)
         graph_data.action_y = torch.tensor(action_labels, dtype=torch.long)
         graph_data.node_weights = torch.tensor(weights, dtype=torch.float32)
+        graph_data.action_mode = action_mode
 
         torch.save(graph_data, out_path)
         return out_path
@@ -107,18 +132,19 @@ def process_sample(args, maps, k, m, out_dir):
         return None
 
 
-def worker_init(maps_dict, k_val, m_val, out_dir_val):
+def worker_init(maps_dict, k_val, m_val, out_dir_val, action_mode_val):
     """Store shared data in each worker process."""
-    global _maps, _k, _m, _out_dir
+    global _maps, _k, _m, _out_dir, _action_mode
     _maps = maps_dict
     _k = k_val
     _m = m_val
     _out_dir = out_dir_val
+    _action_mode = action_mode_val
 
 
 def worker_fn(args):
     """Wrapper that uses global worker state."""
-    return process_sample(args, _maps, _k, _m, _out_dir)
+    return process_sample(args, _maps, _k, _m, _out_dir, _action_mode)
 
 
 def migrate_existing(old_dir, new_dir):
@@ -178,6 +204,8 @@ def main():
                         help="Number of parallel workers (default: all CPU cores)")
     parser.add_argument("--k", type=int, default=4, help="Local region size")
     parser.add_argument("--m", type=int, default=5, help="Nearest neighbors")
+    parser.add_argument("--action-mode", choices=["grid4", "grid8"], default="grid4",
+                        help="Discrete grid action space for labels and BD action features")
     parser.add_argument("--exclude-maps", nargs="*", default=None,
                         help="Map names to exclude from preprocessing (e.g. den312d empty-48-48)")
     args = parser.parse_args()
@@ -224,8 +252,8 @@ def main():
     os.makedirs(args.out, exist_ok=True)
 
     # 4) Process in parallel
-    print(f"Processing with {num_workers} workers -> {args.out}/")
-    with Pool(num_workers, initializer=worker_init, initargs=(maps, k, m, args.out)) as pool:
+    print(f"Processing with {num_workers} workers -> {args.out}/ ({args.action_mode})")
+    with Pool(num_workers, initializer=worker_init, initargs=(maps, k, m, args.out, args.action_mode)) as pool:
         results = list(tqdm(
             pool.imap_unordered(worker_fn, index, chunksize=64),
             total=len(index),

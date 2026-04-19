@@ -70,6 +70,8 @@ def main():
                         help="Model hidden dimension (default: 1024)")
     parser.add_argument("--num-layers", type=int, default=6,
                         help="Number of GNN layers (default: 6)")
+    parser.add_argument("--action-mode", choices=["grid4", "grid8"], default="grid4",
+                        help="Discrete grid action space to use in the simulator")
     args = parser.parse_args()
 
     args.model = args.model_opt or args.model
@@ -144,6 +146,7 @@ def main():
     print(f"Evaluation: Euler Steps vs Quality")
     print(f"Model: {args.model}")
     print(f"Architecture: hidden_dim={args.hidden_dim}, num_layers={args.num_layers}")
+    print(f"Action mode: {args.action_mode}")
     print(f"Maps: {len(map_configs)} | Agents: {args.agents} | Steps: {args.steps}")
     print(f"Extended: {args.extended} | Consensus: {args.consensus} | Tau: {args.tau} | GPU: {use_gpu}")
     print(f"Total runs: {total}")
@@ -172,6 +175,7 @@ def main():
             f"--timeLimit={args.time_limit}",
             f"--hiddenDim={args.hidden_dim}",
             f"--numLayers={args.num_layers}",
+            f"--actionMode={args.action_mode}",
         ]
 
         try:

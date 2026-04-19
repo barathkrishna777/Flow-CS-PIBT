@@ -43,7 +43,7 @@ CONSENSUS_OPTIONS = [1, 3]
 
 def run_single(model, map_name, scen_file, n_agents, csv_path, use_gpu,
                num_steps=5, tau=0.3, wait_thresh=0.25, consensus=3, use_action_head=False,
-               hidden_dim=1024, num_layers=6):
+               hidden_dim=1024, num_layers=6, action_mode="grid4"):
     scen_path = f"{SCEN_DIR}/{scen_file}"
     bn = scen_file.replace(".scen", "")
     bd_path = f"{BD_DIR}/large_scale/{bn}_bds.npz"
@@ -67,6 +67,7 @@ def run_single(model, map_name, scen_file, n_agents, csv_path, use_gpu,
         f"--useActionHead={'True' if use_action_head else 'False'}",
         f"--hiddenDim={hidden_dim}",
         f"--numLayers={num_layers}",
+        f"--actionMode={action_mode}",
     ]
 
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
@@ -100,6 +101,8 @@ def main():
     parser.add_argument("--output", default=None, help="Output CSV path")
     parser.add_argument("--hidden-dim", type=int, default=1024, help="Model hidden dimension")
     parser.add_argument("--num-layers", type=int, default=6, help="Number of GNN layers")
+    parser.add_argument("--action-mode", choices=["grid4", "grid8"], default="grid4",
+                        help="Discrete grid action space to use in the simulator")
     args = parser.parse_args()
 
     import torch
@@ -127,7 +130,7 @@ def main():
     print(f"Inference Sweep: {args.model}")
     print(f"Flow configs: {len(flow_configs)} | Action head: 1")
     print(f"Test cases: {len(test_cases)} | Total runs: {total_runs}")
-    print(f"GPU: {use_gpu} | Output: {output}")
+    print(f"GPU: {use_gpu} | Action mode: {args.action_mode} | Output: {output}")
     print(f"{'='*60}\n")
 
     run_idx = 0
@@ -144,6 +147,7 @@ def main():
                 num_steps=num_steps, tau=tau, wait_thresh=wait_thresh,
                 consensus=consensus, use_action_head=False,
                 hidden_dim=args.hidden_dim, num_layers=args.num_layers,
+                action_mode=args.action_mode,
             )
             status = f"{at_goal}/{total} ({pct:.1f}%)" if at_goal is not None else "FAIL"
             print(f"  [{run_idx}/{total_runs}] {map_name} {n_agents}ag: {status}  [{runtime:.1f}s]")
@@ -157,6 +161,7 @@ def main():
             num_steps=1, tau=0.3, wait_thresh=0.25,
             consensus=1, use_action_head=True,
             hidden_dim=args.hidden_dim, num_layers=args.num_layers,
+            action_mode=args.action_mode,
         )
         status = f"{at_goal}/{total} ({pct:.1f}%)" if at_goal is not None else "FAIL"
         print(f"  [{run_idx}/{total_runs}] {map_name} {n_agents}ag: {status}  [{runtime:.1f}s]")

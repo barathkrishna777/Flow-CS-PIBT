@@ -105,6 +105,8 @@ def main():
                    help="Policy/model family to evaluate. flow_action_head loads a flow model and uses its action logits; local_classifier loads the repo's Rishi-like classifier.")
     p.add_argument("--hidden-dim", type=int, default=1024)
     p.add_argument("--num-layers", type=int, default=6)
+    p.add_argument("--action-mode", choices=["grid4", "grid8"], default="grid4",
+                   help="Discrete grid action space to use in the simulator")
     args = p.parse_args()
 
     if not os.path.isfile(args.model):
@@ -170,6 +172,7 @@ def main():
     print(f"Map set: {map_source} | Requested maps: {len(maps)}")
     print(f"Scenarios/map: <= {max_scen} | Agents: {agent_counts[0]}..{agent_counts[-1]}")
     print(f"Policy: {args.policy_type}")
+    print(f"Action mode: {args.action_mode}")
     print(f"steps={args.num_integration_steps} consensus={args.consensus} tau={args.tau}")
     print(f"timeLimit={args.time_limit}s maxSteps={args.max_steps_multiplier} | GPU: {use_gpu}")
     _print_preflight(preflight)
@@ -205,6 +208,7 @@ def main():
             f"--useActionHead={'True' if use_action_head else 'False'}",
             f"--hiddenDim={args.hidden_dim}",
             f"--numLayers={args.num_layers}",
+            f"--actionMode={args.action_mode}",
         ]
         try:
             subprocess.run(cmd, check=False, timeout=args.time_limit + 120)

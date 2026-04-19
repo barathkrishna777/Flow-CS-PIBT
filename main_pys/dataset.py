@@ -23,12 +23,13 @@ def load_bd(path, key):
         return data[key].copy()
 
 class FlowMAPFDataset(Dataset):
-    def __init__(self, data_dir, map_dir, bd_dir, k=4, m=5):
+    def __init__(self, data_dir, map_dir, bd_dir, k=4, m=5, action_mode="grid4"):
         self.npz_files = glob.glob(os.path.join(data_dir, "*.npz"))
         self.map_dir = map_dir
         self.bd_dir = bd_dir
         self.k = k
         self.m = m
+        self.action_mode = action_mode
 
         print("Preloading Maps...")
         self.maps = {}
@@ -89,7 +90,11 @@ class FlowMAPFDataset(Dataset):
         cur_locs_discrete[:, 1] = np.clip(cur_locs_discrete[:, 1], self.k, max_c)
 
         target_velocity = expert_velocities[:, t_step, :]
-        action_labels = discrete_action_labels_from_positions(discrete_positions, t_step)
+        action_labels = discrete_action_labels_from_positions(
+            discrete_positions,
+            t_step,
+            action_mode=self.action_mode,
+        )
 
         speeds = np.linalg.norm(target_velocity, axis=1)
         is_parked = speeds < 0.01
@@ -113,11 +118,20 @@ class FlowMAPFDataset(Dataset):
         bd = np.pad(bd, ((0, 0), (self.k, self.k), (self.k, self.k)), 'constant', constant_values=10000)
         dummy_goals = np.zeros_like(cur_locs_discrete)
 
-        graph_data = create_data_object(cur_locs_discrete, bd, grid_map, self.k, self.m, dummy_goals)
+        graph_data = create_data_object(
+            cur_locs_discrete,
+            bd,
+            grid_map,
+            self.k,
+            self.m,
+            dummy_goals,
+            action_mode=self.action_mode,
+        )
         graph_data = normalize_graph_data(graph_data, self.k)
 
         graph_data.y = torch.tensor(target_velocity, dtype=torch.float32)
         graph_data.action_y = torch.tensor(action_labels, dtype=torch.long)
         graph_data.node_weights = torch.tensor(weights, dtype=torch.float32)
+        graph_data.action_mode = self.action_mode
 
         return graph_data

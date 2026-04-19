@@ -7,19 +7,20 @@ from torch_geometric.data import Data
 import numpy as np
 import pdb
 
-DISCRETE_ACTION_DELTAS = {
-    (0, 0): 0,    # wait
-    (0, 1): 1,    # right
-    (1, 0): 2,    # down
-    (-1, 0): 3,   # up
-    (0, -1): 4,   # left
-}
+from main_pys.grid_actions import (
+    get_action_dim,
+    get_bd_flatten_indices,
+    get_delta_to_label,
+)
+
+DISCRETE_ACTION_DELTAS = get_delta_to_label("grid4")
 
 
-def discrete_action_labels_from_positions(discrete_positions, t_step):
+def discrete_action_labels_from_positions(discrete_positions, t_step, action_mode="grid4"):
     """Return exact next-action labels from integer MAPF positions.
 
-    Label mapping is 0=wait, 1=right, 2=down, 3=up, 4=left. The final
+    The first five labels are always 0=wait, 1=right, 2=down, 3=up,
+    4=left. In grid8 mode, labels 5-8 are diagonal moves. The final
     timestep has no next position, so all agents are labeled wait.
     """
     positions = np.asarray(discrete_positions)
@@ -38,19 +39,32 @@ def discrete_action_labels_from_positions(discrete_positions, t_step):
         deltas = np.rint(deltas).astype(np.int64, copy=False)
 
     labels = np.full(deltas.shape[0], -1, dtype=np.int64)
-    for delta, action in DISCRETE_ACTION_DELTAS.items():
+    delta_to_label = get_delta_to_label(action_mode)
+    for delta, action in delta_to_label.items():
         mask = (deltas[:, 0] == delta[0]) & (deltas[:, 1] == delta[1])
         labels[mask] = action
 
     invalid = np.flatnonzero(labels < 0)
     if invalid.size > 0:
         examples = deltas[invalid[:5]].tolist()
-        raise ValueError(f"Unexpected non-cardinal action deltas at timestep {t_step}: {examples}")
+        raise ValueError(
+            f"Unexpected action deltas for {action_mode} at timestep {t_step}: {examples}"
+        )
 
     return labels
 
 
-def create_data_object(pos_list, bd_list, grid, k, m, goal_locs, labels=np.array([]), debug_checks=False):
+def create_data_object(
+    pos_list,
+    bd_list,
+    grid,
+    k,
+    m,
+    goal_locs,
+    labels=np.array([]),
+    debug_checks=False,
+    action_mode="grid4",
+):
     """
     pos_list: (N,2) positions
     bd_list: (N,W,H) bd's
@@ -123,28 +137,27 @@ def create_data_object(pos_list, bd_list, grid, k, m, goal_locs, labels=np.array
     bd_pred_arr = None
     linear_dimensions = (grid_slices.shape[1]-2)**2 * num_layers
     # TODO get the best location to go next, just according to the bd
-    # NOTE: because we pad all bds with a large number, 
-    # we should be able to get the up, down, left and right of each bd without fear of invalid indexing
-    # (N, [Stop, Right, Down, Up, Left])
+    # NOTE: because we pad all bds with a large number,
+    # we should be able to get all one-step action BDs without invalid indexing.
     x_mesh2, y_mesh2 = np.meshgrid(np.arange(-1,1+1), np.arange(-1,1+1), indexing='ij') # assumes k at least 1; getting a 3x3 grid centered at the same place
     x_mesh2 = x_mesh2[None, :, :] + rowLocs[:, None, :] #  -> (N,3,3)
     y_mesh2 = y_mesh2[None, :, :] + colLocs[:, None, :] # -> (N,3,3)
     bd_list = bd_list[np.arange(num_agents)[:,None,None], x_mesh2, y_mesh2] # (N,3,3)
-    # set diagonal entries to a big number
     flattened = np.reshape(bd_list, (-1, 9)) # (N,9) # (order (top to bot) left mid right, left mid right, left mid right)
-    flattened = flattened[:,[(4,5,7,1,3)]].reshape((-1,5)) # (N,5)
+    action_bd_indices = get_bd_flatten_indices(action_mode)
+    flattened = flattened[:, action_bd_indices].reshape((-1, get_action_dim(action_mode)))
 
     # Create a boolean array where each element is True if it is the minimum in its row
     min_indices = flattened == flattened.min(axis=1, keepdims=True)
-    bd_pred_arr = min_indices.astype(np.float32) # (N, 5) non-unique argmin solution
-    linear_dimensions+=5
+    bd_pred_arr = min_indices.astype(np.float32) # (N, num_actions) non-unique argmin solution
+    linear_dimensions += get_action_dim(action_mode)
     # pdb.set_trace()
     
     return Data(x=torch.from_numpy(node_features), edge_index=torch.from_numpy(edge_indices), 
                 edge_attr=torch.from_numpy(edge_features), bd_pred=torch.from_numpy(bd_pred_arr), lin_dim=linear_dimensions, num_channels=num_layers,
                 y = torch.from_numpy(labels))
     
-def get_bd_prefs(pos_list, bds, range_num_agents, add_noise=True):
+def get_bd_prefs(pos_list, bds, range_num_agents, add_noise=True, action_mode="grid4"):
     """
     pos_list: (N,2) positions
     bds: (N,W,H) bd's
@@ -156,13 +169,13 @@ def get_bd_prefs(pos_list, bds, range_num_agents, add_noise=True):
     y_mesh2 = y_mesh2[None, :, :] + np.expand_dims(pos_list[:,1], axis=(1,2)) # -> (N,3,3)
     bd_subset = bds[range_num_agents[:,None,None], x_mesh2, y_mesh2] # (N,3,3)
     flattened = np.reshape(bd_subset, (-1, 9)) # (N,9) order (top to bot) left mid right, left mid right, left mid right
-    flattened = flattened[:,(4,5,7,1,3)] # (N,5) consistent with NN
+    flattened = flattened[:, get_bd_flatten_indices(action_mode)] # (N,num_actions) consistent with NN
     if add_noise:
         # NOTE: Random noise is extremely important for PIBT to work well
         flattened = flattened.astype(float) + np.random.random(flattened.shape)*1e-6 # Add noise to break ties
     else:
         flattened = flattened.astype(float)
-    prefs = np.argsort(flattened, axis=1, kind="quicksort") # (N,5) Stop, Right, Down, Up, Left
+    prefs = np.argsort(flattened, axis=1, kind="quicksort")
     return prefs
 
 def normalize_graph_data(data, k, edge_normalize="k", bd_normalize="center"):

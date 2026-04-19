@@ -17,6 +17,15 @@ from main_pys.model_inputs import create_data_object, normalize_graph_data, get_
 from main_pys.custom_timer import CustomTimer
 from main_pys.generative_model import FlowGNNModel
 from main_pys.rishi_like_model import RishiLikeClassifier
+from main_pys.grid_actions import (
+    action_mask_for_locs,
+    diagonal_clearance_ok,
+    get_action_dim,
+    get_action_vectors,
+    get_label_to_moves,
+    validate_action_mode,
+    validate_diagonal_rule,
+)
 
 def str2bool(v: str) -> bool:
     return v.lower() in ("yes", "true", "t", "1")
@@ -67,25 +76,31 @@ def convertProbsToPreferences(probs, conversion_type):
     elif conversion_type == "sampled":
         probs = torch.tensor(probs, dtype=torch.float32)
         preferences = torch.zeros_like(probs, dtype=torch.int64)
-        for i in range(5):
+        for i in range(probs.shape[1]):
             cur_sample = torch.multinomial(probs, num_samples=1, replacement=False) 
             probs.scatter_(1, cur_sample, 0) 
             preferences[:,i] = cur_sample[:,0]
         preferences = preferences.numpy()
-        assert(np.all(preferences.sum(axis=1) == 10)) 
+        expected_sum = probs.shape[1] * (probs.shape[1] - 1) // 2
+        assert(np.all(preferences.sum(axis=1) == expected_sum))
     else:
         raise ValueError('Invalid conversion type: {}'.format(conversion_type))
     return preferences
 
-LABEL_TO_MOVES = np.array([[0,0], [0,1], [1,0], [-1,0], [0,-1]]) 
+LABEL_TO_MOVES = get_label_to_moves("grid4")
 
 def pibtRecursive(grid_map, agent_id, action_preferences, planned_agents, move_matrix, 
          occupied_nodes, occupied_edges, current_locs, current_locs_to_agent,
-         constrained_agents_to_action, start_time, timeLimit):
-    moves_ordered = LABEL_TO_MOVES[action_preferences[agent_id]]
+         constrained_agents_to_action, start_time, timeLimit, label_to_moves=None,
+         diagonal_rule="blocked_pair", occupied_diagonals=None):
+    if label_to_moves is None:
+        label_to_moves = LABEL_TO_MOVES
+    if occupied_diagonals is None:
+        occupied_diagonals = defaultdict(bool)
+    moves_ordered = label_to_moves[action_preferences[agent_id]]
     if agent_id in constrained_agents_to_action: 
-        action_index = constrained_agents_to_action[agent_id]
-        moves_ordered = moves_ordered[action_index:action_index+1] 
+        action_label = constrained_agents_to_action[agent_id]
+        moves_ordered = label_to_moves[action_label:action_label+1]
     
     cur_time=time.time()
     if cur_time-start_time>timeLimit:
@@ -98,28 +113,40 @@ def pibtRecursive(grid_map, agent_id, action_preferences, planned_agents, move_m
             continue
         if grid_map[next_loc[0], next_loc[1]] == 1:
             continue
+        if not diagonal_clearance_ok(grid_map, current_pos, aMove, diagonal_rule):
+            continue
         if occupied_nodes[next_loc[0], next_loc[1]]:
             continue
         rev_edge_key = tuple([*next_loc, *current_pos])
         if rev_edge_key in occupied_edges and occupied_edges[rev_edge_key]:
             continue
+        diagonal_key = None
+        if abs(int(aMove[0])) == 1 and abs(int(aMove[1])) == 1:
+            diagonal_key = tuple((current_pos + next_loc).tolist())
+            if occupied_diagonals[diagonal_key]:
+                continue
         
         move_matrix[agent_id] = aMove
         planned_agents[agent_id] = True
         occupied_nodes[next_loc[0], next_loc[1]] = True
         edge_key = tuple([*current_pos, *next_loc])
         occupied_edges[edge_key] = True
+        if diagonal_key is not None:
+            occupied_diagonals[diagonal_key] = True
 
         conflicting_agent = current_locs_to_agent[next_loc[0], next_loc[1]]
         if conflicting_agent != -1 and conflicting_agent != agent_id and not planned_agents[conflicting_agent]:
             isvalid = pibtRecursive(grid_map, conflicting_agent, action_preferences, planned_agents,
                                 move_matrix, occupied_nodes, occupied_edges, current_locs,
-                                current_locs_to_agent, constrained_agents_to_action, start_time,timeLimit)
+                                current_locs_to_agent, constrained_agents_to_action, start_time,
+                                timeLimit, label_to_moves, diagonal_rule, occupied_diagonals)
             if isvalid:
                 return True
             else:
                 planned_agents[agent_id] = False
                 occupied_edges[edge_key] = False
+                if diagonal_key is not None:
+                    occupied_diagonals[diagonal_key] = False
                 continue
         else:
             return True
@@ -130,11 +157,24 @@ def pibtRecursive(grid_map, agent_id, action_preferences, planned_agents, move_m
         occupied_nodes[current_pos[0], current_pos[1]] = True
     return False
 
-def pibt(grid_map, action_preferences, current_locs, agent_priorities, agent_constraints, start_time, timeLimit):
+def pibt(
+    grid_map,
+    action_preferences,
+    current_locs,
+    agent_priorities,
+    agent_constraints,
+    start_time,
+    timeLimit,
+    action_mode="grid4",
+    diagonal_rule="blocked_pair",
+):
+    label_to_moves = get_label_to_moves(action_mode)
+    action_dim = len(label_to_moves)
     agent_order = np.argsort(-agent_priorities) 
     move_matrix = np.zeros((len(agent_priorities), 2), dtype=int) 
     occupied_nodes = np.zeros(grid_map.shape, dtype=bool) 
     occupied_edges = defaultdict(bool) 
+    occupied_diagonals = defaultdict(bool)
     planned_agents = np.zeros(len(agent_priorities), dtype=bool) 
 
     current_locs_to_agent = np.zeros(grid_map.shape, dtype=int) - 1  
@@ -143,14 +183,15 @@ def pibt(grid_map, action_preferences, current_locs, agent_priorities, agent_con
     constrained_agents_to_action = dict()
     for agent_id, action_index in agent_constraints:
         which_agent = agent_order[agent_id]
-        constrained_agents_to_action[which_agent] = action_preferences[which_agent, (action_index+1)%5]
+        constrained_agents_to_action[which_agent] = action_preferences[which_agent, (action_index+1)%action_dim]
 
     for agent_id in agent_order:
         if planned_agents[agent_id]:
             continue
         pibt_worked = pibtRecursive(grid_map, agent_id, action_preferences, planned_agents, 
                             move_matrix, occupied_nodes, occupied_edges, 
-                            current_locs, current_locs_to_agent, constrained_agents_to_action, start_time, timeLimit)
+                            current_locs, current_locs_to_agent, constrained_agents_to_action,
+                            start_time, timeLimit, label_to_moves, diagonal_rule, occupied_diagonals)
         if pibt_worked is False:
             break
     return move_matrix, pibt_worked
@@ -165,10 +206,12 @@ def updatePriorities(prev_priorities, at_goal):
 class LaCAMRunner:
     class HLNode:
         def __init__(self, state: np.ndarray, action_preferences: np.ndarray, 
-                     parent: 'LaCAMRunner.HLNode', bd: np.ndarray, goal_locations: np.ndarray) -> None:
+                     parent: 'LaCAMRunner.HLNode', bd: np.ndarray, goal_locations: np.ndarray,
+                     action_dim: int) -> None:
             self.state = state
             self.action_preferences = action_preferences
             self.parent = parent
+            self.action_dim = action_dim
             self.queue_of_constraints = deque() 
             self.queue_of_constraints.append([]) 
 
@@ -181,20 +224,30 @@ class LaCAMRunner:
                 at_goal = np.all(np.equal(state, goal_locations), axis=1) 
                 self.agent_priorities = updatePriorities(self.parent.agent_priorities, at_goal)
 
-        def getNextState(self, grid_map: np.ndarray, start_time, timeLimit):
+        def getNextState(self, grid_map: np.ndarray, start_time, timeLimit, action_mode, diagonal_rule):
             assert(len(self.queue_of_constraints) > 0)
             curConstraint = self.queue_of_constraints.popleft()
             
             if len(curConstraint) == 0: 
-                for i in range(0,5):
+                for i in range(0,self.action_dim):
                     self.queue_of_constraints.append([(0,i)])
             else:
                 curAgent = curConstraint[-1][0] 
                 if curAgent + 1 < len(self.state): 
-                    for i in range(0,5): 
+                    for i in range(0,self.action_dim):
                         self.queue_of_constraints.append(curConstraint + [(curAgent+1,i)])
 
-            new_move, pibt_worked = pibt(grid_map, self.action_preferences, self.state, self.agent_priorities, curConstraint, start_time, timeLimit)
+            new_move, pibt_worked = pibt(
+                grid_map,
+                self.action_preferences,
+                self.state,
+                self.agent_priorities,
+                curConstraint,
+                start_time,
+                timeLimit,
+                action_mode=action_mode,
+                diagonal_rule=diagonal_rule,
+            )
 
             if not pibt_worked: 
                 return None
@@ -210,13 +263,33 @@ class LaCAMRunner:
         else:
             print("LaCAM enabled")
     
-    def lacam(self, start_locations, goal_locations, bd, grid_map, getActionPrefsFromLocs, lacamLimit, start_time, timeLimit):
+    def lacam(
+        self,
+        start_locations,
+        goal_locations,
+        bd,
+        grid_map,
+        getActionPrefsFromLocs,
+        lacamLimit,
+        start_time,
+        timeLimit,
+        action_mode="grid4",
+        diagonal_rule="blocked_pair",
+    ):
         if not self.real_time:
             self.mainStack.clear() 
             self.stateToHLNodes = dict() 
+        action_dim = get_action_dim(action_mode)
 
         if len(self.mainStack) == 0: 
-            curNode = LaCAMRunner.HLNode(start_locations, getActionPrefsFromLocs(start_locations), None, bd, goal_locations)
+            curNode = LaCAMRunner.HLNode(
+                start_locations,
+                getActionPrefsFromLocs(start_locations),
+                None,
+                bd,
+                goal_locations,
+                action_dim,
+            )
             self.mainStack.appendleft(curNode) 
             self.stateToHLNodes[start_locations.tobytes()] = curNode
 
@@ -228,7 +301,7 @@ class LaCAMRunner:
             curNode : LaCAMRunner.HLNode = self.mainStack.popleft()
             if len(curNode.queue_of_constraints) != 0: 
                 self.mainStack.appendleft(curNode)
-            new_locs = curNode.getNextState(grid_map, start_time, timeLimit)
+            new_locs = curNode.getNextState(grid_map, start_time, timeLimit, action_mode, diagonal_rule)
             if time.time() - start_time > timeLimit: 
                 break
             if new_locs is None:
@@ -245,7 +318,14 @@ class LaCAMRunner:
                 curNode = self.stateToHLNodes[key] 
                 self.mainStack.appendleft(curNode) 
             else:
-                newHLNode = LaCAMRunner.HLNode(new_locs, getActionPrefsFromLocs(new_locs), curNode, bd, goal_locations)
+                newHLNode = LaCAMRunner.HLNode(
+                    new_locs,
+                    getActionPrefsFromLocs(new_locs),
+                    curNode,
+                    bd,
+                    goal_locations,
+                    action_dim,
+                )
                 numGenerated += 1
                 self.stateToHLNodes[key] = newHLNode
                 self.mainStack.appendleft(newHLNode)
@@ -289,7 +369,7 @@ class WrapperNNWithCache:
 def runNNOnState(cur_locs, bd, grid_map, k, m, model, device, goal_locations, timer):
     with torch.no_grad():
         timer.start("create_nn_data")
-        data = create_data_object(cur_locs, bd, grid_map, k, m, goal_locations)
+        data = create_data_object(cur_locs, bd, grid_map, k, m, goal_locations, action_mode=args.actionMode)
         data = normalize_graph_data(data, k)
         data = data.to(device)
         timer.stop("create_nn_data")
@@ -334,7 +414,7 @@ def runNNOnState(cur_locs, bd, grid_map, k, m, model, device, goal_locations, ti
             magnitudes = np.linalg.norm(predicted_velocity, axis=1)
             should_wait = magnitudes < args.waitThreshold
 
-            action_vectors = np.array([[0,0], [0,1], [1,0], [-1,0], [0,-1]])
+            action_vectors = get_action_vectors(args.actionMode, normalize=True)
             scores = predicted_velocity @ action_vectors.T
 
             scores = scores / args.tau
@@ -345,16 +425,53 @@ def runNNOnState(cur_locs, bd, grid_map, k, m, model, device, goal_locations, ti
             probs[should_wait] = 0.01
             probs[should_wait, 0] = 0.96  # action 0 = wait
 
+        expected_action_dim = get_action_dim(args.actionMode)
+        if probs.shape[1] != expected_action_dim:
+            raise ValueError(
+                f"Policy produced {probs.shape[1]} action probabilities, "
+                f"but action_mode={args.actionMode} expects {expected_action_dim}."
+            )
+
     return probs
 
+def _check_checkpoint_action_dim(checkpoint, action_dim, action_mode):
+    if not isinstance(checkpoint, dict):
+        return
+    model_config = checkpoint.get("model_config", {})
+    ckpt_action_dim = model_config.get("action_dim")
+    ckpt_aux_dim = model_config.get("aux_feature_dim")
+    if ckpt_action_dim is not None and int(ckpt_action_dim) != action_dim:
+        raise ValueError(
+            f"Checkpoint action_dim={ckpt_action_dim}, but action_mode={action_mode} "
+            f"expects {action_dim}. Use the matching --action-mode or retrain."
+        )
+    if ckpt_aux_dim is not None and int(ckpt_aux_dim) != action_dim:
+        raise ValueError(
+            f"Checkpoint aux_feature_dim={ckpt_aux_dim}, but action_mode={action_mode} "
+            f"expects {action_dim}. Use the matching --action-mode or retrain."
+        )
+
+
 def load_flow_model(args, device, k):
-    model = FlowGNNModel(k=k, hidden_dim=args.hiddenDim, num_layers=args.numLayers).to(device)
+    action_dim = get_action_dim(args.actionMode)
+    model = FlowGNNModel(
+        k=k,
+        hidden_dim=args.hiddenDim,
+        num_layers=args.numLayers,
+        aux_feature_dim=action_dim,
+        action_dim=action_dim,
+    ).to(device)
 
     checkpoint = torch.load(args.modelPath, map_location=device, weights_only=False)
-    if 'model_state_dict' in checkpoint:
-        model.load_state_dict(checkpoint['model_state_dict'], strict=False)
-    else:
-        model.load_state_dict(checkpoint, strict=False)
+    _check_checkpoint_action_dim(checkpoint, action_dim, args.actionMode)
+    state_dict = checkpoint['model_state_dict'] if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint else checkpoint
+    try:
+        model.load_state_dict(state_dict, strict=False)
+    except RuntimeError as exc:
+        raise RuntimeError(
+            f"Could not load flow checkpoint for action_mode={args.actionMode} "
+            f"(expected action_dim={action_dim}). Use the matching --action-mode or retrain."
+        ) from exc
     return model
 
 def load_classifier_model(args, device, k):
@@ -373,17 +490,27 @@ def load_classifier_model(args, device, k):
         state_dict = checkpoint
 
     linear_dim = args.classifierLinearDim
+    action_dim = get_action_dim(args.actionMode)
     if linear_dim <= 0:
         patch_width = 2 * k + 1
-        linear_dim = (patch_width - 2) ** 2 * args.classifierInChannels + 5
+        linear_dim = (patch_width - 2) ** 2 * args.classifierInChannels + action_dim
+    classifier_output_dim = args.classifierOutputDim
+    if classifier_output_dim <= 0:
+        classifier_output_dim = action_dim
     model = GNNStack(
         linear_dim,
         args.classifierInChannels,
         args.classifierHiddenDim,
-        args.classifierOutputDim,
+        classifier_output_dim,
         args.classifierReluType,
     ).to(device)
-    model.load_state_dict(state_dict, strict=False)
+    try:
+        model.load_state_dict(state_dict, strict=False)
+    except RuntimeError as exc:
+        raise RuntimeError(
+            f"Could not load classifier checkpoint for action_mode={args.actionMode} "
+            f"(expected action_dim={action_dim}). Use the matching --action-mode or retrain."
+        ) from exc
     return model
 
 def load_local_classifier_model(args, device, k):
@@ -393,6 +520,19 @@ def load_local_classifier_model(args, device, k):
 
     config = checkpoint.get("model_config", {}) if isinstance(checkpoint, dict) else {}
     state_dict = checkpoint.get("model_state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint
+    action_dim = get_action_dim(args.actionMode)
+    ckpt_action_dim = config.get("action_dim")
+    if ckpt_action_dim is not None and int(ckpt_action_dim) != action_dim:
+        raise ValueError(
+            f"Checkpoint action_dim={ckpt_action_dim}, but action_mode={args.actionMode} "
+            f"expects {action_dim}. Use the matching --action-mode or retrain."
+        )
+    ckpt_aux_dim = config.get("aux_feature_dim")
+    if ckpt_aux_dim is not None and int(ckpt_aux_dim) != action_dim:
+        raise ValueError(
+            f"Checkpoint aux_feature_dim={ckpt_aux_dim}, but action_mode={args.actionMode} "
+            f"expects {action_dim}. Use the matching --action-mode or retrain."
+        )
 
     model = RishiLikeClassifier(
         k=config.get("k", k),
@@ -400,22 +540,35 @@ def load_local_classifier_model(args, device, k):
         num_layers=config.get("num_layers", args.localClassifierNumLayers),
         dropout=config.get("dropout", args.localClassifierDropout),
         in_channels=config.get("in_channels", args.localClassifierInChannels),
-        aux_feature_dim=config.get("aux_feature_dim", 5),
-        action_dim=config.get("action_dim", 5),
+        aux_feature_dim=config.get("aux_feature_dim", action_dim),
+        action_dim=config.get("action_dim", action_dim),
     ).to(device)
-    model.load_state_dict(state_dict, strict=False)
+    try:
+        model.load_state_dict(state_dict, strict=False)
+    except RuntimeError as exc:
+        raise RuntimeError(
+            f"Could not load local classifier checkpoint for action_mode={args.actionMode} "
+            f"(expected action_dim={action_dim}). Use the matching --action-mode or retrain."
+        ) from exc
     return model
 
 class WrapperBDGetActionPrefs:
-    def __init__(self, bd, grid_map, k, m, num_agents) -> None:
+    def __init__(self, bd, grid_map, k, m, num_agents, action_mode="grid4") -> None:
         self.bd = bd
         self.grid_map = grid_map
         self.k = k
         self.m = m
+        self.action_mode = action_mode
         self.range_num_agents = np.arange(num_agents)
 
     def __call__(self, locs):
-        return get_bd_prefs(locs, self.bd, self.range_num_agents, add_noise=True)
+        return get_bd_prefs(
+            locs,
+            self.bd,
+            self.range_num_agents,
+            add_noise=True,
+            action_mode=self.action_mode,
+        )
 
 def simulate(device, model, k, m, grid_map, bd, start_locations, goal_locations, 
              max_steps, shield_type, lacam_lookahead, args, timer: CustomTimer):
@@ -423,16 +576,21 @@ def simulate(device, model, k, m, grid_map, bd, start_locations, goal_locations,
         raise KeyError('Invalid shield type: {}'.format(shield_type))
     
     wrapper_nn = WrapperNNWithCache(bd, grid_map, model, device, k, m, goal_locations, timer)
-    wrapper_bd_prefs = WrapperBDGetActionPrefs(bd, grid_map, k, m, len(start_locations)) 
+    wrapper_bd_prefs = WrapperBDGetActionPrefs(bd, grid_map, k, m, len(start_locations), args.actionMode)
     def getActionPrefsFromLocs(locs):
         probs = runNNOnState(locs, bd, grid_map, k, m, model, device, goal_locations, timer)
 
         # Force at-goal agents to wait — prevents wandering away from goal
         at_goal = np.all(np.equal(locs, goal_locations), axis=1)
-        probs[at_goal] = 1e-6  # small epsilon so multinomial can still rank all 5 actions
+        probs[at_goal] = 1e-6  # small epsilon so multinomial can still rank all actions
         probs[at_goal, 0] = 1.0  # action 0 = wait (dominant)
 
-        action_mask = grid_map[locs[:, 0, None] + LABEL_TO_MOVES[:, 0], locs[:, 1, None] + LABEL_TO_MOVES[:, 1]] == 1
+        action_mask = action_mask_for_locs(
+            grid_map,
+            locs,
+            action_mode=args.actionMode,
+            diagonal_rule=args.diagonalRule,
+        )
         assert(not np.any(action_mask[:,0]))
         probs[action_mask] = 1e-8
         probs = probs / probs.sum(axis=1, keepdims=True)
@@ -477,7 +635,17 @@ def simulate(device, model, k, m, grid_map, bd, start_locations, goal_locations,
                 action_preferences = action_preferences[:,:2] 
                 action_preferences[:,1] = 0  
             timer.start("cs-time")
-            new_move, cspibt_worked = pibt(grid_map, action_preferences, cur_locs, agent_priorities, [], start_time, args.timeLimit)
+            new_move, cspibt_worked = pibt(
+                grid_map,
+                action_preferences,
+                cur_locs,
+                agent_priorities,
+                [],
+                start_time,
+                args.timeLimit,
+                action_mode=args.actionMode,
+                diagonal_rule=args.diagonalRule,
+            )
             timer.stop("cs-time")
             if not cspibt_worked:
                 if (time.time() - start_time < args.timeLimit):
@@ -486,7 +654,9 @@ def simulate(device, model, k, m, grid_map, bd, start_locations, goal_locations,
         else:
             scaled_lookahead = lacam_lookahead
             next_locs, lacamFoundSolution, numNodesExpanded, numGenerated = lacamRunner.lacam(cur_locs, goal_locations, 
-                                                    bd, grid_map, getActionPrefsFromLocs, scaled_lookahead, start_time, args.timeLimit)
+                                                    bd, grid_map, getActionPrefsFromLocs, scaled_lookahead,
+                                                    start_time, args.timeLimit, action_mode=args.actionMode,
+                                                    diagonal_rule=args.diagonalRule)
 
             if lacamFoundSolution:
                 for t in range(1, len(next_locs)):
@@ -649,8 +819,8 @@ if __name__ == '__main__':
                         help="Classifier local patch channels (default: 3)")
     parser.add_argument('--classifierHiddenDim', type=int, default=64,
                         help="Classifier hidden dimension, only used for state_dict checkpoints")
-    parser.add_argument('--classifierOutputDim', type=int, default=5,
-                        help="Classifier output dimension (default: 5)")
+    parser.add_argument('--classifierOutputDim', type=int, default=-1,
+                        help="Classifier output dimension; <=0 uses action-mode dimension")
     parser.add_argument('--classifierReluType', type=str, default='relu',
                         help="Classifier activation type, only used for state_dict checkpoints")
     parser.add_argument('--localClassifierHiddenDim', type=int, default=128,
@@ -661,10 +831,18 @@ if __name__ == '__main__':
                         help="Local Rishi-like classifier dropout (default: 0.25)")
     parser.add_argument('--localClassifierInChannels', type=int, default=3,
                         help="Local Rishi-like classifier input channels (default: 3)")
+    parser.add_argument('--actionMode', '--action-mode', dest='actionMode',
+                        choices=['grid4', 'grid8'], default='grid4',
+                        help="Discrete grid action space for policy output and simulator moves")
+    parser.add_argument('--diagonalRule', '--diagonal-rule', dest='diagonalRule',
+                        choices=['blocked_pair', 'both_clear', 'allow'], default='blocked_pair',
+                        help="Grid8 diagonal obstacle rule: blocked_pair, both_clear, or allow")
     args = parser.parse_args()
 
     if args.mapName.endswith('.map'): 
         args.mapName = args.mapName.removesuffix('.map')
+    validate_action_mode(args.actionMode)
+    validate_diagonal_rule(args.diagonalRule)
     if args.policyType == "flow_action_head":
         args.useActionHead = True
     if args.shieldType == "LaCAM" and args.lacamLookahead == 0:

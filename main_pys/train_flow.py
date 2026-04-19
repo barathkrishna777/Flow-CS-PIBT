@@ -12,6 +12,7 @@ import argparse
 from main_pys.dataset import FlowMAPFDataset
 from main_pys.dataset_preprocessed import PreprocessedFlowMAPFDataset, build_weighted_sampler
 from main_pys.generative_model import FlowGNNModel
+from main_pys.grid_actions import get_action_dim, get_action_vectors
 
 PREPROCESSED_DIRS = [
     "/media/anushree_mattlab/Seagate Por/preprocessed_data",  # external drive (primary)
@@ -20,19 +21,16 @@ PREPROCESSED_DIRS = [
 
 
 WAIT_SPEED_THRESHOLD = 0.1  # velocities below this magnitude → wait action
-ACTION_VECTORS = torch.tensor([[0,1],[1,0],[-1,0],[0,-1]], dtype=torch.float32)  # right, down, up, left
 
 
-def velocity_to_action_labels(expert_velocities, device):
-    """Convert expert velocity vectors to discrete action labels (0-4).
-
-    Actions: 0=wait, 1=right, 2=down, 3=up, 4=left
-    """
+def velocity_to_action_labels(expert_velocities, device, action_mode="grid4"):
+    """Convert expert velocity vectors to discrete action labels."""
     speeds = expert_velocities.norm(dim=1)
     is_wait = speeds < WAIT_SPEED_THRESHOLD
 
-    # Dot product with cardinal directions for non-wait agents
-    dots = expert_velocities @ ACTION_VECTORS.to(device).T  # (N, 4)
+    action_vectors_np = get_action_vectors(action_mode, normalize=True)[1:]
+    action_vectors = torch.as_tensor(action_vectors_np, dtype=torch.float32, device=device)
+    dots = expert_velocities @ action_vectors.T
     best_dir = dots.argmax(dim=1) + 1  # +1 because action 0 is wait
 
     labels = torch.where(is_wait, torch.zeros_like(best_dir), best_dir)
@@ -47,6 +45,7 @@ def compute_flow_loss(
     action_loss_weight=0.3,
     unweighted_action_loss=False,
     unweighted_flow_loss=False,
+    action_mode="grid4",
 ):
     """Shared flow matching loss computation for train and val, with optional auxiliary action loss."""
     batch = batch.to(device)
@@ -76,7 +75,17 @@ def compute_flow_loss(
         if hasattr(batch, "action_y") and batch.action_y is not None:
             expert_actions = batch.action_y.view(-1).long().to(device)
         else:
-            expert_actions = velocity_to_action_labels(x_1, device)
+            expert_actions = velocity_to_action_labels(x_1, device, action_mode=action_mode)
+        if action_logits.shape[1] != get_action_dim(action_mode):
+            raise ValueError(
+                f"Model action head has {action_logits.shape[1]} logits, "
+                f"but action_mode={action_mode} expects {get_action_dim(action_mode)}"
+            )
+        if expert_actions.numel() > 0 and int(expert_actions.max().item()) >= action_logits.shape[1]:
+            raise ValueError(
+                f"Found action label {int(expert_actions.max().item())}, "
+                f"but model only outputs {action_logits.shape[1]} logits"
+            )
         action_loss = F.cross_entropy(action_logits, expert_actions, reduction='none')
         if unweighted_action_loss:
             action_loss = action_loss.mean()
@@ -96,6 +105,7 @@ def validate(
     action_loss_weight,
     unweighted_action_loss,
     unweighted_flow_loss,
+    action_mode,
 ):
     """Run validation and return average loss."""
     model.eval()
@@ -111,6 +121,7 @@ def validate(
                 action_loss_weight=action_loss_weight,
                 unweighted_action_loss=unweighted_action_loss,
                 unweighted_flow_loss=unweighted_flow_loss,
+                action_mode=action_mode,
             )
             total_loss += loss.item()
             num_batches += 1
@@ -121,7 +132,7 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
           preprocessed_dir=None, no_weighted_sampling=False, val_split=0.05, patience=0,
           resume=None, start_epoch=0, hidden_dim=1024, num_layers=6,
           action_loss_weight=0.3, unweighted_action_loss=False,
-          unweighted_flow_loss=False, epochs=10):
+          unweighted_flow_loss=False, epochs=10, action_mode="grid4"):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_amp = device.type == "cuda"
     print(f"Device: {device} | AMP: {use_amp}")
@@ -143,7 +154,22 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
         full_dataset = FlowMAPFDataset(data_dir="data/flow_training_data_multi",
                                   map_dir="data/mapf-map",
                                   bd_dir="data/bd_npzs",
-                                  k=4, m=5)
+                                  k=4, m=5,
+                                  action_mode=action_mode)
+
+    action_dim = get_action_dim(action_mode)
+    sample = full_dataset[0]
+    sample_action_mode = getattr(sample, "action_mode", None)
+    if sample_action_mode is not None and sample_action_mode != action_mode:
+        raise ValueError(
+            f"Dataset action_mode={sample_action_mode}, but training requested {action_mode}."
+        )
+    if hasattr(sample, "bd_pred") and sample.bd_pred is not None and sample.bd_pred.shape[1] != action_dim:
+        raise ValueError(
+            f"Dataset bd_pred has width {sample.bd_pred.shape[1]}, "
+            f"but action_mode={action_mode} expects {action_dim}. "
+            "Regenerate preprocessing with the same --action-mode."
+        )
 
     # ── Validation split ──
     val_size = int(len(full_dataset) * val_split) if val_split > 0 else 0
@@ -201,7 +227,12 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
             persistent_workers=True
         )
 
-    model = FlowGNNModel(hidden_dim=hidden_dim, num_layers=num_layers).to(device)
+    model = FlowGNNModel(
+        hidden_dim=hidden_dim,
+        num_layers=num_layers,
+        aux_feature_dim=action_dim,
+        action_dim=action_dim,
+    ).to(device)
     optimizer = AdamW(model.parameters(), lr=1e-4, weight_decay=1e-4)
 
     epochs = 1 if quick else epochs
@@ -215,6 +246,13 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
     if resume and os.path.exists(resume):
         print(f"Resuming from checkpoint: {resume}")
         ckpt = torch.load(resume, map_location=device)
+        ckpt_config = ckpt.get('model_config', {}) if isinstance(ckpt, dict) else {}
+        ckpt_action_dim = ckpt_config.get('action_dim')
+        if ckpt_action_dim is not None and int(ckpt_action_dim) != action_dim:
+            raise ValueError(
+                f"Checkpoint action_dim={ckpt_action_dim}, but action_mode={action_mode} "
+                f"expects {action_dim}. Use the matching --action-mode or retrain."
+            )
         if isinstance(ckpt, dict) and 'model_state_dict' in ckpt:
             # Full checkpoint (model + optimizer + scheduler + metadata)
             model.load_state_dict(ckpt['model_state_dict'])
@@ -260,6 +298,8 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
             "action_loss_weight": action_loss_weight,
             "unweighted_action_loss": unweighted_action_loss,
             "unweighted_flow_loss": unweighted_flow_loss,
+            "action_mode": action_mode,
+            "action_dim": action_dim,
         })
 
     log_batch_every = 10
@@ -298,6 +338,7 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
                 action_loss_weight=action_loss_weight,
                 unweighted_action_loss=unweighted_action_loss,
                 unweighted_flow_loss=unweighted_flow_loss,
+                action_mode=action_mode,
             )
 
             optimizer.zero_grad()
@@ -344,6 +385,7 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
                 action_loss_weight=action_loss_weight,
                 unweighted_action_loss=unweighted_action_loss,
                 unweighted_flow_loss=unweighted_flow_loss,
+                action_mode=action_mode,
             )
             val_str = f" | Val Loss: {val_loss:.4f}"
 
@@ -361,6 +403,13 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
                     'train_loss': avg_train_loss,
                     'val_loss': val_loss,
                     'best_val_loss': best_val_loss,
+                    'model_config': {
+                        'action_mode': action_mode,
+                        'action_dim': action_dim,
+                        'aux_feature_dim': action_dim,
+                        'hidden_dim': hidden_dim,
+                        'num_layers': num_layers,
+                    },
                 }, best_path)
                 val_str += " (best)"
             else:
@@ -382,6 +431,13 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
             'train_loss': avg_train_loss,
             'val_loss': val_loss,
             'best_val_loss': best_val_loss,
+            'model_config': {
+                'action_mode': action_mode,
+                'action_dim': action_dim,
+                'aux_feature_dim': action_dim,
+                'hidden_dim': hidden_dim,
+                'num_layers': num_layers,
+            },
         }, ckpt_path)
 
         # Per-epoch wandb logging
@@ -456,6 +512,8 @@ if __name__ == "__main__":
                         help="Do not apply node_weights to the flow MSE loss")
     parser.add_argument("--epochs", type=int, default=10,
                         help="Number of training epochs; --quick still forces 1 epoch")
+    parser.add_argument("--action-mode", choices=["grid4", "grid8"], default="grid4",
+                        help="Discrete grid action space for auxiliary action labels/head")
     args = parser.parse_args()
     train(run_name=args.run_name, quick=args.quick, use_wandb=not args.no_wandb,
           wandb_project=args.wandb_project, wandb_entity=args.wandb_entity,
@@ -467,4 +525,5 @@ if __name__ == "__main__":
           action_loss_weight=args.action_loss_weight,
           unweighted_action_loss=args.unweighted_action_loss,
           unweighted_flow_loss=args.unweighted_flow_loss,
-          epochs=args.epochs)
+          epochs=args.epochs,
+          action_mode=args.action_mode)
