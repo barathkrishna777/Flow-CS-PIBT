@@ -2,6 +2,7 @@ import os
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+from matplotlib.colors import ListedColormap
 import numpy as np
 import argparse
 from PIL import Image
@@ -114,10 +115,33 @@ def createAnimation(args):
     if frames[-1] != max_plan_length - 1:
         frames.append(max_plan_length - 1)
 
+    if args.softStyle:
+        map_cmap = ListedColormap([args.freeCellColor, args.obstacleCellColor])
+        agent_edge_color = args.agentEdgeColor
+        goal_edge_color = args.goalEdgeColor
+        trail_alpha = args.trailAlpha
+        agent_alpha = args.agentAlpha
+        goal_alpha = args.goalAlpha
+    else:
+        map_cmap = "Greys"
+        agent_edge_color = "black"
+        goal_edge_color = "black"
+        trail_alpha = 0.35
+        agent_alpha = 1.0
+        goal_alpha = 0.8
+
     fig, ax = plt.subplots(figsize=(args.figureSize, args.figureSize))
+    fig.patch.set_facecolor(args.backgroundColor)
     for frame_idx, t in enumerate(tqdm.tqdm(frames, desc="Creating visualization")):
         ax.clear()
-        ax.imshow(mapdata, cmap="Greys", origin="upper", interpolation="nearest")
+        ax.set_facecolor(args.backgroundColor)
+        ax.imshow(
+            mapdata,
+            cmap=map_cmap,
+            origin="upper",
+            interpolation=args.mapInterpolation,
+            alpha=args.mapAlpha,
+        )
         ax.set_xticks([])
         ax.set_yticks([])
         ax.set_xlim(-0.5, mapdata.shape[1] - 0.5)
@@ -131,9 +155,9 @@ def createAnimation(args):
                 s=args.goalSize,
                 marker="*",
                 c=[cmap(i) for i in range(num_agents)],
-                edgecolors="black",
+                edgecolors=goal_edge_color,
                 linewidths=args.goalEdgeWidth,
-                alpha=0.8,
+                alpha=goal_alpha,
                 zorder=3,
             )
 
@@ -148,8 +172,10 @@ def createAnimation(args):
                     trail[:, 0],
                     linewidth=args.trailWidth,
                     c=color,
-                    alpha=0.35,
+                    alpha=trail_alpha,
                     zorder=2,
+                    solid_capstyle="round",
+                    solid_joinstyle="round",
                 )
             at_goal = id2goal is not None and np.all(plan[t] == id2goal[i])
             ax.scatter(
@@ -157,8 +183,9 @@ def createAnimation(args):
                 plan[t][0],
                 s=args.agentSize,
                 c=[color if not at_goal else "lightgrey"],
-                edgecolors="black",
+                edgecolors=agent_edge_color,
                 linewidths=args.agentEdgeWidth,
+                alpha=agent_alpha,
                 zorder=4,
             )
             if args.labelAgents and num_agents <= args.maxLabeledAgents:
@@ -209,11 +236,22 @@ if __name__ == '__main__':
     parser.add_argument('--trailWidth', type=float, default=0.7)
     parser.add_argument('--agentEdgeWidth', type=float, default=0.2)
     parser.add_argument('--goalEdgeWidth', type=float, default=0.25)
+    parser.add_argument('--agentEdgeColor', type=str, default='black')
+    parser.add_argument('--goalEdgeColor', type=str, default='black')
+    parser.add_argument('--trailAlpha', type=float, default=0.35)
+    parser.add_argument('--agentAlpha', type=float, default=1.0)
+    parser.add_argument('--goalAlpha', type=float, default=0.8)
     parser.add_argument('--figureSize', type=float, default=7.0)
     parser.add_argument('--dpi', type=int, default=120)
     parser.add_argument('--frameDurationMs', type=int, default=80)
     parser.add_argument('--endFrameDurationMs', type=int, default=1600)
     parser.add_argument('--agentCmap', type=str, default='turbo')
+    parser.add_argument('--softStyle', action='store_true')
+    parser.add_argument('--backgroundColor', type=str, default='#fbfaf7')
+    parser.add_argument('--freeCellColor', type=str, default='#fbfaf7')
+    parser.add_argument('--obstacleCellColor', type=str, default='#9fa4aa')
+    parser.add_argument('--mapAlpha', type=float, default=1.0)
+    parser.add_argument('--mapInterpolation', type=str, default='nearest')
     parser.add_argument('--labelAgents', action='store_true')
     parser.add_argument('--maxLabeledAgents', type=int, default=30)
     args = parser.parse_args()

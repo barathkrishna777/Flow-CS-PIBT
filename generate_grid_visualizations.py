@@ -235,14 +235,24 @@ def apply_showcase_defaults(args: argparse.Namespace) -> None:
     args.frame_stride = max(args.frame_stride, 12)
     args.trail_length = max(args.trail_length, 24)
     args.agent_size = max(args.agent_size, 28.0)
-    args.agent_edge_width = max(args.agent_edge_width, 0.55)
+    args.agent_edge_width = max(args.agent_edge_width, 0.35)
     args.goal_size = max(args.goal_size, 44.0)
-    args.goal_edge_width = max(args.goal_edge_width, 0.7)
-    args.trail_width = max(args.trail_width, 1.6)
-    args.figure_size = max(args.figure_size, 10.0)
-    args.dpi = max(args.dpi, 140)
+    args.goal_edge_width = max(args.goal_edge_width, 0.45)
+    args.trail_width = max(args.trail_width, 1.8)
+    args.figure_size = max(args.figure_size, 12.0)
+    args.dpi = max(args.dpi, 180)
     args.frame_duration_ms = max(args.frame_duration_ms, 160)
     args.end_frame_duration_ms = max(args.end_frame_duration_ms, 2500)
+    args.soft_style = True
+    args.agent_edge_color = "#f7f5ee"
+    args.goal_edge_color = "#f7f5ee"
+    args.trail_alpha = max(args.trail_alpha, 0.5)
+    args.agent_alpha = min(args.agent_alpha, 0.92)
+    args.goal_alpha = min(args.goal_alpha, 0.9)
+    args.background_color = "#fbfaf7"
+    args.free_cell_color = "#fbfaf7"
+    args.obstacle_cell_color = "#a3a8ad"
+    args.map_interpolation = "bilinear"
 
 
 def infer_bd_path(row: Dict[str, str], bd_dir: Path) -> Path:
@@ -428,11 +438,22 @@ def render_case(
         f"--trailWidth={args.trail_width}",
         f"--agentEdgeWidth={args.agent_edge_width}",
         f"--goalEdgeWidth={args.goal_edge_width}",
+        f"--agentEdgeColor={args.agent_edge_color}",
+        f"--goalEdgeColor={args.goal_edge_color}",
+        f"--trailAlpha={args.trail_alpha}",
+        f"--agentAlpha={args.agent_alpha}",
+        f"--goalAlpha={args.goal_alpha}",
         f"--figureSize={args.figure_size}",
         f"--dpi={args.dpi}",
         f"--frameDurationMs={args.frame_duration_ms}",
         f"--endFrameDurationMs={args.end_frame_duration_ms}",
+        f"--backgroundColor={args.background_color}",
+        f"--freeCellColor={args.free_cell_color}",
+        f"--obstacleCellColor={args.obstacle_cell_color}",
+        f"--mapInterpolation={args.map_interpolation}",
     ]
+    if args.soft_style:
+        cmd.append("--softStyle")
     run_command(cmd, dry_run=args.dry_run)
 
 
@@ -507,10 +528,20 @@ def main() -> None:
     parser.add_argument("--goal-size", type=float, default=24.0)
     parser.add_argument("--goal-edge-width", type=float, default=0.25)
     parser.add_argument("--trail-width", type=float, default=0.7)
+    parser.add_argument("--agent-edge-color", default="black")
+    parser.add_argument("--goal-edge-color", default="black")
+    parser.add_argument("--trail-alpha", type=float, default=0.35)
+    parser.add_argument("--agent-alpha", type=float, default=1.0)
+    parser.add_argument("--goal-alpha", type=float, default=0.8)
     parser.add_argument("--figure-size", type=float, default=7.0)
     parser.add_argument("--dpi", type=int, default=120)
     parser.add_argument("--frame-duration-ms", type=int, default=70)
     parser.add_argument("--end-frame-duration-ms", type=int, default=1600)
+    parser.add_argument("--soft-style", action="store_true")
+    parser.add_argument("--background-color", default="#fbfaf7")
+    parser.add_argument("--free-cell-color", default="#fbfaf7")
+    parser.add_argument("--obstacle-cell-color", default="#9fa4aa")
+    parser.add_argument("--map-interpolation", default="nearest")
     parser.add_argument("--reuse-paths", action="store_true", help="Skip simulator reruns when a paths .npy already exists")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
