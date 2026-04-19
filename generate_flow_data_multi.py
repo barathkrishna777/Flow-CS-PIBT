@@ -8,13 +8,15 @@ import glob
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from collections import deque
 
+from main_pys.grid_actions import get_actions, validate_action_mode, validate_diagonal_rule
+
 # Configuration
 DEFAULT_EECBS_BIN = "./build/eecbs"
 DATA_DIR = "data"
 MAP_DIR = os.path.join(DATA_DIR, "mapf-map")
 SCEN_DIR = os.path.join(DATA_DIR, "scen-random")
 OUTPUT_NPZ_DIR = os.path.join(DATA_DIR, "flow_training_data_multi")
-BD_DIR = os.path.join(DATA_DIR, "bd_npzs", "large_scale") 
+BD_DIR = os.path.join(DATA_DIR, "bd_npzs", "large_scale")
 
 # Rishi's Omitted and Held-out (Test) Maps
 OMITTED_MAPS = {"brc202d", "orz900", "maze-128-128-1", "maze-128-128-10"}
@@ -25,9 +27,6 @@ HELD_OUT_TEST = {
 
 WINDOW_LENGTH = 3 
 POLY_ORDER = 2    
-
-os.makedirs(OUTPUT_NPZ_DIR, exist_ok=True)
-os.makedirs(BD_DIR, exist_ok=True)
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -43,6 +42,28 @@ def parse_args():
         "--eecbs-bin",
         default=os.environ.get("EECBS_BIN", DEFAULT_EECBS_BIN),
         help="Path to the EECBS executable (default: ./build/eecbs or EECBS_BIN env var).",
+    )
+    parser.add_argument(
+        "--output-npz-dir",
+        default=OUTPUT_NPZ_DIR,
+        help="Output directory for generated expert trajectory .npz files.",
+    )
+    parser.add_argument(
+        "--bd-dir",
+        default=BD_DIR,
+        help="Output directory for generated BD .npz files.",
+    )
+    parser.add_argument(
+        "--action-mode",
+        choices=["grid4", "grid8"],
+        default="grid4",
+        help="Action mode used for BD heuristics. Trajectory connectivity still depends on the solver binary.",
+    )
+    parser.add_argument(
+        "--diagonal-rule",
+        choices=["blocked_pair", "both_clear", "allow"],
+        default="blocked_pair",
+        help="Diagonal obstacle rule for grid8 BD heuristics.",
     )
     return parser.parse_args()
 
@@ -97,10 +118,21 @@ def parse_scenario_goals(scen_file, max_agents=1000):
             if len(goals) == max_agents: break
     return np.array(goals)
 
-def compute_bd_heuristic(map_data, goals):
+def _diagonal_allowed(map_data, r, c, dr, dc, diagonal_rule):
+    if abs(dr) != 1 or abs(dc) != 1 or diagonal_rule == "allow":
+        return True
+    side_a_blocked = map_data[r + dr, c] == 1
+    side_b_blocked = map_data[r, c + dc] == 1
+    if diagonal_rule == "both_clear":
+        return not (side_a_blocked or side_b_blocked)
+    return not (side_a_blocked and side_b_blocked)
+
+
+def compute_bd_heuristic(map_data, goals, action_mode="grid4", diagonal_rule="blocked_pair"):
     H, W = map_data.shape
     N = len(goals)
-    bd_array = np.full((N, H, W), 10000, dtype=np.int16) 
+    bd_array = np.full((N, H, W), 10000, dtype=np.int16)
+    moves = [(a.dr, a.dc) for a in get_actions(action_mode) if not a.is_wait]
     
     for i, (gr, gc) in enumerate(goals):
         if map_data[gr, gc] == 1: continue
@@ -110,10 +142,14 @@ def compute_bd_heuristic(map_data, goals):
         while queue:
             r, c, dist = queue.popleft()
             ndist = dist + 1
-            for dr, dc in [(-1,0), (1,0), (0,-1), (0,1)]:
+            for dr, dc in moves:
                 nr, nc = r + dr, c + dc
                 if 0 <= nr < H and 0 <= nc < W:
-                    if map_data[nr, nc] == 0 and bd_array[i, nr, nc] == 10000:
+                    if (
+                        map_data[nr, nc] == 0
+                        and bd_array[i, nr, nc] == 10000
+                        and _diagonal_allowed(map_data, r, c, dr, dc, diagonal_rule)
+                    ):
                         bd_array[i, nr, nc] = ndist
                         queue.append((nr, nc, ndist))
     return bd_array
@@ -121,20 +157,25 @@ def compute_bd_heuristic(map_data, goals):
 # ==========================================
 # PHASE 1: Generate BD Heuristics Safely
 # ==========================================
-def generate_scenario_bd(map_path, scen_path):
+def generate_scenario_bd(map_path, scen_path, bd_dir, action_mode, diagonal_rule):
     scen_name = os.path.basename(scen_path).replace(".scen", "")
     map_name = os.path.basename(map_path).replace(".map", "")
     bd_key = f"{map_name}-random-{scen_name.split('-random-')[-1]}"
-    out_bd_file = os.path.join(BD_DIR, f"{scen_name}_bds.npz")
+    out_bd_file = os.path.join(bd_dir, f"{scen_name}_bds.npz")
     
     if os.path.exists(out_bd_file):
         return f"BD exists: {scen_name}"
         
-    print_log(f"--> Building Heuristic Grid: {scen_name} (Takes ~30s)")
+    print_log(f"--> Building {action_mode} Heuristic Grid: {scen_name} (Takes ~30s)")
     try:
         map_data = read_map(map_path)
         goals = parse_scenario_goals(scen_path, max_agents=1000)
-        bd_array = compute_bd_heuristic(map_data, goals)
+        bd_array = compute_bd_heuristic(
+            map_data,
+            goals,
+            action_mode=action_mode,
+            diagonal_rule=diagonal_rule,
+        )
         
         # Atomic write to prevent file corruption
         # FIX: Ensure the tmp file ends in .npz so numpy doesn't silently append it
@@ -148,9 +189,9 @@ def generate_scenario_bd(map_path, scen_path):
 # ==========================================
 # PHASE 2: Generate EECBS Trajectories
 # ==========================================
-def generate_scenario_trajectory(map_path, scen_path, num_agents, eecbs_bin):
+def generate_scenario_trajectory(map_path, scen_path, num_agents, eecbs_bin, output_npz_dir):
     scen_name = os.path.basename(scen_path).replace(".scen", "")
-    out_traj_file = os.path.join(OUTPUT_NPZ_DIR, f"{scen_name}_{num_agents}.npz")
+    out_traj_file = os.path.join(output_npz_dir, f"{scen_name}_{num_agents}.npz")
     tmp_path_file = f"tmp_{scen_name}_{num_agents}_{os.getpid()}.txt" 
     
     if os.path.exists(out_traj_file): 
@@ -181,7 +222,12 @@ def generate_scenario_trajectory(map_path, scen_path, num_agents, eecbs_bin):
 # ==========================================
 # EXECUTION PIPELINE
 # ==========================================
-def process_benchmark_parallel(max_workers, eecbs_bin):
+def process_benchmark_parallel(max_workers, eecbs_bin, output_npz_dir, bd_dir, action_mode, diagonal_rule):
+    validate_action_mode(action_mode)
+    validate_diagonal_rule(diagonal_rule)
+    os.makedirs(output_npz_dir, exist_ok=True)
+    os.makedirs(bd_dir, exist_ok=True)
+
     map_files = glob.glob(os.path.join(MAP_DIR, "*.map"))
     agent_counts = [20, 50, 100, 200, 400, 600, 800, 1000]
     
@@ -213,11 +259,17 @@ def process_benchmark_parallel(max_workers, eecbs_bin):
         f"Using {max_workers} workers (Python reports {cpu_count} CPU cores)."
     )
     print_log(f"Using EECBS binary: {eecbs_bin}")
+    print_log(f"Action mode for BD heuristics: {action_mode} ({diagonal_rule})")
+    print_log(f"Trajectory output: {output_npz_dir}")
+    print_log(f"BD output: {bd_dir}")
 
     # Run Phase 1
     print_log(f"--- PHASE 1: Generating Heuristics ({len(bd_jobs)} files) ---")
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(generate_scenario_bd, m, s) for m, s in bd_jobs]
+        futures = [
+            executor.submit(generate_scenario_bd, m, s, bd_dir, action_mode, diagonal_rule)
+            for m, s in bd_jobs
+        ]
         for future in as_completed(futures):
             # Print instantly when a job finishes
             print_log(future.result())
@@ -229,7 +281,10 @@ def process_benchmark_parallel(max_workers, eecbs_bin):
             f"EECBS binary not found: {eecbs_bin}. Pass --eecbs-bin or set EECBS_BIN."
         )
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(generate_scenario_trajectory, m, s, a, eecbs_bin): (m, s, a) for m, s, a in traj_jobs}
+        futures = {
+            executor.submit(generate_scenario_trajectory, m, s, a, eecbs_bin, output_npz_dir): (m, s, a)
+            for m, s, a in traj_jobs
+        }
         for i, future in enumerate(as_completed(futures)):
             if i % 50 == 0: 
                 print_log(f"Progress: {i}/{len(traj_jobs)} | {future.result()}")
@@ -238,4 +293,11 @@ if __name__ == "__main__":
     args = parse_args()
     if args.workers < 1:
         raise ValueError("--workers must be at least 1")
-    process_benchmark_parallel(args.workers, args.eecbs_bin)
+    process_benchmark_parallel(
+        args.workers,
+        args.eecbs_bin,
+        args.output_npz_dir,
+        args.bd_dir,
+        args.action_mode,
+        args.diagonal_rule,
+    )

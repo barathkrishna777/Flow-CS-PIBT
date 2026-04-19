@@ -45,7 +45,7 @@ def read_map(map_file, k):
 
 
 # ── Process one (file, timestep) pair ───────────────────────────────────────
-def process_sample(args, maps, k, m, out_dir, action_mode):
+def process_sample(args, maps, k, m, out_dir, action_mode, bd_root):
     """Build and save one PyG Data object. Returns output path or None on error."""
     npz_path, t_step, sample_idx = args
     out_path = os.path.join(out_dir, f"sample_{sample_idx:08d}.pt")
@@ -103,7 +103,7 @@ def process_sample(args, maps, k, m, out_dir, action_mode):
 
         # BD loading
         scen_name = filename.replace('.npz', '').rsplit('_', 1)[0]
-        bd_file_path = os.path.join("data", "bd_npzs", "large_scale", f"{scen_name}_bds.npz")
+        bd_file_path = os.path.join(bd_root, f"{scen_name}_bds.npz")
         bd_key = f"{map_name}-random-{scen_name.split('-random-')[-1]}"
         with np.load(bd_file_path) as bd_data:
             bd_grid = bd_data[bd_key][:cur_locs.shape[0]].astype(np.float32)
@@ -132,19 +132,20 @@ def process_sample(args, maps, k, m, out_dir, action_mode):
         return None
 
 
-def worker_init(maps_dict, k_val, m_val, out_dir_val, action_mode_val):
+def worker_init(maps_dict, k_val, m_val, out_dir_val, action_mode_val, bd_root_val):
     """Store shared data in each worker process."""
-    global _maps, _k, _m, _out_dir, _action_mode
+    global _maps, _k, _m, _out_dir, _action_mode, _bd_root
     _maps = maps_dict
     _k = k_val
     _m = m_val
     _out_dir = out_dir_val
     _action_mode = action_mode_val
+    _bd_root = bd_root_val
 
 
 def worker_fn(args):
     """Wrapper that uses global worker state."""
-    return process_sample(args, _maps, _k, _m, _out_dir, _action_mode)
+    return process_sample(args, _maps, _k, _m, _out_dir, _action_mode, _bd_root)
 
 
 def migrate_existing(old_dir, new_dir):
@@ -198,6 +199,8 @@ def main():
                         help="Directory with .map files")
     parser.add_argument("--out", default="data/preprocessed",
                         help="Output directory for .pt files")
+    parser.add_argument("--bd-dir", default=os.path.join("data", "bd_npzs", "large_scale"),
+                        help="Directory containing *_bds.npz heuristic files")
     parser.add_argument("--migrate-from", default=None,
                         help="Old preprocessed dir to validate and move files from before processing")
     parser.add_argument("--workers", type=int, default=0,
@@ -253,7 +256,11 @@ def main():
 
     # 4) Process in parallel
     print(f"Processing with {num_workers} workers -> {args.out}/ ({args.action_mode})")
-    with Pool(num_workers, initializer=worker_init, initargs=(maps, k, m, args.out, args.action_mode)) as pool:
+    with Pool(
+        num_workers,
+        initializer=worker_init,
+        initargs=(maps, k, m, args.out, args.action_mode, args.bd_dir),
+    ) as pool:
         results = list(tqdm(
             pool.imap_unordered(worker_fn, index, chunksize=64),
             total=len(index),
