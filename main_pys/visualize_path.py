@@ -132,7 +132,7 @@ def createAnimation(args):
                 marker="*",
                 c=[cmap(i) for i in range(num_agents)],
                 edgecolors="black",
-                linewidths=0.25,
+                linewidths=args.goalEdgeWidth,
                 alpha=0.8,
                 zorder=3,
             )
@@ -158,7 +158,7 @@ def createAnimation(args):
                 s=args.agentSize,
                 c=[color if not at_goal else "lightgrey"],
                 edgecolors="black",
-                linewidths=0.2,
+                linewidths=args.agentEdgeWidth,
                 zorder=4,
             )
             if args.labelAgents and num_agents <= args.maxLabeledAgents:
@@ -207,6 +207,8 @@ if __name__ == '__main__':
     parser.add_argument('--agentSize', type=float, default=14.0)
     parser.add_argument('--goalSize', type=float, default=28.0)
     parser.add_argument('--trailWidth', type=float, default=0.7)
+    parser.add_argument('--agentEdgeWidth', type=float, default=0.2)
+    parser.add_argument('--goalEdgeWidth', type=float, default=0.25)
     parser.add_argument('--figureSize', type=float, default=7.0)
     parser.add_argument('--dpi', type=int, default=120)
     parser.add_argument('--frameDurationMs', type=int, default=80)

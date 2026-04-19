@@ -117,8 +117,27 @@ def select_successes_for_agent_counts(
     selection: str,
     map_preferences: Optional[List[str]] = None,
 ) -> List[Dict[str, str]]:
+    return [
+        candidates[0]
+        for candidates in select_candidate_lists_for_agent_counts(
+            rows,
+            agent_counts=agent_counts,
+            distinct_maps=distinct_maps,
+            selection=selection,
+            map_preferences=map_preferences,
+        )
+    ]
+
+
+def select_candidate_lists_for_agent_counts(
+    rows: Iterable[Dict[str, str]],
+    agent_counts: List[int],
+    distinct_maps: bool,
+    selection: str,
+    map_preferences: Optional[List[str]] = None,
+) -> List[List[Dict[str, str]]]:
     successful_rows = [row for row in rows if is_successful_grid_row(row)]
-    selected: List[Dict[str, str]] = []
+    selected: List[List[Dict[str, str]]] = []
     used_maps = set()
     missing_counts = []
 
@@ -157,12 +176,15 @@ def select_successes_for_agent_counts(
                 parse_float(row, "runtime"),
                 parse_float(row, "total_cost_true"),
             )
-        winner = dict(sorted(candidates, key=sort_key)[0])
-        source_agent_count = parse_int(winner, "agentNum")
-        winner["sourceAgentNum"] = str(source_agent_count)
-        winner["agentNum"] = str(agent_count)
-        selected.append(winner)
-        used_maps.add(winner["mapName"])
+        candidate_list = []
+        for row in sorted(candidates, key=sort_key):
+            candidate = dict(row)
+            source_agent_count = parse_int(candidate, "agentNum")
+            candidate["sourceAgentNum"] = str(source_agent_count)
+            candidate["agentNum"] = str(agent_count)
+            candidate_list.append(candidate)
+        selected.append(candidate_list)
+        used_maps.add(candidate_list[0]["mapName"])
 
     if missing_counts:
         raise SystemExit(
@@ -212,8 +234,11 @@ def apply_showcase_defaults(args: argparse.Namespace) -> None:
     args.agent_count_selection = "fastest"
     args.frame_stride = max(args.frame_stride, 12)
     args.trail_length = max(args.trail_length, 24)
-    args.agent_size = max(args.agent_size, 8.0)
-    args.goal_size = max(args.goal_size, 18.0)
+    args.agent_size = max(args.agent_size, 28.0)
+    args.agent_edge_width = max(args.agent_edge_width, 0.55)
+    args.goal_size = max(args.goal_size, 44.0)
+    args.goal_edge_width = max(args.goal_edge_width, 0.7)
+    args.trail_width = max(args.trail_width, 1.6)
     args.figure_size = max(args.figure_size, 10.0)
     args.dpi = max(args.dpi, 140)
     args.frame_duration_ms = max(args.frame_duration_ms, 160)
@@ -400,6 +425,9 @@ def render_case(
         f"--trailLength={args.trail_length}",
         f"--agentSize={args.agent_size}",
         f"--goalSize={args.goal_size}",
+        f"--trailWidth={args.trail_width}",
+        f"--agentEdgeWidth={args.agent_edge_width}",
+        f"--goalEdgeWidth={args.goal_edge_width}",
         f"--figureSize={args.figure_size}",
         f"--dpi={args.dpi}",
         f"--frameDurationMs={args.frame_duration_ms}",
@@ -475,7 +503,10 @@ def main() -> None:
     parser.add_argument("--frame-stride", type=int, default=4)
     parser.add_argument("--trail-length", type=int, default=30)
     parser.add_argument("--agent-size", type=float, default=10.0)
+    parser.add_argument("--agent-edge-width", type=float, default=0.2)
     parser.add_argument("--goal-size", type=float, default=24.0)
+    parser.add_argument("--goal-edge-width", type=float, default=0.25)
+    parser.add_argument("--trail-width", type=float, default=0.7)
     parser.add_argument("--figure-size", type=float, default=7.0)
     parser.add_argument("--dpi", type=int, default=120)
     parser.add_argument("--frame-duration-ms", type=int, default=70)
@@ -487,15 +518,17 @@ def main() -> None:
 
     rows = read_rows(resolve_path(args.eval_csv))
     if args.agent_counts:
-        selected = select_successes_for_agent_counts(
+        candidate_lists = select_candidate_lists_for_agent_counts(
             rows,
             agent_counts=args.agent_counts,
             distinct_maps=args.distinct_maps,
             selection=args.agent_count_selection,
             map_preferences=args.map_preferences,
         )
+        selected = [candidates[0] for candidates in candidate_lists]
     else:
         selected = select_difficult_successes(rows, args.top_k, args.min_agents, args.max_agents)
+        candidate_lists = [[row] for row in selected]
     if not selected:
         raise SystemExit("No successful grid-world rows matched the requested filters.")
 
@@ -507,18 +540,33 @@ def main() -> None:
     for row in selected:
         print(describe_selected_case(row), flush=True)
 
-    for row in selected:
-        slug = case_slug(row)
-        paths_file = paths_dir / f"{slug}.npy"
-        gif_file = gifs_dir / f"{slug}.gif"
-        metrics_file = metrics_dir / f"{slug}.csv"
-        if not args.reuse_paths or not paths_file.exists():
-            rerun_case(row, args, paths_file, metrics_file)
-        else:
-            print(f"Reusing {paths_file}", flush=True)
-        render_case(row, args, paths_file, gif_file)
-        verb = "Would write" if args.dry_run else "Wrote"
-        print(f"{verb} {gif_file}", flush=True)
+    for candidates in candidate_lists:
+        last_error = None
+        for attempt_index, row in enumerate(candidates, start=1):
+            slug = case_slug(row)
+            paths_file = paths_dir / f"{slug}.npy"
+            gif_file = gifs_dir / f"{slug}.gif"
+            metrics_file = metrics_dir / f"{slug}.csv"
+            if attempt_index > 1:
+                print(f"Retrying with alternate successful CSV case: {describe_selected_case(row)}", flush=True)
+            try:
+                if not args.reuse_paths or not paths_file.exists():
+                    rerun_case(row, args, paths_file, metrics_file)
+                else:
+                    print(f"Reusing {paths_file}", flush=True)
+                    if not args.dry_run:
+                        verify_rerun_success(metrics_file, parse_int(row, "agentNum"))
+                render_case(row, args, paths_file, gif_file)
+                verb = "Would write" if args.dry_run else "Wrote"
+                print(f"{verb} {gif_file}", flush=True)
+                last_error = None
+                break
+            except RuntimeError as error:
+                last_error = error
+                print(f"Case failed verification: {error}", flush=True)
+                continue
+        if last_error is not None:
+            raise last_error
 
 
 if __name__ == "__main__":
