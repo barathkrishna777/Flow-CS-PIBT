@@ -1,6 +1,5 @@
 import argparse
 import csv
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -33,6 +32,31 @@ def resolve_path(path: str, base_dir: Path = REPO_ROOT) -> Path:
     if candidate.is_absolute():
         return candidate
     return base_dir / candidate
+
+
+def first_existing(paths: Iterable[Path]) -> Optional[Path]:
+    for path in paths:
+        if path.exists():
+            return path
+    return None
+
+
+def find_by_name(root: Path, filename: str) -> Optional[Path]:
+    if not root.exists():
+        return None
+    matches = sorted(path for path in root.rglob(filename) if path.is_file())
+    return matches[0] if matches else None
+
+
+def resolve_existing_path(path: str, fallback_roots: Iterable[Path]) -> Path:
+    resolved = resolve_path(path)
+    if resolved.exists():
+        return resolved
+    for root in fallback_roots:
+        match = find_by_name(resolve_path(str(root)), resolved.name)
+        if match is not None:
+            return match
+    return resolved
 
 
 def read_rows(csv_path: Path) -> List[Dict[str, str]]:
@@ -85,7 +109,70 @@ def case_slug(row: Dict[str, str]) -> str:
 
 def infer_bd_path(row: Dict[str, str], bd_dir: Path) -> Path:
     scen_name = Path(row["scenFile"]).stem
-    return bd_dir / f"{scen_name}_bds.npz"
+    filename = f"{scen_name}_bds.npz"
+    direct = bd_dir / filename
+    if direct.exists():
+        return direct
+    for candidate_dir in [
+        REPO_ROOT / "data" / "bd_npzs" / "large_scale",
+        REPO_ROOT / "data" / "constant_npzs",
+        REPO_ROOT / "data" / "constant_npzs" / "bd_npzs",
+        REPO_ROOT / "data" / "bd_npzs",
+    ]:
+        candidate = candidate_dir / filename
+        if candidate.exists():
+            return candidate
+    match = find_by_name(REPO_ROOT / "data", filename)
+    return match if match is not None else direct
+
+
+def resolve_map_npz(path: str) -> Path:
+    direct = resolve_path(path)
+    if direct.exists():
+        return direct
+    fallback = first_existing(
+        [
+            REPO_ROOT / "data" / "all_maps.npz",
+            REPO_ROOT / "data" / "constant_npzs" / "all_maps.npz",
+            REPO_ROOT / "data" / "constant_npzs" / "all_maps.npz.npz",
+        ]
+    )
+    return fallback if fallback is not None else direct
+
+
+def resolve_scen_file(path: str) -> Path:
+    direct = resolve_path(path)
+    if direct.exists():
+        return direct
+    filename = direct.name
+    fallback = first_existing(
+        [
+            REPO_ROOT / "data" / "scen-random" / filename,
+            REPO_ROOT / "data" / "mapf-scen-random" / filename,
+        ]
+    )
+    return fallback if fallback is not None else direct
+
+
+def resolve_model_path(row: Dict[str, str], override: Optional[str]) -> Path:
+    if override:
+        return resolve_existing_path(
+            override,
+            [
+                REPO_ROOT,
+                REPO_ROOT / "checkpoints",
+                REPO_ROOT / "data",
+            ],
+        )
+    model_path = row.get("modelPath", "")
+    return resolve_existing_path(
+        model_path,
+        [
+            REPO_ROOT,
+            REPO_ROOT / "checkpoints",
+            REPO_ROOT / "data",
+        ],
+    )
 
 
 def choose_gpu_value(row: Dict[str, str], mode: str) -> str:
@@ -109,13 +196,14 @@ def rerun_case(
     paths_file: Path,
     metrics_file: Path,
 ) -> None:
-    scen_file = resolve_path(row["scenFile"])
-    model_path = resolve_path(row["modelPath"])
+    map_npz = resolve_map_npz(args.map_npz)
+    scen_file = resolve_scen_file(row["scenFile"])
+    model_path = resolve_model_path(row, args.model_path)
     bd_path = infer_bd_path(row, resolve_path(args.bd_dir))
 
     missing = [
         str(path)
-        for path in [resolve_path(args.map_npz), scen_file, bd_path, model_path]
+        for path in [map_npz, scen_file, bd_path, model_path]
         if not path.exists()
     ]
     if missing and not args.dry_run:
@@ -136,7 +224,7 @@ def rerun_case(
         sys.executable,
         "-m",
         "main_pys.simulator",
-        f"--mapNpzFile={resolve_path(args.map_npz)}",
+        f"--mapNpzFile={map_npz}",
         f"--mapName={row['mapName']}",
         f"--scenFile={scen_file}",
         f"--agentNum={parse_int(row, 'agentNum')}",
@@ -167,7 +255,7 @@ def render_case(
     paths_file: Path,
     gif_file: Path,
 ) -> None:
-    scen_file = resolve_path(row["scenFile"])
+    scen_file = resolve_scen_file(row["scenFile"])
     frame_dir = gif_file.parent / f"{gif_file.stem}_frames"
     cmd = [
         sys.executable,
@@ -205,7 +293,12 @@ def main() -> None:
     parser.add_argument("--max-agents", type=int, default=None)
     parser.add_argument("--map-npz", default="data/all_maps.npz")
     parser.add_argument("--map-dir", default="data/mapf-map")
-    parser.add_argument("--bd-dir", default="data/constant_npzs")
+    parser.add_argument("--bd-dir", default="data/bd_npzs/large_scale")
+    parser.add_argument(
+        "--model-path",
+        default=None,
+        help="Override the checkpoint path from the CSV. Useful when the CSV was produced on another machine.",
+    )
     parser.add_argument("--max-steps", default="3x")
     parser.add_argument("--shield-type", default="CS-PIBT")
     parser.add_argument("--lacam-lookahead", type=int, default=0)
