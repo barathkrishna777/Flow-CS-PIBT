@@ -114,18 +114,24 @@ def select_successes_for_agent_counts(
     rows: Iterable[Dict[str, str]],
     agent_counts: List[int],
     distinct_maps: bool,
+    selection: str,
+    map_preferences: Optional[List[str]] = None,
 ) -> List[Dict[str, str]]:
     successful_rows = [row for row in rows if is_successful_grid_row(row)]
     selected: List[Dict[str, str]] = []
     used_maps = set()
     missing_counts = []
 
-    for agent_count in agent_counts:
+    for index, agent_count in enumerate(agent_counts):
+        map_preference = None
+        if map_preferences and index < len(map_preferences):
+            map_preference = map_preferences[index]
         candidates = [
             row
             for row in successful_rows
             if parse_int(row, "agentNum") == agent_count
             and (not distinct_maps or row["mapName"] not in used_maps)
+            and map_matches_preference(row["mapName"], map_preference)
         ]
         if not candidates:
             candidates = [
@@ -133,20 +139,25 @@ def select_successes_for_agent_counts(
                 for row in successful_rows
                 if parse_int(row, "agentNum") >= agent_count
                 and (not distinct_maps or row["mapName"] not in used_maps)
+                and map_matches_preference(row["mapName"], map_preference)
             ]
         if not candidates:
             missing_counts.append(agent_count)
             continue
-        winner = dict(
-            sorted(
-                candidates,
-                key=lambda row: (
-                    -abs(parse_int(row, "agentNum") - agent_count),
-                    *row_difficulty_key(row),
-                ),
-                reverse=True,
-            )[0]
-        )
+        if selection == "hardest":
+            sort_key = lambda row: (
+                abs(parse_int(row, "agentNum") - agent_count),
+                -parse_int(row, "agentNum"),
+                -parse_float(row, "total_cost_true"),
+                -parse_float(row, "runtime"),
+            )
+        else:
+            sort_key = lambda row: (
+                abs(parse_int(row, "agentNum") - agent_count),
+                parse_float(row, "runtime"),
+                parse_float(row, "total_cost_true"),
+            )
+        winner = dict(sorted(candidates, key=sort_key)[0])
         source_agent_count = parse_int(winner, "agentNum")
         winner["sourceAgentNum"] = str(source_agent_count)
         winner["agentNum"] = str(agent_count)
@@ -176,6 +187,35 @@ def describe_selected_case(row: Dict[str, str]) -> str:
         f"  {case_slug(row)}{source_text} "
         f"cost={row.get('total_cost_true')} runtime={row.get('runtime')}s"
     )
+
+
+def map_matches_preference(map_name: str, preference: Optional[str]) -> bool:
+    if not preference:
+        return True
+    normalized = map_name.lower()
+    tokens = [
+        token.strip().lower()
+        for token in preference.replace("/", ",").split(",")
+        if token.strip()
+    ]
+    return any(token in normalized for token in tokens)
+
+
+def apply_showcase_defaults(args: argparse.Namespace) -> None:
+    if not args.showcase:
+        return
+    if args.agent_counts is None:
+        args.agent_counts = [50, 200, 1000]
+    if args.map_preferences is None:
+        args.map_preferences = ["berlin,paris", "den", "random"]
+    args.distinct_maps = True
+    args.agent_count_selection = "fastest"
+    args.frame_stride = max(args.frame_stride, 24)
+    args.trail_length = min(args.trail_length, 12)
+    args.agent_size = min(args.agent_size, 5.0)
+    args.goal_size = min(args.goal_size, 12.0)
+    args.dpi = min(args.dpi, 80)
+    args.frame_duration_ms = max(args.frame_duration_ms, 90)
 
 
 def infer_bd_path(row: Dict[str, str], bd_dir: Path) -> Path:
@@ -374,6 +414,11 @@ def main() -> None:
     )
     parser.add_argument("--eval-csv", required=True, help="Simulator-format CSV to mine for successful cases")
     parser.add_argument("--output-dir", default="visualizations/grid_successes")
+    parser.add_argument(
+        "--showcase",
+        action="store_true",
+        help="Convenience preset for 3 simple GIFs: 50, 200, 1000 agents on Paris/Berlin, den, and random maps.",
+    )
     parser.add_argument("--top-k", type=int, default=3)
     parser.add_argument(
         "--agent-counts",
@@ -386,6 +431,21 @@ def main() -> None:
         "--distinct-maps",
         action="store_true",
         help="When used with --agent-counts, do not select the same map twice.",
+    )
+    parser.add_argument(
+        "--agent-count-selection",
+        choices=["fastest", "hardest"],
+        default="fastest",
+        help="How to choose cases for --agent-counts. Defaults to fastest because this mode is for quick GIF generation.",
+    )
+    parser.add_argument(
+        "--map-preferences",
+        nargs="+",
+        default=None,
+        help=(
+            "Optional map-name preferences, one per --agent-counts entry. "
+            "Use comma-separated alternatives like 'berlin,paris'."
+        ),
     )
     parser.add_argument("--min-agents", type=int, default=1)
     parser.add_argument("--max-agents", type=int, default=None)
@@ -419,6 +479,7 @@ def main() -> None:
     parser.add_argument("--reuse-paths", action="store_true", help="Skip simulator reruns when a paths .npy already exists")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
+    apply_showcase_defaults(args)
 
     rows = read_rows(resolve_path(args.eval_csv))
     if args.agent_counts:
@@ -426,6 +487,8 @@ def main() -> None:
             rows,
             agent_counts=args.agent_counts,
             distinct_maps=args.distinct_maps,
+            selection=args.agent_count_selection,
+            map_preferences=args.map_preferences,
         )
     else:
         selected = select_difficult_successes(rows, args.top_k, args.min_agents, args.max_agents)
