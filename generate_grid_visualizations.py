@@ -210,12 +210,14 @@ def apply_showcase_defaults(args: argparse.Namespace) -> None:
         args.map_preferences = ["berlin,paris", "den", "random"]
     args.distinct_maps = True
     args.agent_count_selection = "fastest"
-    args.frame_stride = max(args.frame_stride, 24)
-    args.trail_length = min(args.trail_length, 12)
-    args.agent_size = min(args.agent_size, 5.0)
-    args.goal_size = min(args.goal_size, 12.0)
-    args.dpi = min(args.dpi, 80)
-    args.frame_duration_ms = max(args.frame_duration_ms, 90)
+    args.frame_stride = max(args.frame_stride, 12)
+    args.trail_length = max(args.trail_length, 24)
+    args.agent_size = max(args.agent_size, 8.0)
+    args.goal_size = max(args.goal_size, 18.0)
+    args.figure_size = max(args.figure_size, 10.0)
+    args.dpi = max(args.dpi, 140)
+    args.frame_duration_ms = max(args.frame_duration_ms, 160)
+    args.end_frame_duration_ms = max(args.end_frame_duration_ms, 2500)
 
 
 def infer_bd_path(row: Dict[str, str], bd_dir: Path) -> Path:
@@ -398,6 +400,7 @@ def render_case(
         f"--trailLength={args.trail_length}",
         f"--agentSize={args.agent_size}",
         f"--goalSize={args.goal_size}",
+        f"--figureSize={args.figure_size}",
         f"--dpi={args.dpi}",
         f"--frameDurationMs={args.frame_duration_ms}",
         f"--endFrameDurationMs={args.end_frame_duration_ms}",
@@ -473,6 +476,7 @@ def main() -> None:
     parser.add_argument("--trail-length", type=int, default=30)
     parser.add_argument("--agent-size", type=float, default=10.0)
     parser.add_argument("--goal-size", type=float, default=24.0)
+    parser.add_argument("--figure-size", type=float, default=7.0)
     parser.add_argument("--dpi", type=int, default=120)
     parser.add_argument("--frame-duration-ms", type=int, default=70)
     parser.add_argument("--end-frame-duration-ms", type=int, default=1600)
