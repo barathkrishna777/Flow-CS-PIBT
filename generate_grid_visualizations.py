@@ -102,9 +102,80 @@ def select_difficult_successes(
     return sorted(candidates, key=difficulty_key, reverse=True)[:top_k]
 
 
+def row_difficulty_key(row: Dict[str, str]):
+    return (
+        parse_int(row, "agentNum"),
+        parse_float(row, "total_cost_true"),
+        parse_float(row, "runtime"),
+    )
+
+
+def select_successes_for_agent_counts(
+    rows: Iterable[Dict[str, str]],
+    agent_counts: List[int],
+    distinct_maps: bool,
+) -> List[Dict[str, str]]:
+    successful_rows = [row for row in rows if is_successful_grid_row(row)]
+    selected: List[Dict[str, str]] = []
+    used_maps = set()
+    missing_counts = []
+
+    for agent_count in agent_counts:
+        candidates = [
+            row
+            for row in successful_rows
+            if parse_int(row, "agentNum") == agent_count
+            and (not distinct_maps or row["mapName"] not in used_maps)
+        ]
+        if not candidates:
+            candidates = [
+                row
+                for row in successful_rows
+                if parse_int(row, "agentNum") >= agent_count
+                and (not distinct_maps or row["mapName"] not in used_maps)
+            ]
+        if not candidates:
+            missing_counts.append(agent_count)
+            continue
+        winner = dict(
+            sorted(
+                candidates,
+                key=lambda row: (
+                    -abs(parse_int(row, "agentNum") - agent_count),
+                    *row_difficulty_key(row),
+                ),
+                reverse=True,
+            )[0]
+        )
+        source_agent_count = parse_int(winner, "agentNum")
+        winner["sourceAgentNum"] = str(source_agent_count)
+        winner["agentNum"] = str(agent_count)
+        selected.append(winner)
+        used_maps.add(winner["mapName"])
+
+    if missing_counts:
+        raise SystemExit(
+            "Could not find successful grid-world rows for requested agent counts: "
+            + ", ".join(str(count) for count in missing_counts)
+        )
+    return selected
+
+
 def case_slug(row: Dict[str, str]) -> str:
     scen = Path(row["scenFile"]).stem
     return f"{row['mapName']}_{scen}_N{parse_int(row, 'agentNum')}_seed{parse_int(row, 'seed')}"
+
+
+def describe_selected_case(row: Dict[str, str]) -> str:
+    source_agents = row.get("sourceAgentNum")
+    requested_agents = parse_int(row, "agentNum")
+    source_text = ""
+    if source_agents and parse_int(row, "sourceAgentNum") != requested_agents:
+        source_text = f" from_successful_N{source_agents}"
+    return (
+        f"  {case_slug(row)}{source_text} "
+        f"cost={row.get('total_cost_true')} runtime={row.get('runtime')}s"
+    )
 
 
 def infer_bd_path(row: Dict[str, str], bd_dir: Path) -> Path:
@@ -190,6 +261,19 @@ def run_command(cmd: List[str], dry_run: bool) -> None:
     subprocess.run(cmd, cwd=REPO_ROOT, check=True)
 
 
+def verify_rerun_success(metrics_file: Path, agent_num: int) -> None:
+    rows = read_rows(metrics_file)
+    if not rows:
+        raise RuntimeError(f"No simulator metrics were written to {metrics_file}")
+    row = rows[-1]
+    if not parse_bool(row.get("success", "")) or parse_int(row, "num_agents_at_goal") < agent_num:
+        raise RuntimeError(
+            "Rerun did not solve the selected case, so no GIF was rendered: "
+            f"{metrics_file} success={row.get('success')} "
+            f"num_agents_at_goal={row.get('num_agents_at_goal')}/{agent_num}"
+        )
+
+
 def rerun_case(
     row: Dict[str, str],
     args: argparse.Namespace,
@@ -247,6 +331,8 @@ def rerun_case(
         f"--numLayers={args.num_layers}",
     ]
     run_command(cmd, dry_run=args.dry_run)
+    if not args.dry_run:
+        verify_rerun_success(metrics_file, parse_int(row, "agentNum"))
 
 
 def render_case(
@@ -289,6 +375,18 @@ def main() -> None:
     parser.add_argument("--eval-csv", required=True, help="Simulator-format CSV to mine for successful cases")
     parser.add_argument("--output-dir", default="visualizations/grid_successes")
     parser.add_argument("--top-k", type=int, default=3)
+    parser.add_argument(
+        "--agent-counts",
+        nargs="+",
+        type=int,
+        default=None,
+        help="Select exactly one successful case for each requested agent count, in this order.",
+    )
+    parser.add_argument(
+        "--distinct-maps",
+        action="store_true",
+        help="When used with --agent-counts, do not select the same map twice.",
+    )
     parser.add_argument("--min-agents", type=int, default=1)
     parser.add_argument("--max-agents", type=int, default=None)
     parser.add_argument("--map-npz", default="data/all_maps.npz")
@@ -323,7 +421,14 @@ def main() -> None:
     args = parser.parse_args()
 
     rows = read_rows(resolve_path(args.eval_csv))
-    selected = select_difficult_successes(rows, args.top_k, args.min_agents, args.max_agents)
+    if args.agent_counts:
+        selected = select_successes_for_agent_counts(
+            rows,
+            agent_counts=args.agent_counts,
+            distinct_maps=args.distinct_maps,
+        )
+    else:
+        selected = select_difficult_successes(rows, args.top_k, args.min_agents, args.max_agents)
     if not selected:
         raise SystemExit("No successful grid-world rows matched the requested filters.")
 
@@ -333,10 +438,7 @@ def main() -> None:
     metrics_dir = output_dir / "metrics"
     print(f"Selected {len(selected)} successful cases:", flush=True)
     for row in selected:
-        print(
-            f"  {case_slug(row)} cost={row.get('total_cost_true')} runtime={row.get('runtime')}s",
-            flush=True,
-        )
+        print(describe_selected_case(row), flush=True)
 
     for row in selected:
         slug = case_slug(row)
