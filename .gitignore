@@ -78,3 +78,6 @@ build/
 # Cluster job logs (SLURM default names; add patterns if your site uses others)
 slurm-*.out
 slurm-*.err
+scripts/README.md
+scripts/fix_checkpoint_keys.py
+analysis_scripts/compare_eval_csvs.py
