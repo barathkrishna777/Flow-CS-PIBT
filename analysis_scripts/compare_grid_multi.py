@@ -54,7 +54,10 @@ def _load_rows(path: str) -> list[dict[str, str]]:
     if not os.path.exists(path):
         raise SystemExit(f"Missing CSV: {path}")
     with open(path, newline="") as f:
-        return list(csv.DictReader(f))
+        rows = list(csv.DictReader(f))
+    if not rows:
+        raise SystemExit(f"CSV has no data rows: {path}")
+    return rows
 
 
 @dataclass(frozen=True)
@@ -180,6 +183,8 @@ def _plot(
     import matplotlib.pyplot as plt
 
     maps = sorted({row["mapName"] for rows in datasets for row in rows})
+    if not maps:
+        raise SystemExit("No maps found in input CSVs; check that the files contain eval rows.")
     grouped = [_group(rows, ("mapName", "agentNum")) for rows in datasets]
 
     fig, axes = plt.subplots(

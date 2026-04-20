@@ -30,6 +30,8 @@ the classifier baseline on the paper's held-out maps.
   figure comparing two simulator CSVs.
 - `generate_grid_visualizations.py`: mine successful rows from an eval CSV,
   rerun those cases with path logging, and render polished GIFs.
+- `demo_planner_gif.py`: run a self-contained CS-PIBT-style planner demo and
+  render a GIF without downloaded assets or a trained checkpoint.
 - `main_pys/visualize_path.py`: render a saved simulator path `.npy` as an
   animated grid-world GIF.
 - `generate_and_preprocess_continuous.py`, `main_pys/train_continuous.py`, and
@@ -55,6 +57,56 @@ For downloading the public Google Drive assets:
 
 ```sh
 python -m pip install gdown
+```
+
+## Presentation Demo GIF
+
+If you need a quick planner visualization without downloading the full map,
+scenario, BD, and checkpoint assets, run:
+
+```sh
+python demo_planner_gif.py
+```
+
+This uses the `Berlin_1_256.map` benchmark map automatically when it exists at
+`data/mapf-map/Berlin_1_256.map` and the random scenario at
+`data/mapf-scen-random/Berlin_1_256-random-1.scen`. By default, it solves the
+first 300 agents from that scenario with a PIBT-style collision shield using
+backward-Dijkstra preferences, opens a Matplotlib window showing the final
+paths, prints planner statistics such as agents-at-goal, runtime, arrival
+steps, path length, wait fraction, and collision counts, and writes an animated
+GIF of the agents moving:
+
+```text
+logs/planner_demo.gif
+logs/planner_demo_paths.npy
+logs/planner_demo.log
+```
+
+For the fastest presentation run, precompute the Berlin backward-Dijkstra cache
+once:
+
+```sh
+python demo_planner_gif.py --no-show --precompute-only
+```
+
+The default cache path is:
+
+```text
+data/demo-cache/Berlin_1_256-random-1_N300_bd_distances.npz
+```
+
+Useful variants:
+
+```sh
+python demo_planner_gif.py --no-show
+python demo_planner_gif.py --quiet
+python demo_planner_gif.py --progress-interval 100 --render-progress-interval 20
+python demo_planner_gif.py --rebuild-cache
+python demo_planner_gif.py --no-cache
+python demo_planner_gif.py --scenario crossing --agents 8 --output logs/crossing_demo.gif
+python demo_planner_gif.py --agents 12 --frame-stride 1 --duration-ms 70
+python demo_planner_gif.py --map-file data/mapf-map/Berlin_1_256.map --scen-file data/mapf-scen-random/Berlin_1_256-random-1.scen
 ```
 
 ## Download Standard Assets
