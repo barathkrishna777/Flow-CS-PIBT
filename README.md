@@ -26,6 +26,12 @@ the classifier baseline on the paper's held-out maps.
 - `eval_rishi_paper.py`: Rishi-paper held-out grid-world benchmark.
 - `analysis_scripts/summarize_grid_eval.py`: summarize simulator CSVs into
   readable tables.
+- `analysis_scripts/compare_grid_1v1.py`: generate a Markdown report and PNG
+  figure comparing two simulator CSVs.
+- `generate_grid_visualizations.py`: mine successful rows from an eval CSV,
+  rerun those cases with path logging, and render polished GIFs.
+- `main_pys/visualize_path.py`: render a saved simulator path `.npy` as an
+  animated grid-world GIF.
 - `generate_and_preprocess_continuous.py`, `main_pys/train_continuous.py`, and
   `eval_continuous.py`: separate continuous-space experiments.
 
@@ -526,16 +532,251 @@ PICBF_CS_PATH=/path/to/picbf-cs python eval_continuous.py \
 
 ## Visualization
 
-Visualize saved grid paths:
+There are three useful visualization paths:
+
+- turn one or more evaluation CSVs into text summaries;
+- compare two evaluation CSVs with a Markdown report and PNG figure;
+- render solved grid-world cases from a CSV into animated GIFs.
+
+The CSV-based tools expect simulator-format CSVs, such as files produced by
+`eval_full.py`, `eval_rishi_paper.py`, `main_pys.simulator`, or the checked-in
+examples under `evals/`. The most important columns are `mapName`, `scenFile`,
+`agentNum`, `success`, `num_agents_at_goal`, `runtime`, and a cost column such
+as `total_cost_true` or `total_cost_not_resting_at_goal`.
+
+### Visualization Setup
+
+Use the project conda environment first:
+
+```sh
+conda activate mlmapf
+```
+
+For GIF rendering and comparison figures, make sure these packages are
+available:
+
+```sh
+python -m pip install matplotlib pillow tqdm pandas
+```
+
+For animated grid visualizations, your friend also needs the same map/scenario
+assets used to make the CSV:
+
+```text
+data/all_maps.npz
+data/mapf-map/*.map
+data/scen-random/*.scen or data/mapf-scen-random/*.scen
+data/bd_npzs/large_scale/*_bds.npz or data/constant_npzs/*_bds.npz
+```
+
+If the CSV was produced on another machine, pass the local checkpoint with
+`--model-path` when generating GIFs.
+
+### Summarize Eval CSVs
+
+Print overall and per-map success tables:
+
+```sh
+python -m analysis_scripts.summarize_grid_eval \
+  evals/rishi_full_wave9_compact_best.csv \
+  evals/rishi_quick_wave9_best.csv \
+  --labels flow_full flow_quick
+```
+
+Compare older batch-style CSVs by average at-goal percentage:
+
+```sh
+python compare_results.py \
+  --csv evals/wave8_best_full_eval.csv evals/wave8_heldout_full_eval.csv
+```
+
+### Compare Two CSVs With A Figure
+
+Create a Markdown report plus a multi-panel PNG figure:
+
+```sh
+python -m analysis_scripts.compare_grid_1v1 \
+  evals/rishi_full_wave9_compact_best.csv \
+  evals/rishi_quick_wave9_best.csv \
+  --labels "Flow full" "Flow quick" \
+  --out-dir visualizations/grid_1v1
+```
+
+Outputs:
+
+```text
+visualizations/grid_1v1/flow_full_vs_flow_quick.md
+visualizations/grid_1v1/flow_full_vs_flow_quick.png
+```
+
+Useful option:
+
+```sh
+python -m analysis_scripts.compare_grid_1v1 \
+  evals/a.csv evals/b.csv \
+  --labels "Run A" "Run B" \
+  --cost-column total_cost_true
+```
+
+### Make Showcase GIFs From A CSV
+
+`generate_grid_visualizations.py` is the easiest way to make nice GIFs from
+existing CSV results. It selects successful rows from the CSV, reruns those
+cases while saving paths, then renders the paths as GIFs.
+
+Make three polished showcase GIFs at roughly 50, 200, and 1000 agents:
+
+```sh
+python generate_grid_visualizations.py \
+  --eval-csv evals/rishi_full_wave9_compact_best.csv \
+  --model-path large_scale_flow_my_flow_best.pt \
+  --output-dir visualizations/showcase \
+  --showcase \
+  --use-gpu true
+```
+
+Outputs are organized as:
+
+```text
+visualizations/showcase/paths/*.npy
+visualizations/showcase/metrics/*.csv
+visualizations/showcase/gifs/*.gif
+```
+
+Pick exact agent counts yourself:
+
+```sh
+python generate_grid_visualizations.py \
+  --eval-csv evals/rishi_full_wave9_compact_best.csv \
+  --model-path large_scale_flow_my_flow_best.pt \
+  --output-dir visualizations/custom \
+  --agent-counts 100 400 800 \
+  --distinct-maps \
+  --agent-count-selection fastest \
+  --map-preferences empty den random \
+  --soft-style \
+  --frame-stride 8 \
+  --trail-length 32 \
+  --figure-size 10 \
+  --dpi 180 \
+  --use-gpu true
+```
+
+Pick the hardest successful cases in a CSV:
+
+```sh
+python generate_grid_visualizations.py \
+  --eval-csv evals/rishi_full_wave9_compact_best.csv \
+  --model-path large_scale_flow_my_flow_best.pt \
+  --output-dir visualizations/hard_cases \
+  --top-k 5 \
+  --min-agents 400 \
+  --soft-style \
+  --use-gpu true
+```
+
+Preview what would run without launching simulator reruns:
+
+```sh
+python generate_grid_visualizations.py \
+  --eval-csv evals/rishi_full_wave9_compact_best.csv \
+  --model-path large_scale_flow_my_flow_best.pt \
+  --showcase \
+  --dry-run
+```
+
+Reuse already-generated `.npy` path files and only rerender GIFs:
+
+```sh
+python generate_grid_visualizations.py \
+  --eval-csv evals/rishi_full_wave9_compact_best.csv \
+  --model-path large_scale_flow_my_flow_best.pt \
+  --output-dir visualizations/showcase \
+  --showcase \
+  --reuse-paths
+```
+
+Common GIF style flags:
+
+```text
+--frame-stride N             render every Nth timestep; larger is faster/smaller
+--trail-length N             number of previous positions drawn behind agents
+--agent-size FLOAT           marker size for agents
+--goal-size FLOAT            marker size for goal stars
+--trail-width FLOAT          path trail width
+--figure-size FLOAT          Matplotlib figure size in inches
+--dpi INT                    output resolution
+--frame-duration-ms INT      GIF frame duration
+--end-frame-duration-ms INT  pause on the final frame
+--soft-style                 use the softer presentation palette
+```
+
+### Render One Saved Path File
+
+If you already have a saved simulator path file, render it directly:
 
 ```sh
 python -m main_pys.visualize_path \
   empty-48-48 \
-  logs/paths.npy \
-  --scenName=empty-48-48-random-1.scen
+  visualizations/showcase/paths/empty-48-48_empty-48-48-random-1_N100_seed0.npy \
+  --scenName=empty-48-48-random-1.scen \
+  --mapFolder=data/mapf-map \
+  --sceneFile=data/scen-random \
+  --outputGif=visualizations/empty48_N100.gif \
+  --softStyle \
+  --frameStride=6 \
+  --trailLength=30 \
+  --figureSize=9 \
+  --dpi=160
 ```
 
-Continuous evals can save trajectory plots directly with `--viz-dir`.
+To create a path file from one simulator run, include `--outputPathsFile`:
+
+```sh
+python -m main_pys.simulator \
+  --mapNpzFile=data/all_maps.npz \
+  --mapName=empty-48-48 \
+  --scenFile=data/scen-random/empty-48-48-random-1.scen \
+  --bdNpzFile=data/constant_npzs/empty-48-48_bds.npz \
+  --modelPath=large_scale_flow_my_flow_best.pt \
+  --outputCSVFile=evals/single_empty48.csv \
+  --outputPathsFile=logs/empty48_paths.npy \
+  --maxSteps=3x \
+  --seed=0 \
+  --useGPU=True \
+  --agentNum=100 \
+  --shieldType=CS-PIBT \
+  --policyType=flow
+```
+
+Then render:
+
+```sh
+python -m main_pys.visualize_path \
+  empty-48-48 \
+  logs/empty48_paths.npy \
+  --scenName=empty-48-48-random-1.scen \
+  --sceneFile=data/scen-random \
+  --outputGif=logs/empty48_paths.gif
+```
+
+### Continuous Trajectory Plots
+
+Continuous evals can save trajectory PNGs directly with `--viz-dir`:
+
+```sh
+python eval_continuous.py \
+  --map-dir data/mapf-map \
+  --scen-dir data/scen-random \
+  --maps empty-48-48 \
+  --agent-counts 100 \
+  --policy orca \
+  --output-csv evals/continuous_orca_viz.csv \
+  --viz-dir visualizations/continuous_orca
+```
+
+For learned policies, add `--model-path`, `--run-name`, and the policy-specific
+flow options exactly as in the continuous evaluation section above.
 
 ## Troubleshooting
 
@@ -591,8 +832,10 @@ Flow-CS-PIBT/
 │   ├── model.py
 │   └── model_inputs.py
 ├── analysis_scripts/
+│   ├── compare_grid_1v1.py
 │   └── summarize_grid_eval.py
 ├── generate_flow_data_multi.py
+├── generate_grid_visualizations.py
 ├── preprocess_dataset.py
 ├── train_full.py
 ├── eval_full.py
