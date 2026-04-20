@@ -92,6 +92,52 @@ raw data generator, create the expected alias:
 ln -s mapf-scen-random data/scen-random
 ```
 
+## EECBS (trajectory generation only)
+
+Expert trajectories in `generate_flow_data_multi.py` call an **EECBS** executable.
+This repository does not vendor EECBS; clone and build it next to the project
+layout below.
+
+Upstream solver (USC research license; see its `license.md`):
+
+[https://github.com/Jiaoyang-Li/EECBS](https://github.com/Jiaoyang-Li/EECBS)
+
+**1. Install Boost** (required by EECBS). Examples:
+
+```sh
+# Ubuntu / Debian
+sudo apt install libboost-all-dev
+
+# Conda (Linux, macOS, Windows)
+conda install -c anaconda libboost
+
+# macOS (Homebrew)
+brew install boost
+```
+
+**2. Clone and compile EECBS**, then install the binary where this repo expects it:
+
+```sh
+mkdir -p third_party build
+git clone https://github.com/Jiaoyang-Li/EECBS.git third_party/EECBS
+cd third_party/EECBS
+cmake -DCMAKE_BUILD_TYPE=RELEASE .
+make -j"$(nproc 2>/dev/null || echo 4)"
+cp eecbs ../../build/eecbs
+cd ../..
+```
+
+You should have `build/eecbs` at the repository root. To use a different path,
+set `EECBS_BIN` or pass `--eecbs-bin` to `generate_flow_data_multi.py` (see that
+script’s help).
+
+**3. Generate data** (after maps and scenarios are in place; see **Option B**
+under *Dataset Options*):
+
+```sh
+python generate_flow_data_multi.py
+```
+
 ## Dataset Options
 
 You can train from either raw trajectory `.npz` files or preprocessed `.pt`
@@ -127,11 +173,9 @@ python train_full.py \
 
 ### Option B: Generate Raw Grid-World Data Yourself
 
-First build or place the EECBS binary at:
-
-```text
-build/eecbs
-```
+Build EECBS and place the binary at `build/eecbs` (see **EECBS (trajectory
+generation only)** above), or point `generate_flow_data_multi.py` at your binary
+with `--eecbs-bin` / `EECBS_BIN`.
 
 Then make sure these directories exist:
 

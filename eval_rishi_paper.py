@@ -24,10 +24,12 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import csv
 import glob
 import os
 import subprocess
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 MAP_NPZ = "data/all_maps.npz"
 BD_DIR = "data/bd_npzs/large_scale"
@@ -68,6 +70,65 @@ MAP_PRESETS = {
 DEFAULT_AGENT_COUNTS = list(range(100, 1001, 100))
 
 
+def _load_completed_runs(csv_path: str) -> set[tuple[str, str, int]]:
+    """Keys (mapName, scenFile, agentNum) already in output — for --resume."""
+    done: set[tuple[str, str, int]] = set()
+    with open(csv_path, newline="") as f:
+        reader = csv.DictReader(f)
+        if reader.fieldnames is None:
+            return done
+        for row in reader:
+            try:
+                done.add(
+                    (row["mapName"], row["scenFile"], int(row["agentNum"]))
+                )
+            except (KeyError, ValueError):
+                continue
+    return done
+
+
+def _run_sim(job):
+    """Module-level so ProcessPoolExecutor can pickle it."""
+    (idx, map_name, scen_path, bd_path, n, cfg) = job
+    env = os.environ.copy()
+    ng = int(cfg.get("num_gpus", 1))
+    if ng > 1 and cfg.get("use_gpu") == "True":
+        env["CUDA_VISIBLE_DEVICES"] = str((idx - 1) % ng)
+    cmd = [
+        cfg["python"], "-m", "main_pys.simulator",
+        f"--mapNpzFile={cfg['map_npz']}",
+        f"--mapName={map_name}",
+        f"--scenFile={scen_path}",
+        f"--bdNpzFile={bd_path}",
+        f"--modelPath={cfg['model']}",
+        f"--outputCSVFile={cfg['output']}",
+        f"--maxSteps={cfg['max_steps_multiplier']}",
+        f"--seed={cfg['seed']}",
+        f"--useGPU={cfg['use_gpu']}",
+        f"--agentNum={n}",
+        "--shieldType=CS-PIBT",
+        f"--timeLimit={cfg['time_limit']}",
+        f"--numIntegrationSteps={cfg['num_integration_steps']}",
+        f"--tau={cfg['tau']}",
+        f"--waitThreshold={cfg['wait_thresh']}",
+        f"--numConsensusSamples={cfg['consensus']}",
+        f"--policyType={cfg['simulator_policy_type']}",
+        f"--useActionHead={cfg['use_action_head']}",
+        f"--hiddenDim={cfg['hidden_dim']}",
+        f"--numLayers={cfg['num_layers']}",
+    ]
+    try:
+        subprocess.run(
+            cmd,
+            check=False,
+            timeout=cfg["time_limit"] + 120,
+            env=env,
+        )
+        return idx, map_name, scen_path, n, "ok"
+    except Exception:
+        return idx, map_name, scen_path, n, "timeout"
+
+
 def _max_agents_in_scen(scen_path: str) -> int:
     with open(scen_path) as f:
         return max(0, len(f.readlines()) - 1)
@@ -105,6 +166,19 @@ def main():
                    help="Policy/model family to evaluate. flow_action_head loads a flow model and uses its action logits; local_classifier loads the repo's Rishi-like classifier.")
     p.add_argument("--hidden-dim", type=int, default=1024)
     p.add_argument("--num-layers", type=int, default=6)
+    p.add_argument("--parallel", type=int, default=1,
+                   help="Number of simulator subprocesses to run in parallel (default 1)")
+    p.add_argument(
+        "--num-gpus",
+        type=int,
+        default=int(os.environ.get("EVAL_NUM_GPUS", "1")),
+        help="Round-robin runs across N GPUs (sets CUDA_VISIBLE_DEVICES per subprocess). Default: EVAL_NUM_GPUS or 1.",
+    )
+    p.add_argument(
+        "--resume",
+        action="store_true",
+        help="If output CSV exists, skip runs already recorded and append new rows (for time-limit restarts).",
+    )
     args = p.parse_args()
 
     if not os.path.isfile(args.model):
@@ -160,7 +234,24 @@ def main():
     out_dir = os.path.dirname(os.path.abspath(args.output))
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
-    if os.path.isfile(args.output):
+
+    if args.resume and os.path.isfile(args.output):
+        done = _load_completed_runs(args.output)
+        before_n = len(runs)
+        runs = [
+            (mn, sp, bp, na)
+            for mn, sp, bp, na in runs
+            if (mn, sp, na) not in done
+        ]
+        print(
+            f"Resume: {before_n - len(runs)} runs already in {args.output}, "
+            f"{len(runs)} remaining.",
+            flush=True,
+        )
+        if not runs:
+            print("Nothing left to run.", flush=True)
+            sys.exit(0)
+    elif os.path.isfile(args.output):
         os.remove(args.output)
 
     total = len(runs)
@@ -180,36 +271,49 @@ def main():
     simulator_policy_type = "flow" if args.policy_type == "flow_action_head" else args.policy_type
     use_action_head = args.policy_type == "flow_action_head"
 
-    for i, (map_name, scen_path, bd_path, n) in enumerate(runs, 1):
-        scen_tag = os.path.basename(scen_path)
-        print(f"[{i}/{total}] {map_name} | {scen_tag} | {n} ag", flush=True)
-        cmd = [
-            sys.executable, "-m", "main_pys.simulator",
-            f"--mapNpzFile={MAP_NPZ}",
-            f"--mapName={map_name}",
-            f"--scenFile={scen_path}",
-            f"--bdNpzFile={bd_path}",
-            f"--modelPath={args.model}",
-            f"--outputCSVFile={args.output}",
-            f"--maxSteps={args.max_steps_multiplier}",
-            f"--seed={args.seed}",
-            f"--useGPU={'True' if use_gpu else 'False'}",
-            f"--agentNum={n}",
-            "--shieldType=CS-PIBT",
-            f"--timeLimit={args.time_limit}",
-            f"--numIntegrationSteps={args.num_integration_steps}",
-            f"--tau={args.tau}",
-            f"--waitThreshold={args.wait_thresh}",
-            f"--numConsensusSamples={args.consensus}",
-            f"--policyType={simulator_policy_type}",
-            f"--useActionHead={'True' if use_action_head else 'False'}",
-            f"--hiddenDim={args.hidden_dim}",
-            f"--numLayers={args.num_layers}",
-        ]
-        try:
-            subprocess.run(cmd, check=False, timeout=args.time_limit + 120)
-        except subprocess.TimeoutExpired:
-            print(f"  -> subprocess timeout")
+    num_gpus = max(1, int(args.num_gpus))
+    cfg = {
+        "python": sys.executable,
+        "map_npz": MAP_NPZ,
+        "model": args.model,
+        "output": args.output,
+        "max_steps_multiplier": args.max_steps_multiplier,
+        "seed": args.seed,
+        "use_gpu": "True" if use_gpu else "False",
+        "time_limit": args.time_limit,
+        "num_integration_steps": args.num_integration_steps,
+        "tau": args.tau,
+        "wait_thresh": args.wait_thresh,
+        "consensus": args.consensus,
+        "simulator_policy_type": simulator_policy_type,
+        "use_action_head": "True" if use_action_head else "False",
+        "hidden_dim": args.hidden_dim,
+        "num_layers": args.num_layers,
+        "num_gpus": num_gpus,
+    }
+
+    jobs = [(i, map_name, scen_path, bd_path, n, cfg)
+            for i, (map_name, scen_path, bd_path, n) in enumerate(runs, 1)]
+
+    completed = 0
+    if args.parallel <= 1:
+        for job in jobs:
+            idx, map_name, scen_path, bd_path, n, _ = job
+            print(f"[{idx}/{total}] {map_name} | {os.path.basename(scen_path)} | {n} ag", flush=True)
+            _, _, _, _, status = _run_sim(job)
+            if status == "timeout":
+                print(f"  -> subprocess timeout")
+            completed += 1
+    else:
+        print(f"Running with --parallel {args.parallel}", flush=True)
+        with ProcessPoolExecutor(max_workers=args.parallel) as pool:
+            futures = [pool.submit(_run_sim, job) for job in jobs]
+            for fut in as_completed(futures):
+                idx, map_name, scen_path, n, status = fut.result()
+                completed += 1
+                scen_tag = os.path.basename(scen_path)
+                suffix = " [timeout]" if status == "timeout" else ""
+                print(f"[{completed}/{total}] {map_name} | {scen_tag} | {n} ag{suffix}", flush=True)
 
     print(f"\nDone. Results appended to {args.output}")
     print("Tip: aggregate success with analysis_scripts/ or pandas:")

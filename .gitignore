@@ -29,7 +29,52 @@ test.ipynb
 CHAT_EXPORT*.md
 example_*.png
 
-# CMake build products inside vendored EECBS (keep CMakeLists + sources)
+# EECBS is cloned locally (see README); not part of this repository
+third_party/EECBS/
+
+# CMake build products under third_party (e.g. other vendored tools)
 third_party/**/CMakeCache.txt
 third_party/**/CMakeFiles/
 third_party/**/cmake_install.cmake
+
+# Evaluation CSV outputs (regenerate from eval scripts / sbatch)
+evals/*.csv
+
+# Runtime path dumps from simulator / visualize_path
+*.npy
+
+# Other common checkpoint formats
+*.ckpt
+*.safetensors
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Test / coverage / linters
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Python packaging
+dist/
+build/
+*.egg-info/
+
+# Profiling
+*.prof
+
+# IDE (local only; remove these lines if you want shared editor settings in git)
+.vscode/
+.idea/
+
+# Cluster job logs (SLURM default names; add patterns if your site uses others)
+slurm-*.out
+slurm-*.err

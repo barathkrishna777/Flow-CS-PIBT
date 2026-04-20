@@ -1,3 +1,4 @@
+import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -12,6 +13,29 @@ import argparse
 from main_pys.dataset import FlowMAPFDataset
 from main_pys.dataset_preprocessed import PreprocessedFlowMAPFDataset, build_weighted_sampler
 from main_pys.generative_model import FlowGNNModel
+
+
+def _clean_state_dict(state_dict):
+    """Strip _orig_mod. prefix added by torch.compile so checkpoints are portable."""
+    cleaned = {}
+    for k, v in state_dict.items():
+        new_k = k.replace("_orig_mod.", "", 1) if k.startswith("_orig_mod.") else k
+        cleaned[new_k] = v
+    return cleaned
+
+
+def _default_num_workers(device):
+    """Match dataloader workers to available CPUs (SLURM-aware; avoids 12 workers on 5 CPUs)."""
+    env_w = os.environ.get("FLOW_NUM_WORKERS")
+    if env_w is not None and env_w.isdigit():
+        return max(0, int(env_w))
+    slurm = os.environ.get("SLURM_CPUS_PER_TASK")
+    if slurm and slurm.isdigit():
+        # Reserve one CPU for the training process
+        return max(0, int(slurm) - 1)
+    if device.type == "cuda":
+        return min(12, max(1, (os.cpu_count() or 2) - 1))
+    return min(4, os.cpu_count() or 2)
 
 PREPROCESSED_DIRS = [
     "/media/anushree_mattlab/Seagate Por/preprocessed_data",  # external drive (primary)
@@ -47,6 +71,7 @@ def compute_flow_loss(
     action_loss_weight=0.3,
     unweighted_action_loss=False,
     unweighted_flow_loss=False,
+    return_components=False,
 ):
     """Shared flow matching loss computation for train and val, with optional auxiliary action loss."""
     batch = batch.to(device)
@@ -85,6 +110,8 @@ def compute_flow_loss(
 
         loss = flow_loss + action_loss_weight * action_loss
 
+    if return_components:
+        return loss, flow_loss.detach(), action_loss.detach()
     return loss
 
 
@@ -97,13 +124,15 @@ def validate(
     unweighted_action_loss,
     unweighted_flow_loss,
 ):
-    """Run validation and return average loss."""
+    """Run validation and return (avg_total, avg_flow, avg_action) — all scalars."""
     model.eval()
     total_loss = 0.0
+    total_flow = 0.0
+    total_action = 0.0
     num_batches = 0
     with torch.no_grad():
         for batch in val_loader:
-            loss = compute_flow_loss(
+            loss, flow_l, act_l = compute_flow_loss(
                 model,
                 batch,
                 device,
@@ -111,19 +140,26 @@ def validate(
                 action_loss_weight=action_loss_weight,
                 unweighted_action_loss=unweighted_action_loss,
                 unweighted_flow_loss=unweighted_flow_loss,
+                return_components=True,
             )
             total_loss += loss.item()
+            total_flow += float(flow_l.item())
+            total_action += float(act_l.item())
             num_batches += 1
-    return total_loss / max(num_batches, 1)
+    n = max(num_batches, 1)
+    return total_loss / n, total_flow / n, total_action / n
 
 
 def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", wandb_entity=None,
           preprocessed_dir=None, no_weighted_sampling=False, val_split=0.05, patience=0,
           resume=None, start_epoch=0, hidden_dim=1024, num_layers=6,
           action_loss_weight=0.3, unweighted_action_loss=False,
-          unweighted_flow_loss=False, epochs=10):
+          unweighted_flow_loss=False, epochs=10,
+          batch_size=None, num_workers=None, val_every=1):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_amp = device.type == "cuda"
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
     print(f"Device: {device} | AMP: {use_amp}")
 
     # Find preprocessed data: CLI override > external drive > local
@@ -137,7 +173,7 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
     if pp_dir:
         dirs = [d.strip() for d in pp_dir.split(",")] if "," in pp_dir else [pp_dir]
         print(f"Using PREPROCESSED dataset from {' + '.join(dirs)}")
-        full_dataset = PreprocessedFlowMAPFDataset(pp_dir)
+        full_dataset = PreprocessedFlowMAPFDataset(pp_dir, validate=False)
     else:
         print(f"No preprocessed data found — using on-the-fly dataset (slow)")
         full_dataset = FlowMAPFDataset(data_dir="data/flow_training_data_multi",
@@ -158,9 +194,10 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
         train_dataset = full_dataset
         val_dataset = None
 
-    # GPU: more workers + bigger batches to keep GPU saturated; CPU: stay conservative
-    cpu_cores = min(12, os.cpu_count() or 2) if device.type == "cuda" else min(4, os.cpu_count() or 2)
-    batch_size = 256 if device.type == "cuda" else 32
+    cpu_cores = num_workers if num_workers is not None else _default_num_workers(device)
+    if batch_size is None:
+        batch_size = 512 if device.type == "cuda" else 32
+    val_every = max(1, int(val_every))
 
     # ── Weighted sampling (upsamples high-agent-count scenarios) ──
     sampler = None
@@ -178,30 +215,36 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
                 replacement=True
             )
 
-    train_loader = DataLoader(
-        train_dataset,
+    _train_kw = dict(
         batch_size=batch_size,
-        shuffle=(sampler is None),  # Don't shuffle when using sampler
+        shuffle=(sampler is None),
         sampler=sampler,
         num_workers=cpu_cores,
         pin_memory=(device.type == "cuda"),
-        prefetch_factor=2,
-        persistent_workers=True
     )
+    if cpu_cores > 0:
+        _train_kw["prefetch_factor"] = 2
+        _train_kw["persistent_workers"] = True
+    train_loader = DataLoader(train_dataset, **_train_kw)
 
     val_loader = None
     if val_dataset is not None:
-        val_loader = DataLoader(
-            val_dataset,
+        val_w = min(4, cpu_cores) if cpu_cores > 0 else 0
+        _val_kw = dict(
             batch_size=batch_size,
             shuffle=False,
-            num_workers=min(4, cpu_cores),
+            num_workers=val_w,
             pin_memory=(device.type == "cuda"),
-            prefetch_factor=2,
-            persistent_workers=True
         )
+        if val_w > 0:
+            _val_kw["prefetch_factor"] = 2
+            _val_kw["persistent_workers"] = True
+        val_loader = DataLoader(val_dataset, **_val_kw)
 
     model = FlowGNNModel(hidden_dim=hidden_dim, num_layers=num_layers).to(device)
+    if torch.cuda.device_count() > 1:
+        print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
+        model = torch.nn.DataParallel(model)
     optimizer = AdamW(model.parameters(), lr=1e-4, weight_decay=1e-4)
 
     epochs = 1 if quick else epochs
@@ -211,31 +254,28 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
     # Mixed precision: ~2x throughput on A100 Tensor Cores
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
-    # Resume from checkpoint
+    # Resume from checkpoint (must happen BEFORE torch.compile)
     if resume and os.path.exists(resume):
-        print(f"Resuming from checkpoint: {resume}")
+        print(f"Loading checkpoint for fine-tuning: {resume}")
         ckpt = torch.load(resume, map_location=device)
         if isinstance(ckpt, dict) and 'model_state_dict' in ckpt:
-            # Full checkpoint (model + optimizer + scheduler + metadata)
+            # Full checkpoint — load model weights only, reset training state for fine-tuning
             model.load_state_dict(ckpt['model_state_dict'])
-            optimizer.load_state_dict(ckpt['optimizer_state_dict'])
-            scheduler.load_state_dict(ckpt['scheduler_state_dict'])
-            if ckpt.get('scaler_state_dict'):
-                scaler.load_state_dict(ckpt['scaler_state_dict'])
-            start_epoch = ckpt['epoch']  # epoch is already 1-indexed, use as start
-            best_val_loss = ckpt.get('best_val_loss', float('inf'))
-            print(f"  Restored full state: resuming from epoch {start_epoch + 1}, best_val={best_val_loss:.4f}")
+            print(f"  Loaded model weights (fine-tune mode: resetting epoch/optimizer/scheduler)")
         else:
             # Legacy checkpoint (model weights only)
             model.load_state_dict(ckpt)
-            print(f"  Loaded model weights only (legacy checkpoint). Fast-forwarding scheduler {start_epoch} steps.")
-            for _ in range(start_epoch):
-                scheduler.step()
+            print(f"  Loaded model weights (legacy checkpoint).")
+
+    # torch.compile AFTER checkpoint load — compile wraps keys with _orig_mod. prefix
+    if device.type == "cuda" and hasattr(torch, "compile"):
+        print("Compiling model with torch.compile...")
+        model = torch.compile(model)
 
     # WandB setup
     if use_wandb:
         import wandb
-        wandb_kwargs = {"project": wandb_project, "config": {}}
+        wandb_kwargs = {"project": wandb_project, "name": run_name, "config": {}}
         if wandb_entity:
             wandb_kwargs["entity"] = wandb_entity
         wandb.init(**wandb_kwargs)
@@ -260,10 +300,28 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
             "action_loss_weight": action_loss_weight,
             "unweighted_action_loss": unweighted_action_loss,
             "unweighted_flow_loss": unweighted_flow_loss,
+            "val_every": val_every,
         })
+        # Charts: batch metrics vs global_step; epoch metrics vs epoch index
+        wandb.define_metric("global_step")
+        for _m in (
+            "train/batch_loss", "train/batch_flow_loss", "train/batch_action_loss", "train/lr",
+        ):
+            wandb.define_metric(_m, step_metric="global_step")
+        wandb.define_metric("epoch")
+        for _m in (
+            "train/loss", "train/flow_loss", "train/action_loss",
+            "val/loss", "val/flow_loss", "val/action_loss", "val/best_val_loss",
+            "train/grad_norm_mean", "train/grad_norm_max",
+            "train/epoch_time_sec", "train/batches_per_sec", "train/samples_per_sec",
+            "optim/lr", "early_stopping/epochs_without_improvement",
+        ):
+            wandb.define_metric(_m, step_metric="epoch")
 
     log_batch_every = 10
     print(f"Batch size: {batch_size} | Workers: {cpu_cores} | Epochs: {epochs}")
+    if val_loader is not None and val_every > 1:
+        print(f"Validation: every {val_every} epoch(s) (faster; early stopping uses validated epochs only)")
     print(f"Weighted sampling: {'ON' if sampler else 'OFF'}")
     print(
         "Loss weighting: "
@@ -284,13 +342,16 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
         # ── Training ──
         model.train()
         total_loss = 0.0
+        total_flow = 0.0
+        total_action = 0.0
         num_batches = 0
         epoch_grad_norms = []
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}")
+        epoch_t0 = time.perf_counter()
 
         for batch_idx, batch in enumerate(pbar):
-            loss = compute_flow_loss(
+            loss, flow_b, act_b = compute_flow_loss(
                 model,
                 batch,
                 device,
@@ -298,7 +359,10 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
                 action_loss_weight=action_loss_weight,
                 unweighted_action_loss=unweighted_action_loss,
                 unweighted_flow_loss=unweighted_flow_loss,
+                return_components=True,
             )
+            total_flow += float(flow_b.item())
+            total_action += float(act_b.item())
 
             optimizer.zero_grad()
             scaler.scale(loss).backward()
@@ -326,17 +390,31 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
             if use_wandb and (batch_idx + 1) % log_batch_every == 0:
                 import wandb
                 global_step = epoch * len(train_loader) + batch_idx + 1
-                wandb.log({"train/batch_loss": loss.item()}, step=global_step)
+                wandb.log({
+                    "global_step": global_step,
+                    "train/batch_loss": loss.item(),
+                    "train/batch_flow_loss": float(flow_b.item()),
+                    "train/batch_action_loss": float(act_b.item()),
+                    "train/lr": optimizer.param_groups[0]["lr"],
+                })
 
         scheduler.step()
         avg_train_loss = total_loss / max(num_batches, 1)
+        avg_train_flow = total_flow / max(num_batches, 1)
+        avg_train_action = total_action / max(num_batches, 1)
         current_lr = optimizer.param_groups[0]['lr']
         avg_grad_norm = sum(epoch_grad_norms) / len(epoch_grad_norms) if epoch_grad_norms else 0.0
+        max_grad_norm = max(epoch_grad_norms) if epoch_grad_norms else 0.0
+        epoch_wall_s = time.perf_counter() - epoch_t0
+        train_samples = num_batches * batch_size  # approximate graphs per epoch
 
-        # ── Validation ──
+        # ── Validation (optional subsampling via val_every to save time) ──
         val_loss = None
-        if val_loader is not None:
-            val_loss = validate(
+        val_flow = None
+        val_action = None
+        do_val = val_loader is not None and (epoch % val_every == 0)
+        if do_val:
+            val_loss, val_flow, val_action = validate(
                 model,
                 val_loader,
                 device,
@@ -354,7 +432,7 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
                 best_path = f"{prefix}best.pt"
                 torch.save({
                     'epoch': epoch + 1,
-                    'model_state_dict': model.state_dict(),
+                    'model_state_dict': _clean_state_dict(model.state_dict()),
                     'optimizer_state_dict': optimizer.state_dict(),
                     'scheduler_state_dict': scheduler.state_dict(),
                     'scaler_state_dict': scaler.state_dict(),
@@ -366,6 +444,8 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
             else:
                 epochs_without_improvement += 1
                 val_str += f" (no improvement for {epochs_without_improvement} epochs)"
+        elif val_loader is not None:
+            val_str = f" | Val: skipped (val_every={val_every})"
         else:
             val_str = ""
 
@@ -375,7 +455,7 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
         ckpt_path = f"{prefix}epoch_{epoch+1}.pt"
         torch.save({
             'epoch': epoch + 1,
-            'model_state_dict': model.state_dict(),
+            'model_state_dict': _clean_state_dict(model.state_dict()),
             'optimizer_state_dict': optimizer.state_dict(),
             'scheduler_state_dict': scheduler.state_dict(),
             'scaler_state_dict': scaler.state_dict(),
@@ -384,21 +464,28 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
             'best_val_loss': best_val_loss,
         }, ckpt_path)
 
-        # Per-epoch wandb logging
+        # Per-epoch wandb logging (x-axis = epoch via wandb.define_metric)
         if use_wandb:
             import wandb
-            epoch_step = (epoch + 1) * len(train_loader)
             log_dict = {
-                "epoch/train_loss": avg_train_loss,
-                "epoch/lr": current_lr,
-                "epoch/grad_norm_mean": avg_grad_norm,
                 "epoch": epoch + 1,
+                "train/loss": avg_train_loss,
+                "train/flow_loss": avg_train_flow,
+                "train/action_loss": avg_train_action,
+                "train/grad_norm_mean": avg_grad_norm,
+                "train/grad_norm_max": max_grad_norm,
+                "train/epoch_time_sec": epoch_wall_s,
+                "train/batches_per_sec": num_batches / max(epoch_wall_s, 1e-6),
+                "train/samples_per_sec": train_samples / max(epoch_wall_s, 1e-6),
+                "optim/lr": current_lr,
             }
             if val_loss is not None:
-                log_dict["epoch/val_loss"] = val_loss
-                log_dict["epoch/best_val_loss"] = best_val_loss
-            wandb.log(log_dict, step=epoch_step)
-            wandb.save(ckpt_path, base_path=".")
+                log_dict["val/loss"] = val_loss
+                log_dict["val/flow_loss"] = val_flow
+                log_dict["val/action_loss"] = val_action
+                log_dict["val/best_val_loss"] = best_val_loss
+                log_dict["early_stopping/epochs_without_improvement"] = epochs_without_improvement
+            wandb.log(log_dict)
 
         # Early stopping
         if patience > 0 and epochs_without_improvement >= patience:
@@ -409,8 +496,12 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
     if use_wandb:
         import wandb
         wandb.run.summary["final_train_loss"] = avg_train_loss
+        wandb.run.summary["final_train_flow"] = avg_train_flow
+        wandb.run.summary["final_train_action"] = avg_train_action
         if val_loss is not None:
             wandb.run.summary["final_val_loss"] = val_loss
+            wandb.run.summary["final_val_flow"] = val_flow
+            wandb.run.summary["final_val_action"] = val_action
             wandb.run.summary["best_val_loss"] = best_val_loss
         wandb.run.summary["total_epochs"] = epoch + 1
         wandb.run.summary["final_checkpoint"] = ckpt_path
@@ -456,6 +547,12 @@ if __name__ == "__main__":
                         help="Do not apply node_weights to the flow MSE loss")
     parser.add_argument("--epochs", type=int, default=10,
                         help="Number of training epochs; --quick still forces 1 epoch")
+    parser.add_argument("--batch-size", type=int, default=None,
+                        help="Override batch size (default: 512 cuda / 32 cpu)")
+    parser.add_argument("--num-workers", type=int, default=None,
+                        help="DataLoader workers (default: SLURM_CPUS_PER_TASK-1 or auto)")
+    parser.add_argument("--val-every", type=int, default=1,
+                        help="Run validation every N epochs (1=every epoch; 2 saves ~half val time)")
     args = parser.parse_args()
     train(run_name=args.run_name, quick=args.quick, use_wandb=not args.no_wandb,
           wandb_project=args.wandb_project, wandb_entity=args.wandb_entity,
@@ -467,4 +564,5 @@ if __name__ == "__main__":
           action_loss_weight=args.action_loss_weight,
           unweighted_action_loss=args.unweighted_action_loss,
           unweighted_flow_loss=args.unweighted_flow_loss,
-          epochs=args.epochs)
+          epochs=args.epochs,
+          batch_size=args.batch_size, num_workers=args.num_workers, val_every=args.val_every)
