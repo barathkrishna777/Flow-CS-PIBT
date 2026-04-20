@@ -1,0 +1,4 @@
+Panel,Run,Baseline,Success delta,Mean agents at goal delta,Avg runtime delta,Avg cost / agent delta
+8 heldout maps,"Ours, trained off heldout",Rishi classifier,-6.7 pp,-5.3 pp,+13.72s,+84.0
+8 heldout maps,"Parth, trained on all data",Rishi classifier,-4.2 pp,-3.0 pp,+13.84s,+54.6
+12-map panel,"Ours, trained off heldout",Rishi classifier,-7.7 pp,-6.0 pp,+14.11s,+70.1

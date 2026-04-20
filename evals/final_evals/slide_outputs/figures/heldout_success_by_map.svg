@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="640" viewBox="0 0 980 640">
+<rect width="980" height="640" fill="#FBFCFE"/>
+<text x="42.0" y="48.0" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="800" fill="#1F2933" text-anchor="start">Heldout Success by Map</text>
+<text x="42.0" y="78.0" font-family="Inter, Arial, sans-serif" font-size="15" font-weight="500" fill="#65727F" text-anchor="start">All-agent success rate by map; missing runs are omitted from this eval panel.</text>
+<line x1="78" x2="938" y1="510.0" y2="510.0" stroke="#D7DEE8" stroke-width="1"/>
+<text x="66.0" y="515.0" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="500" fill="#65727F" text-anchor="end">0</text>
+<line x1="78" x2="938" y1="411.2" y2="411.2" stroke="#D7DEE8" stroke-width="1"/>
+<text x="66.0" y="416.2" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="500" fill="#65727F" text-anchor="end">25</text>
+<line x1="78" x2="938" y1="312.5" y2="312.5" stroke="#D7DEE8" stroke-width="1"/>
+<text x="66.0" y="317.5" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="500" fill="#65727F" text-anchor="end">50</text>
+<line x1="78" x2="938" y1="213.8" y2="213.8" stroke="#D7DEE8" stroke-width="1"/>
+<text x="66.0" y="218.8" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="500" fill="#65727F" text-anchor="end">75</text>
+<line x1="78" x2="938" y1="115.0" y2="115.0" stroke="#D7DEE8" stroke-width="1"/>
+<text x="66.0" y="120.0" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="500" fill="#65727F" text-anchor="end">100</text>
+<text x="18.0" y="312.5" font-family="Inter, Arial, sans-serif" font-size="14" font-weight="500" fill="#65727F" text-anchor="middle" transform="rotate(-90 18.0 312.5)">Success rate</text>
+<rect x="90.4" y="115.0" width="22.9" height="395.0" rx="5" fill="#2D7DD2"/>
+<text x="101.8" y="107.0" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="650" fill="#1F2933" text-anchor="middle">100%</text>
+<rect x="120.3" y="115.0" width="22.9" height="395.0" rx="5" fill="#E76F51"/>
+<text x="131.8" y="107.0" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="650" fill="#1F2933" text-anchor="middle">100%</text>
+<rect x="150.2" y="115.0" width="22.9" height="395.0" rx="5" fill="#2A9D8F"/>
+<text x="161.7" y="107.0" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="650" fill="#1F2933" text-anchor="middle">100%</text>
+<text x="131.8" y="533.0" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="500" fill="#65727F" text-anchor="end" transform="rotate(-36 131.8 533.0)">Paris_1_256</text>
+<rect x="197.9" y="383.6" width="22.9" height="126.4" rx="5" fill="#2D7DD2"/>
+<text x="209.3" y="375.6" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="650" fill="#1F2933" text-anchor="middle">32%</text>
+<rect x="227.8" y="386.8" width="22.9" height="123.2" rx="5" fill="#E76F51"/>
+<text x="239.2" y="378.8" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="650" fill="#1F2933" text-anchor="middle">31%</text>
+<rect x="257.7" y="380.4" width="22.9" height="129.6" rx="5" fill="#2A9D8F"/>
+<text x="269.2" y="372.4" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="650" fill="#1F2933" text-anchor="middle">33%</text>
+<text x="239.2" y="533.0" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="500" fill="#65727F" text-anchor="end" transform="rotate(-36 239.2 533.0)">den312d</text>
+<rect x="305.4" y="116.6" width="22.9" height="393.4" rx="5" fill="#2D7DD2"/>
+<text x="316.8" y="108.6" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="650" fill="#1F2933" text-anchor="middle">100%</text>
+<rect x="335.3" y="116.6" width="22.9" height="393.4" rx="5" fill="#E76F51"/>
+<text x="346.7" y="108.6" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="650" fill="#1F2933" text-anchor="middle">100%</text>
+<rect x="365.2" y="129.2" width="22.9" height="380.8" rx="5" fill="#2A9D8F"/>
+<text x="376.7" y="121.2" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="650" fill="#1F2933" text-anchor="middle">96%</text>
+<text x="346.8" y="533.0" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="500" fill="#65727F" text-anchor="end" transform="rotate(-36 346.8 533.0)">den520d</text>
+<rect x="412.9" y="115.0" width="22.9" height="395.0" rx="5" fill="#2D7DD2"/>
+<text x="424.3" y="107.0" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="650" fill="#1F2933" text-anchor="middle">100%</text>
+<rect x="442.8" y="145.0" width="22.9" height="365.0" rx="5" fill="#E76F51"/>
+<text x="454.2" y="137.0" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="650" fill="#1F2933" text-anchor="middle">92%</text>
+<rect x="472.7" y="127.6" width="22.9" height="382.4" rx="5" fill="#2A9D8F"/>
+<text x="484.2" y="119.6" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="650" fill="#1F2933" text-anchor="middle">97%</text>
+<text x="454.2" y="533.0" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="500" fill="#65727F" text-anchor="end" transform="rotate(-36 454.2 533.0)">empty-48-48</text>
+<rect x="520.4" y="352.0" width="22.9" height="158.0" rx="5" fill="#2D7DD2"/>
+<text x="531.8" y="344.0" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="650" fill="#1F2933" text-anchor="middle">40%</text>
+<rect x="550.3" y="408.9" width="22.9" height="101.1" rx="5" fill="#E76F51"/>
+<text x="561.8" y="400.9" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="650" fill="#1F2933" text-anchor="middle">26%</text>
+<rect x="580.2" y="393.1" width="22.9" height="116.9" rx="5" fill="#2A9D8F"/>
+<text x="591.7" y="385.1" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="650" fill="#1F2933" text-anchor="middle">30%</text>
+<text x="561.8" y="533.0" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="500" fill="#65727F" text-anchor="end" transform="rotate(-36 561.8 533.0)">maze-128-128-2</text>
+<rect x="627.9" y="190.1" width="22.9" height="319.9" rx="5" fill="#2D7DD2"/>
+<text x="639.3" y="182.1" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="650" fill="#1F2933" text-anchor="middle">81%</text>
+<rect x="657.8" y="288.8" width="22.9" height="221.2" rx="5" fill="#E76F51"/>
+<text x="669.2" y="280.8" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="650" fill="#1F2933" text-anchor="middle">56%</text>
+<rect x="687.7" y="225.6" width="22.9" height="284.4" rx="5" fill="#2A9D8F"/>
+<text x="699.2" y="217.6" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="650" fill="#1F2933" text-anchor="middle">72%</text>
+<text x="669.2" y="533.0" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="500" fill="#65727F" text-anchor="end" transform="rotate(-36 669.2 533.0)">rand-32-32-10</text>
+<rect x="735.4" y="173.5" width="22.9" height="336.5" rx="5" fill="#2D7DD2"/>
+<text x="746.8" y="165.5" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="650" fill="#1F2933" text-anchor="middle">85%</text>
+<rect x="765.3" y="247.7" width="22.9" height="262.3" rx="5" fill="#E76F51"/>
+<text x="776.8" y="239.7" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="650" fill="#1F2933" text-anchor="middle">66%</text>
+<rect x="795.2" y="222.4" width="22.9" height="287.6" rx="5" fill="#2A9D8F"/>
+<text x="806.7" y="214.4" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="650" fill="#1F2933" text-anchor="middle">73%</text>
+<text x="776.8" y="533.0" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="500" fill="#65727F" text-anchor="end" transform="rotate(-36 776.8 533.0)">rand-64-64-10</text>
+<rect x="842.9" y="500.5" width="22.9" height="9.5" rx="5" fill="#2D7DD2"/>
+<text x="854.3" y="492.5" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="650" fill="#1F2933" text-anchor="middle">2%</text>
+<rect x="872.8" y="492.6" width="22.9" height="17.4" rx="5" fill="#E76F51"/>
+<text x="884.2" y="484.6" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="650" fill="#1F2933" text-anchor="middle">4%</text>
+<rect x="902.7" y="495.8" width="22.9" height="14.2" rx="5" fill="#2A9D8F"/>
+<text x="914.2" y="487.8" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="650" fill="#1F2933" text-anchor="middle">4%</text>
+<text x="884.2" y="533.0" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="500" fill="#65727F" text-anchor="end" transform="rotate(-36 884.2 533.0)">wh-10-20-10-2-1</text>
+<rect x="78.0" y="594.0" width="16" height="16" rx="4" fill="#2D7DD2"/>
+<text x="102.0" y="607.0" font-family="Inter, Arial, sans-serif" font-size="15" font-weight="500" fill="#65727F" text-anchor="start">Rishi</text>
+<rect x="218.0" y="594.0" width="16" height="16" rx="4" fill="#E76F51"/>
+<text x="242.0" y="607.0" font-family="Inter, Arial, sans-serif" font-size="15" font-weight="500" fill="#65727F" text-anchor="start">Ours</text>
+<rect x="354.0" y="594.0" width="16" height="16" rx="4" fill="#2A9D8F"/>
+<text x="378.0" y="607.0" font-family="Inter, Arial, sans-serif" font-size="15" font-weight="500" fill="#65727F" text-anchor="start">Parth</text>
+</svg>
