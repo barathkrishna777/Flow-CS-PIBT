@@ -121,7 +121,7 @@ Recommendation:
 
 Added compact sharded preprocessing support:
 
-- `preprocess_continuous_shards.py`
+- `scripts/preprocess_continuous_shards.py`
 - `main_pys/dataset_continuous_preprocessed.py`
 - Updated `main_pys/train_continuous.py`
 
@@ -152,7 +152,7 @@ Branch:
 User ran:
 
 ```bash
-python preprocess_continuous_shards.py \
+python -m scripts.preprocess_continuous_shards \
     --data-dir data/continuous_eecbs/raw \
     --map-dir data/mapf-map \
     --out data/continuous_eecbs/preprocessed_shards \
@@ -171,13 +171,13 @@ OSError: [Errno 24] Too many open files
 Fix applied:
 
 - Set PyTorch multiprocessing sharing strategy to `"file_system"` in:
-  - `preprocess_continuous_shards.py`
+  - `scripts/preprocess_continuous_shards.py`
   - `main_pys/train_continuous.py`
 
 After pulling the fix, user reran preprocessing with fewer workers:
 
 ```bash
-python preprocess_continuous_shards.py \
+python -m scripts.preprocess_continuous_shards \
     --data-dir data/continuous_eecbs/raw \
     --map-dir data/mapf-map \
     --out data/continuous_eecbs/preprocessed_shards \
@@ -266,7 +266,7 @@ Suggested command:
 ```bash
 rm -rf data/continuous_eecbs/preprocessed_shards_256
 
-python preprocess_continuous_shards.py \
+python -m scripts.preprocess_continuous_shards \
     --data-dir data/continuous_eecbs/raw \
     --map-dir data/mapf-map \
     --out data/continuous_eecbs/preprocessed_shards_256 \

@@ -185,7 +185,7 @@ class FlowTransformerModel(nn.Module):
     """Transformer flow-matching model for continuous MAPF.
 
     Matches the same forward() interface as FlowGNNModel so it is a drop-in
-    replacement in train_continuous.py and eval_continuous.py.
+    replacement in train_continuous.py and scripts/eval_continuous.py.
 
     Args:
         k: Local patch half-size (visual field radius in grid cells).

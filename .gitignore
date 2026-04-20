@@ -1,10 +1,15 @@
+.DS_Store
+.claude/
+.venv*/
 __pycache__/
+*.py[cod]
+
 *.pdf
 *.pt
+*.html
 wandb/
+
 # Project specific folders and files
 data/
 logs/
 test.ipynb
-*.html
-__pycache__/

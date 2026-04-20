@@ -12,22 +12,23 @@ the classifier baseline on the paper's held-out maps.
 
 ## What Is Here
 
-- `generate_flow_data_multi.py`: generate grid-world expert trajectories with
+- `scripts/generate_flow_data_multi.py`: generate grid-world expert trajectories with
   EECBS and backward-Dijkstra (BD) heuristic files.
-- `preprocess_dataset.py`: optionally convert raw trajectory `.npz` files into
+- `scripts/preprocess_dataset.py`: optionally convert raw trajectory `.npz` files into
   ready-to-load PyTorch Geometric `.pt` files.
 - `main_pys/train_flow.py`: train the flow matching policy.
-- `train_full.py`: extract zipped assets and launch a standard full training
+- `scripts/train_full.py`: extract zipped assets and launch a standard full training
   run.
 - `main_pys/simulator.py`: run a trained flow or classifier policy inside the
   grid-world CS-PIBT simulator.
-- `eval_full.py`: smaller ablation/evaluation sweep over maps, agents, and
+- `scripts/eval_full.py`: smaller ablation/evaluation sweep over maps, agents, and
   flow integration steps.
-- `eval_rishi_paper.py`: Rishi-paper held-out grid-world benchmark.
+- `scripts/eval_rishi_paper.py`: Rishi-paper held-out grid-world benchmark.
 - `analysis_scripts/summarize_grid_eval.py`: summarize simulator CSVs into
   readable tables.
-- `generate_and_preprocess_continuous.py`, `main_pys/train_continuous.py`, and
-  `eval_continuous.py`: separate continuous-space experiments.
+- `scripts/generate_and_preprocess_continuous.py`,
+  `main_pys/train_continuous.py`, and `scripts/eval_continuous.py`: separate
+  continuous-space experiments.
 
 ## Setup
 
@@ -57,7 +58,7 @@ For most evaluation and training workflows, start with the maps, random
 scenarios, BD heuristics, `all_maps.npz`, and the SSIL classifier checkpoint:
 
 ```sh
-bash download_assets.bash
+bash scripts/download_assets.bash
 ```
 
 This creates the usual `data/` layout. Depending on the asset source, scenarios
@@ -108,19 +109,19 @@ creation are done once ahead of time.
 If you already have the large trajectory zip and base data zip:
 
 ```sh
-python train_full.py \
+python -m scripts.train_full \
   --trajectories /path/to/massive_flow_dataset_large_scale.zip \
   --base-data /path/to/data.zip \
   --run-name my_run
 ```
 
-`train_full.py` extracts the data and launches `main_pys.train_flow` with the
+`scripts/train_full.py` extracts the data and launches `main_pys.train_flow` with the
 standard large model configuration.
 
 If the data is already extracted:
 
 ```sh
-python train_full.py \
+python -m scripts.train_full \
   --trajectories /path/to/massive_flow_dataset_large_scale.zip \
   --base-data /path/to/data.zip \
   --skip-extract \
@@ -148,7 +149,7 @@ from the asset section above before generating trajectories.
 Generate BD heuristics and EECBS expert trajectories:
 
 ```sh
-python generate_flow_data_multi.py
+python -m scripts.generate_flow_data_multi
 ```
 
 Outputs:
@@ -158,7 +159,7 @@ data/bd_npzs/large_scale/*_bds.npz
 data/flow_training_data_multi/*.npz
 ```
 
-By default, `generate_flow_data_multi.py` follows the Rishi split: it generates
+By default, `scripts/generate_flow_data_multi.py` follows the Rishi split: it generates
 BD files for held-out test maps, but does not generate training trajectories
 from those held-out maps.
 
@@ -167,7 +168,7 @@ from those held-out maps.
 Preprocess raw trajectory `.npz` files into PyG `.pt` samples:
 
 ```sh
-python preprocess_dataset.py \
+python -m scripts.preprocess_dataset \
   --data-dir data/flow_training_data_multi \
   --map-dir data/mapf-map \
   --out data/preprocessed \
@@ -177,7 +178,7 @@ python preprocess_dataset.py \
 To exclude specific maps:
 
 ```sh
-python preprocess_dataset.py \
+python -m scripts.preprocess_dataset \
   --data-dir data/flow_training_data_multi \
   --map-dir data/mapf-map \
   --out data/preprocessed \
@@ -289,17 +290,17 @@ testing other planners.
 
 ### Smaller Flow Ablation Sweep
 
-`eval_full.py` sweeps maps, agent counts, and flow integration steps:
+`scripts/eval_full.py` sweeps maps, agent counts, and flow integration steps:
 
 ```sh
-python eval_full.py large_scale_flow_my_flow_best.pt \
+python -m scripts.eval_full large_scale_flow_my_flow_best.pt \
   --output evals/flow_ablation.csv
 ```
 
 Useful variants:
 
 ```sh
-python eval_full.py large_scale_flow_my_flow_best.pt \
+python -m scripts.eval_full large_scale_flow_my_flow_best.pt \
   --maps empty-48-48 random-32-32-10 den312d \
   --agents 100 400 800 \
   --steps 1 2 3 5 \
@@ -307,14 +308,14 @@ python eval_full.py large_scale_flow_my_flow_best.pt \
 ```
 
 ```sh
-python eval_full.py large_scale_flow_my_flow_best.pt \
+python -m scripts.eval_full large_scale_flow_my_flow_best.pt \
   --extended \
   --output evals/flow_extended.csv
 ```
 
 ### Rishi Paper Held-Out Benchmark
 
-`eval_rishi_paper.py` supports named map presets:
+`scripts/eval_rishi_paper.py` supports named map presets:
 
 - `rishi8` is the default strict held-out protocol.
 - `rishi12` is the 12-map panel from Rishi's reported evals, useful for
@@ -357,7 +358,7 @@ strict `rishi8` run.
 A quick smoke test uses one scenario and agent counts `100, 400, 800`:
 
 ```sh
-python eval_rishi_paper.py \
+python -m scripts.eval_rishi_paper \
   -m large_scale_flow_my_flow_best.pt \
   -o evals/smoke_flow.csv \
   --quick \
@@ -365,7 +366,7 @@ python eval_rishi_paper.py \
 ```
 
 ```sh
-python eval_rishi_paper.py \
+python -m scripts.eval_rishi_paper \
   -m data/model/ssil_model.pt \
   -o evals/smoke_ssil_classifier.csv \
   --quick \
@@ -378,14 +379,14 @@ counts `100, 200, ..., 1000`:
 ```sh
 mkdir -p logs evals
 
-CUDA_VISIBLE_DEVICES=0 nohup python eval_rishi_paper.py \
+CUDA_VISIBLE_DEVICES=0 nohup python -m scripts.eval_rishi_paper \
   -m large_scale_flow_my_flow_best.pt \
   -o evals/rishi_full_flow.csv \
   --map-set rishi8 \
   --policy-type flow \
   > logs/rishi_full_flow.log 2>&1 &
 
-CUDA_VISIBLE_DEVICES=1 nohup python eval_rishi_paper.py \
+CUDA_VISIBLE_DEVICES=1 nohup python -m scripts.eval_rishi_paper \
   -m data/model/ssil_model.pt \
   -o evals/rishi_full_ssil_classifier.csv \
   --map-set rishi8 \
@@ -398,7 +399,7 @@ For the 12-map topology comparison on Lambda:
 ```sh
 mkdir -p logs evals
 
-CUDA_VISIBLE_DEVICES=0 nohup python eval_rishi_paper.py \
+CUDA_VISIBLE_DEVICES=0 nohup python -m scripts.eval_rishi_paper \
   -m large_scale_flow_my_flow_best.pt \
   -o evals/rishi12_full_flow.csv \
   --map-set rishi12 \
@@ -430,19 +431,19 @@ The continuous-space stack is separate from the grid simulator.
 
 - `main_pys/continuous_env.py` implements continuous dynamics, obstacle checks,
   and an ORCA-style local safety shield.
-- `generate_and_preprocess_continuous.py` creates a continuous-space dataset
+- `scripts/generate_and_preprocess_continuous.py` creates a continuous-space dataset
   root and manifest.
-- `generate_continuous_data.py` converts EECBS-flow plans into continuous
+- `scripts/generate_continuous_data.py` converts EECBS-flow plans into continuous
   trajectories and can fall back to an ORCA-style expert.
 - `main_pys/train_continuous.py` trains either a continuous flow model or an
   8-direction discrete baseline.
-- `eval_continuous.py` evaluates ORCA, continuous flow, or the discrete
+- `scripts/eval_continuous.py` evaluates ORCA, continuous flow, or the discrete
   baseline and can save trajectory plots.
 
 Generate a continuous dataset:
 
 ```sh
-python generate_and_preprocess_continuous.py \
+python -m scripts.generate_and_preprocess_continuous \
   --map-dir data/mapf-map \
   --scen-dir data/scen-random \
   --maps empty-48-48 \
@@ -478,7 +479,7 @@ python -m main_pys.train_continuous \
 Evaluate a learned continuous policy:
 
 ```sh
-python eval_continuous.py \
+python -m scripts.eval_continuous \
   --map-dir data/mapf-map \
   --scen-dir data/scen-random \
   --maps empty-48-48 random-32-32-10 \
@@ -494,7 +495,7 @@ python eval_continuous.py \
 Run the packaged benchmark:
 
 ```sh
-python run_continuous_benchmark.py \
+python -m scripts.run_continuous_benchmark \
   --map-dir data/mapf-map \
   --scen-dir data/scen-random \
   --maps empty-48-48 \
@@ -514,7 +515,7 @@ To evaluate with the external `picbf-cs` CBF shield, install the
 `continuous-collision-shield` package or point `PICBF_CS_PATH` at that repo:
 
 ```sh
-PICBF_CS_PATH=/path/to/picbf-cs python eval_continuous.py \
+PICBF_CS_PATH=/path/to/picbf-cs python -m scripts.eval_continuous \
   --map-dir data/mapf-map \
   --scen-dir data/scen-random \
   --maps empty-48-48 \
@@ -592,14 +593,18 @@ Flow-CS-PIBT/
 │   └── model_inputs.py
 ├── analysis_scripts/
 │   └── summarize_grid_eval.py
-├── generate_flow_data_multi.py
-├── preprocess_dataset.py
-├── train_full.py
-├── eval_full.py
-├── eval_rishi_paper.py
-├── eval_continuous.py
-├── run_continuous_benchmark.py
-└── download_assets.bash
+├── scripts/
+│   ├── generate_flow_data_multi.py
+│   ├── preprocess_dataset.py
+│   ├── train_full.py
+│   ├── eval_full.py
+│   ├── eval_rishi_paper.py
+│   ├── eval_continuous.py
+│   ├── run_continuous_benchmark.py
+│   └── download_assets.bash
+├── docs/
+├── assets/
+└── tests/
 ```
 
 ## Citation

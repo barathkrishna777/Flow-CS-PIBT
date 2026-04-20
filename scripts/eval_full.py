@@ -4,12 +4,12 @@ Runs 1 scenario each on 5 maps, for agents={100, 400, 800}, sweeping steps={1, 2
 Use --extended to also test hard scenarios (high agent counts on den312d, Paris, empty).
 
 Usage:
-    python eval_full.py <model_path>
-    python eval_full.py <model_path> --extended               # include hard scenarios
-    python eval_full.py <model_path> --output logs/my_results.csv
-    python eval_full.py <model_path> --steps 1 2 3           # custom steps
-    python eval_full.py <model_path> --agents 100 200 400     # custom agent counts
-    python eval_full.py <model_path> --maps den312d empty-48-48  # custom maps
+    python -m scripts.eval_full <model_path>
+    python -m scripts.eval_full <model_path> --extended               # include hard scenarios
+    python -m scripts.eval_full <model_path> --output logs/my_results.csv
+    python -m scripts.eval_full <model_path> --steps 1 2 3           # custom steps
+    python -m scripts.eval_full <model_path> --agents 100 200 400     # custom agent counts
+    python -m scripts.eval_full <model_path> --maps den312d empty-48-48  # custom maps
 """
 import os, sys, subprocess, argparse, csv
 

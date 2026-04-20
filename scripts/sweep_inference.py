@@ -4,9 +4,9 @@ Sweeps: num_steps x tau x wait_threshold x consensus_samples (flow path)
         + action head baseline (single forward pass, no flow integration)
 
 Usage:
-    CUDA_VISIBLE_DEVICES=0 python sweep_inference.py
-    CUDA_VISIBLE_DEVICES=0 python sweep_inference.py --model path/to/model.pt
-    CUDA_VISIBLE_DEVICES=0 python sweep_inference.py --quick   # small subset for testing
+    CUDA_VISIBLE_DEVICES=0 python -m scripts.sweep_inference
+    CUDA_VISIBLE_DEVICES=0 python -m scripts.sweep_inference --model path/to/model.pt
+    CUDA_VISIBLE_DEVICES=0 python -m scripts.sweep_inference --quick   # small subset for testing
 """
 import subprocess
 import os

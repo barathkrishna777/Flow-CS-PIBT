@@ -9,7 +9,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-REPO_ROOT = Path(__file__).resolve().parent
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def get_pyplot():
@@ -336,7 +336,8 @@ def stage_generate(args: argparse.Namespace, python_bin: str) -> None:
         effective_max_scenarios = max(effective_max_scenarios, max(scenario_ends) - min(scenario_starts) + 1)
     cmd = [
         python_bin,
-        str(REPO_ROOT / "generate_continuous_data.py"),
+        "-m",
+        "scripts.generate_continuous_data",
         "--map-dir",
         args.map_dir,
         "--scen-dir",
@@ -490,7 +491,8 @@ def build_eval_command(
         effective_max_scenarios = max(effective_max_scenarios, eval_range_count)
     cmd = [
         python_bin,
-        str(REPO_ROOT / "eval_continuous.py"),
+        "-m",
+        "scripts.eval_continuous",
         "--map-dir",
         args.map_dir,
         "--scen-dir",
@@ -762,8 +764,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help=(
-            "Communication radius forwarded to eval_continuous.py for "
-            "--shield-type picbf-cs. Defaults to eval_continuous.py auto-compute."
+            "Communication radius forwarded to scripts/eval_continuous.py for "
+            "--shield-type picbf-cs. Defaults to scripts/eval_continuous.py auto-compute."
         ),
     )
     parser.add_argument("--num-integration-steps", type=int, default=3)

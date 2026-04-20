@@ -24,8 +24,8 @@ Paste this file (or its path) at the start of a new Claude Code chat to align on
 | `main_pys/dataset_preprocessed.py` | Loads pre-built `.pt` graphs; supports **multiple directories** (comma-separated) merged into one file list. |
 | `main_pys/model_inputs.py` | Graph construction, BD features, k-hop / m-neighbor logic, normalization. |
 | `main_pys/simulator.py` | Loads checkpoint, runs flow integration + shield, writes CSV metrics. |
-| `preprocess_dataset.py` | One-time CPU-heavy pipeline → `.pt` per sample for fast training. |
-| `train_full.py` | Extracts `data.zip` + trajectory zip into `data/`, then spawns `python -m main_pys.train_flow` (does **not** pass `--preprocessed-dir` by default — training uses whatever `train_flow` auto-detects). |
+| `scripts/preprocess_dataset.py` | One-time CPU-heavy pipeline → `.pt` per sample for fast training. |
+| `scripts/train_full.py` | Extracts `data.zip` + trajectory zip into `data/`, then spawns `python -m main_pys.train_flow` (does **not** pass `--preprocessed-dir` by default — training uses whatever `train_flow` auto-detects). |
 
 **Conda env:** `environment.yml` → env name `mlmapf` (per README).
 
@@ -33,11 +33,11 @@ Paste this file (or its path) at the start of a new Claude Code chat to align on
 
 ## 3. Data: “base” vs held-out test maps (paper protocol)
 
-**Held-out test set (8 maps)** — same names in `generate_flow_data_multi.py` and `eval_rishi_paper.py`:
+**Held-out test set (8 maps)** — same names in `scripts/generate_flow_data_multi.py` and `scripts/eval_rishi_paper.py`:
 
 - `Paris_1_256`, `empty-48-48`, `maze-128-128-2`, `random-64-64-10`, `random-32-32-10`, `warehouse-10-20-10-2-1`, `den312d`, `den520d`
 
-**Canonical expert data generation** (`generate_flow_data_multi.py`):
+**Canonical expert data generation** (`scripts/generate_flow_data_multi.py`):
 
 - **BD heuristics** are still built for held-out maps (needed for eval).
 - **EECBS trajectories** for flow training are **skipped** for maps in `HELD_OUT_TEST` (lines ~185–189): those maps are intended to stay **out of training trajectories** for strict generalization experiments.
@@ -48,7 +48,7 @@ Paste this file (or its path) at the start of a new Claude Code chat to align on
 
 ## 4. Current situation (wave8 + mixed training data)
 
-**Naming:** Training uses `--run-name` → checkpoints like `large_scale_flow_<run_name>_epoch_N.pt` and `large_scale_flow_<run_name>_best.pt`. The **wave8** line includes a checkpoint referred to in-repo as e.g. `large_scale_flow_wave8_base_best.pt` (see `eval_rishi_paper.py` docstring example).
+**Naming:** Training uses `--run-name` → checkpoints like `large_scale_flow_<run_name>_epoch_N.pt` and `large_scale_flow_<run_name>_best.pt`. The **wave8** line includes a checkpoint referred to in-repo as e.g. `large_scale_flow_wave8_base_best.pt` (see `scripts/eval_rishi_paper.py` docstring example).
 
 **Training data mix (what you described):**
 
@@ -56,7 +56,7 @@ Paste this file (or its path) at the start of a new Claude Code chat to align on
 - **Additional held-out-map data:** Some **preprocessed samples from the 8 held-out maps** have been included in training (e.g. a second directory such as `data/preprocessed_heldout` merged via `--preprocessed-dir data/preprocessed,data/preprocessed_heldout` — this pattern is explicitly mentioned in `train_flow.py`’s `--preprocessed-dir` help text).
 
 **Implication for science / eval interpretation:**  
-`eval_rishi_paper.py` still runs the **same 8 maps** as the paper-style benchmark, but **performance on scenarios that overlap with what was added to training** is **not** a pure zero-shot test for those map/scenario/agent slices. Keep this distinction clear when comparing to prior waves trained only on non-held-out trajectories.
+`scripts/eval_rishi_paper.py` still runs the **same 8 maps** as the paper-style benchmark, but **performance on scenarios that overlap with what was added to training** is **not** a pure zero-shot test for those map/scenario/agent slices. Keep this distinction clear when comparing to prior waves trained only on non-held-out trajectories.
 
 **Current focus:** **Evaluating the wave8 model** (e.g. best checkpoint) on the held-out benchmark and/or smaller smoke evals, and iterating on **next tasks** (training changes, data ablations, inference hyperparameters, analysis).
 
@@ -67,15 +67,15 @@ Paste this file (or its path) at the start of a new Claude Code chat to align on
 **Full 8-map “Rishi paper” held-out sweep** (many runs: 8 maps × up to 25 scenarios × agent ladder 100…1000):
 
 ```bash
-python eval_rishi_paper.py -m large_scale_flow_wave8_base_best.pt \
+python -m scripts.eval_rishi_paper -m large_scale_flow_wave8_base_best.pt \
   --output checkpoints_and_evaluations/eval_rishi_wave8_base.csv
 ```
 
 Flags: `--quick` (smoke), `--maps`, `--agents`, `--max-scenario`, integration/consensus/tau aligned with `eval_full` / paper-style defaults in the script.
 
-**Shorter multi-map eval** (5 maps, sweeps Euler steps): `eval_full.py`  
-**Legacy small batch** (3 maps, few agents): `run_experiments.py`  
-**Wave4-style wrapper:** `eval_wave4.py` (pattern for epoch/best eval on a fixed small map set)
+**Shorter multi-map eval** (5 maps, sweeps Euler steps): `scripts/eval_full.py`  
+**Legacy small batch** (3 maps, few agents): `scripts/run_experiments.py`  
+**Wave4-style wrapper:** `scripts/eval_wave4.py` (pattern for epoch/best eval on a fixed small map set)
 
 **Simulator directly** (single run): see `README.md` (`python -m main_pys.simulator ...`).
 
@@ -87,7 +87,7 @@ Typical inference knobs: `--numIntegrationSteps`, `--numConsensusSamples`, `--ta
 
 ```bash
 # After zips are in place (see README)
-python train_full.py --base-data /path/to/data.zip --trajectories /path/to/massive_flow_dataset_large_scale.zip
+python -m scripts.train_full --base-data /path/to/data.zip --trajectories /path/to/massive_flow_dataset_large_scale.zip
 
 # Direct training with preprocessed + run name + merged dirs
 python -m main_pys.train_flow --run-name wave8_base \
@@ -103,11 +103,11 @@ python -m main_pys.train_flow --run-name wave8_base \
 ```
 main_pys/          # model, train, sim, datasets, model_inputs
 analysis_scripts/  # overfit tests, diagnostics
-train_full.py
-eval_rishi_paper.py
-eval_full.py
-preprocess_dataset.py
-generate_flow_data_multi.py   # EECBS + SG velocities; skips traj for HELD_OUT_TEST
+scripts/train_full.py
+scripts/eval_rishi_paper.py
+scripts/eval_full.py
+scripts/preprocess_dataset.py
+scripts/generate_flow_data_multi.py   # EECBS + SG velocities; skips traj for HELD_OUT_TEST
 data/                         # maps, scen-random, bd_npzs/large_scale, flow_training_data_multi, preprocessed*
 ```
 
@@ -117,7 +117,7 @@ data/                         # maps, scen-random, bd_npzs/large_scale, flow_tra
 
 1. Confirm **exact** checkpoint path and `--run-name` used for wave8.  
 2. Confirm **which preprocessed directories** and **approximate sample counts** from held-out maps were merged.  
-3. When reporting `eval_rishi_paper.py` results, separate or annotate any **train/eval overlap** if scenario-level leakage is possible.  
+3. When reporting `scripts/eval_rishi_paper.py` results, separate or annotate any **train/eval overlap** if scenario-level leakage is possible.  
 4. Match **hidden_dim / num_layers** at eval to the trained checkpoint.  
 5. Use `README.md` for install and citation blocks.
 

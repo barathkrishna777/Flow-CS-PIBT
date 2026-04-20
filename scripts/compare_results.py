@@ -1,8 +1,8 @@
 """Compare evaluation results across all wave checkpoints.
 
 Usage:
-    python compare_results.py                       # auto-discover all CSVs in logs/
-    python compare_results.py --csv logs/a.csv logs/b.csv   # specific files
+    python -m scripts.compare_results                       # auto-discover all CSVs in logs/
+    python -m scripts.compare_results --csv logs/a.csv logs/b.csv   # specific files
 """
 import csv
 import argparse

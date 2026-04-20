@@ -19,7 +19,7 @@ from main_pys.continuous_scenarios import scenario_id_from_path, select_scenario
 from main_pys.model_inputs import load_grid_map_from_file, velocity_to_direction_labels
 
 
-REPO_ROOT = Path(__file__).resolve().parent
+REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_EECBS_REPO = os.environ.get("EECBS_FLOW_REPO", str(REPO_ROOT.parent / "EECBS-flow"))
 DEFAULT_LACAM3_REPO = os.environ.get("LACAM3_REPO", str(REPO_ROOT.parent / "lacam3"))
 

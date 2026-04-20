@@ -15,7 +15,7 @@ from main_pys.continuous_env import compute_sdf
 from main_pys.model_inputs import load_grid_map_from_file
 
 
-REPO_ROOT = Path(__file__).resolve().parent
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def run_command(cmd: Sequence[str], dry_run: bool) -> None:
@@ -189,7 +189,8 @@ def main() -> None:
     if not args.skip_generate:
         cmd = [
             sys.executable,
-            str(REPO_ROOT / "generate_continuous_data.py"),
+            "-m",
+            "scripts.generate_continuous_data",
             "--map-dir",
             args.map_dir,
             "--scen-dir",

@@ -3,7 +3,7 @@
 One-command training script for Flow-CS-PIBT.
 
 Usage:
-    python train_full.py \
+    python -m scripts.train_full \
         --base-data /path/to/data.zip \
         --trajectories /path/to/massive_flow_dataset_large_scale.zip
 

@@ -91,7 +91,7 @@ The shield:
 
 File:
 
-- `generate_continuous_data.py`
+- `scripts/generate_continuous_data.py`
 
 This script builds training rollouts from:
 
@@ -173,7 +173,7 @@ Both use `FlowGNNModel`, with different loss formulations.
 
 File:
 
-- `eval_continuous.py`
+- `scripts/eval_continuous.py`
 
 This script evaluates:
 
@@ -215,7 +215,7 @@ It can also save trajectory visualizations.
 
 File:
 
-- `run_continuous_benchmark.py`
+- `scripts/run_continuous_benchmark.py`
 
 This script was added to automate the Phase A open-space benchmark workflow.
 
@@ -257,7 +257,7 @@ This script was added to automate the Phase A open-space benchmark workflow.
 ### Data generation
 
 ```bash
-python generate_continuous_data.py \
+python -m scripts.generate_continuous_data \
   --map-dir data/mapf-map \
   --scen-dir data/scen-random \
   --maps empty-48-48 \
@@ -294,7 +294,7 @@ python -m main_pys.train_continuous \
 ### Direct evaluation
 
 ```bash
-python eval_continuous.py \
+python -m scripts.eval_continuous \
   --map-dir data/mapf-map \
   --scen-dir data/scen-random \
   --maps empty-48-48 \
@@ -310,7 +310,7 @@ python eval_continuous.py \
 ### Full Phase A runner
 
 ```bash
-python run_continuous_benchmark.py \
+python -m scripts.run_continuous_benchmark \
   --map-dir data/mapf-map \
   --scen-dir data/scen-random \
   --maps empty-48-48 \
@@ -481,7 +481,7 @@ Current interpretation:
 - `implementation_details.md`
 - `main_pys/continuous_env.py`
 - `main_pys/dataset_continuous.py`
-- `generate_continuous_data.py`
+- `scripts/generate_continuous_data.py`
 - `main_pys/train_continuous.py`
-- `eval_continuous.py`
-- `run_continuous_benchmark.py`
+- `scripts/eval_continuous.py`
+- `scripts/run_continuous_benchmark.py`

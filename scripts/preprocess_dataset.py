@@ -6,8 +6,8 @@ normalization) once and saves each sample as a torch .pt file. Training then
 does a simple torch.load() per sample — no computation, pure I/O.
 
 Usage:
-    python preprocess_dataset.py [--workers 32] [--out /media/.../preprocessed_data]
-    python preprocess_dataset.py --migrate-from data/preprocessed --out /media/.../preprocessed_data
+    python -m scripts.preprocess_dataset [--workers 32] [--out /media/.../preprocessed_data]
+    python -m scripts.preprocess_dataset --migrate-from data/preprocessed --out /media/.../preprocessed_data
 """
 import os
 import sys

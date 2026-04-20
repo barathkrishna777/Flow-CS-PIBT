@@ -1,14 +1,14 @@
 """Evaluate wave 4 checkpoints.
 
 Usage:
-    python eval_wave4.py 1          # eval epoch 1
-    python eval_wave4.py 3          # eval epoch 3
-    python eval_wave4.py best       # eval best checkpoint
+    python -m scripts.eval_wave4 1          # eval epoch 1
+    python -m scripts.eval_wave4 3          # eval epoch 3
+    python -m scripts.eval_wave4 best       # eval best checkpoint
 """
 import os, sys, subprocess, glob
 
 if len(sys.argv) < 2:
-    print("Usage: python eval_wave4.py <epoch|best>")
+    print("Usage: python -m scripts.eval_wave4 <epoch|best>")
     sys.exit(1)
 
 tag = sys.argv[1]

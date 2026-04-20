@@ -75,7 +75,7 @@ class PreprocessedContinuousShardDataset(Dataset):
         if not os.path.exists(manifest_path):
             raise RuntimeError(
                 f"Missing continuous preprocessed manifest: {manifest_path}. "
-                "Run `python preprocess_continuous_shards.py` first."
+                "Run `python -m scripts.preprocess_continuous_shards` first."
             )
         manifest = torch.load(manifest_path, map_location="cpu", weights_only=False)
         if int(manifest.get("version", 0)) != 1:

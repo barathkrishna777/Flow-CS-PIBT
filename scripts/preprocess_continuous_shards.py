@@ -10,7 +10,7 @@ Each shard stores a list of compacted graph samples:
   - action labels are stored as uint8
 
 Usage:
-    python preprocess_continuous_shards.py \
+    python -m scripts.preprocess_continuous_shards \
         --data-dir data/continuous_eecbs/raw \
         --map-dir data/mapf-map \
         --out data/continuous_eecbs/preprocessed_shards

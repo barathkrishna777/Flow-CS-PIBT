@@ -46,7 +46,7 @@ Current preprocessed dataset is 600+ GB of ~384K `.pt` files. Only 50-100 GB of 
 | Downsample timesteps (every 3rd) | 0.33x | Keep every 3rd timestep per trajectory. Flow matching doesn't need consecutive frames — it learns velocity fields from independent snapshots. |
 | **Combined** | **~0.11x** | **600 GB × 0.67 × 0.5 × 0.33 ≈ 66 GB** |
 
-### 1.1 Re-encoding Script (`compact_dataset.py`)
+### 1.1 Re-encoding Script (`scripts/compact_dataset.py`)
 
 Process one map at a time to stay within disk budget:
 
@@ -114,14 +114,14 @@ Store as `data.action_label` (int8) in the compact .pt files. This avoids re-run
 
 ### 1.5 Continuous-Space Data Pipeline Prep (for Phase 3)
 
-Create `generate_continuous_data.py` stub:
+Create `scripts/generate_continuous_data.py` stub:
 - ORCA expert planner for continuous trajectories
 - Can run on CPU in background during Phase 2 GPU experiments
 - Separate from grid-world data — stored in `data/continuous/`
 
 ### Files to create (in Flow-CS-PIBT repo)
-- `compact_dataset.py` — in-place re-encoding script
-- `generate_continuous_data.py` — ORCA pipeline stub (Phase 3 prep)
+- `scripts/compact_dataset.py` — in-place re-encoding script
+- `scripts/generate_continuous_data.py` — ORCA pipeline stub (Phase 3 prep)
 
 ### Files to modify
 - `main_pys/dataset_preprocessed.py` — load compact format, reconstruct map channel
@@ -142,7 +142,7 @@ Create `generate_continuous_data.py` stub:
 - Also retrain clean flow model on same data — 1 GPU (parallel)
 
 ### 2.2 Evaluation Sweep (Days 5-6)
-Run `eval_rishi_paper.py` for:
+Run `scripts/eval_rishi_paper.py` for:
 1. Clean flow matching model
 2. Clean discrete classifier (same arch)
 3. Existing wave8_heldout model (reference)
@@ -168,7 +168,7 @@ Compare all against Rishi paper's published numbers. 3 GPUs in parallel.
 ### Files to modify
 - `main_pys/train_flow.py` — `--discrete-only` mode
 - `main_pys/generative_model.py` — discrete-only forward path
-- `sweep_inference.py` — extended ablation configs
+- `scripts/sweep_inference.py` — extended ablation configs
 
 ---
 
@@ -194,7 +194,7 @@ Compare all against Rishi paper's published numbers. 3 GPUs in parallel.
 
 ### Files to create
 - `main_pys/continuous_env.py`
-- `eval_continuous.py`
+- `scripts/eval_continuous.py`
 
 ### Files to modify
 - `main_pys/model_inputs.py` — continuous position handling

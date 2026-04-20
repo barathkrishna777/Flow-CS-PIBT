@@ -47,8 +47,8 @@ Main diagnosis:
 - `main_pys/simulator.py`
 - `main_pys/generative_model.py`
 - `main_pys/train_flow.py`
-- `preprocess_dataset.py`
-- `eval_rishi_paper.py`
+- `scripts/preprocess_dataset.py`
+- `scripts/eval_rishi_paper.py`
 - `analysis_scripts/summarize_grid_eval.py`
 - `analysis_scripts/compare_grid_1v1.py`
 
@@ -223,7 +223,7 @@ Check whether `main_pys/simulator.py` already supports direct action-head
 inference for flow models. Search for:
 
 ```bash
-rg -n "useActionHead|return_action_logits|policyType|runNNOnState" main_pys/simulator.py eval_rishi_paper.py main_pys/generative_model.py
+rg -n "useActionHead|return_action_logits|policyType|runNNOnState" main_pys/simulator.py scripts/eval_rishi_paper.py main_pys/generative_model.py
 ```
 
 Target interface:
@@ -241,7 +241,7 @@ Desired behavior:
 
 Implementation recommendation:
 
-- Add `flow_action_head` to `eval_rishi_paper.py --policy-type` choices.
+- Add `flow_action_head` to `scripts/eval_rishi_paper.py --policy-type` choices.
 - When `policy_type == flow_action_head`, pass simulator args:
 
 ```text
@@ -258,19 +258,19 @@ Run quick evals:
 ```bash
 mkdir -p evals/ablations logs
 
-python eval_rishi_paper.py \
+python -m scripts.eval_rishi_paper \
   -m checkpoints/large_scale_flow_wave8_heldout_best.pt \
   -o evals/ablations/quick_flow_vector.csv \
   --quick \
   --policy-type flow
 
-python eval_rishi_paper.py \
+python -m scripts.eval_rishi_paper \
   -m checkpoints/large_scale_flow_wave8_heldout_best.pt \
   -o evals/ablations/quick_flow_action_head.csv \
   --quick \
   --policy-type flow_action_head
 
-python eval_rishi_paper.py \
+python -m scripts.eval_rishi_paper \
   -m data/model/ssil_model.pt \
   -o evals/ablations/quick_ssil_classifier.csv \
   --quick \
@@ -296,7 +296,7 @@ Decision:
 Full action-head eval:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 nohup python eval_rishi_paper.py \
+CUDA_VISIBLE_DEVICES=0 nohup python -m scripts.eval_rishi_paper \
   -m checkpoints/large_scale_flow_wave8_heldout_best.pt \
   -o evals/rishi_full_flow_action_head.csv \
   --policy-type flow_action_head \
@@ -323,7 +323,7 @@ Use quick eval first.
 mkdir -p evals/ablations logs
 
 for wt in 0.10 0.15 0.20 0.25 0.30 0.35; do
-  python eval_rishi_paper.py \
+  python -m scripts.eval_rishi_paper \
     -m checkpoints/large_scale_flow_wave8_heldout_best.pt \
     -o evals/ablations/quick_flow_wait_${wt}.csv \
     --quick \
@@ -358,7 +358,7 @@ Replace `<BEST_WAIT>`:
 
 ```bash
 for tau in 0.10 0.20 0.30 0.50 0.75; do
-  python eval_rishi_paper.py \
+  python -m scripts.eval_rishi_paper \
     -m checkpoints/large_scale_flow_wave8_heldout_best.pt \
     -o evals/ablations/quick_flow_wait_<BEST_WAIT>_tau_${tau}.csv \
     --quick \
@@ -375,7 +375,7 @@ Replace `<BEST_WAIT>` and `<BEST_TAU>`:
 
 ```bash
 for c in 1 3 5 7; do
-  python eval_rishi_paper.py \
+  python -m scripts.eval_rishi_paper \
     -m checkpoints/large_scale_flow_wave8_heldout_best.pt \
     -o evals/ablations/quick_flow_wait_<BEST_WAIT>_tau_<BEST_TAU>_consensus_${c}.csv \
     --quick \
@@ -393,7 +393,7 @@ Replace `<BEST_WAIT>`, `<BEST_TAU>`, and `<BEST_C>`:
 
 ```bash
 for s in 1 2 3 5 8; do
-  python eval_rishi_paper.py \
+  python -m scripts.eval_rishi_paper \
     -m checkpoints/large_scale_flow_wave8_heldout_best.pt \
     -o evals/ablations/quick_flow_wait_<BEST_WAIT>_tau_<BEST_TAU>_consensus_<BEST_C>_steps_${s}.csv \
     --quick \
@@ -412,7 +412,7 @@ Once a candidate global setting is selected, run medium eval on all 8 maps with
 5 scenarios:
 
 ```bash
-python eval_rishi_paper.py \
+python -m scripts.eval_rishi_paper \
   -m checkpoints/large_scale_flow_wave8_heldout_best.pt \
   -o evals/ablations/medium_flow_tuned_inference.csv \
   --max-scenario 5 \
@@ -426,7 +426,7 @@ python eval_rishi_paper.py \
 Matching SSIL medium eval:
 
 ```bash
-python eval_rishi_paper.py \
+python -m scripts.eval_rishi_paper \
   -m data/model/ssil_model.pt \
   -o evals/ablations/medium_ssil_classifier.csv \
   --max-scenario 5 \
@@ -445,7 +445,7 @@ python -m analysis_scripts.summarize_grid_eval \
 If promising, run full tuned eval:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 nohup python eval_rishi_paper.py \
+CUDA_VISIBLE_DEVICES=0 nohup python -m scripts.eval_rishi_paper \
   -m checkpoints/large_scale_flow_wave8_heldout_best.pt \
   -o evals/rishi_full_flow_tuned_global.csv \
   --policy-type flow \
@@ -465,7 +465,7 @@ Only do this if no-retrain inference changes do not close the gap.
 Rishi trains on exact next discrete action labels. Our current action labels may
 be derived from smoothed expert velocities, which can blur turns and waits.
 
-Modify `preprocess_dataset.py`:
+Modify `scripts/preprocess_dataset.py`:
 
 - For each sample at timestep `t`, compute:
 
@@ -566,13 +566,13 @@ python -m main_pys.train_flow \
 Evaluate each with both vector inference and action-head inference:
 
 ```bash
-python eval_rishi_paper.py \
+python -m scripts.eval_rishi_paper \
   -m large_scale_flow_exact_action_w2_e3_best.pt \
   -o evals/ablations/quick_exact_action_w2_e3_vector.csv \
   --quick \
   --policy-type flow
 
-python eval_rishi_paper.py \
+python -m scripts.eval_rishi_paper \
   -m large_scale_flow_exact_action_w2_e3_best.pt \
   -o evals/ablations/quick_exact_action_w2_e3_head.csv \
   --quick \
@@ -641,7 +641,7 @@ python -m analysis_scripts.train_rishi_like_classifier \
 Evaluate:
 
 ```bash
-python eval_rishi_paper.py \
+python -m scripts.eval_rishi_paper \
   -m checkpoints/rishi_like_classifier_best.pt \
   -o evals/ablations/quick_rishi_like_classifier.csv \
   --quick \
@@ -818,4 +818,3 @@ The most plausible winning model is not pure flow-vector inference. It is:
 ```text
 Flow model + strong exact-action head + globally tuned inference
 ```
-

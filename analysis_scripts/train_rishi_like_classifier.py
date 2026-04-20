@@ -23,7 +23,7 @@ def action_labels_from_batch(batch, device):
     if not hasattr(batch, "action_y") or batch.action_y is None:
         raise RuntimeError(
             "Rishi-like classifier training requires exact action_y labels. "
-            "Re-run preprocess_dataset.py after the exact-action-label change."
+            "Re-run scripts/preprocess_dataset.py after the exact-action-label change."
         )
     return batch.action_y.view(-1).long().to(device)
 

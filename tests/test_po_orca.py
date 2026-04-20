@@ -1,6 +1,6 @@
 """Validation tests for PO-ORCA shield and SDF obstacle handling.
 
-Run: python test_po_orca.py
+Run: python -m tests.test_po_orca
 No trained model or map/scen files needed -- uses synthetic scenarios.
 """
 

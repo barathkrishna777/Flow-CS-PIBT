@@ -65,7 +65,7 @@ class PreprocessedFlowMAPFDataset(Dataset):
         if len(all_files) == 0:
             raise RuntimeError(
                 f"No .pt files found in {dirs}. "
-                f"Run `python preprocess_dataset.py` first."
+                f"Run `python -m scripts.preprocess_dataset` first."
             )
         if len(dirs) > 1:
             for d in dirs:
@@ -90,7 +90,7 @@ class PreprocessedFlowMAPFDataset(Dataset):
 
             if corrupt > 0:
                 print(f"  Removed {corrupt:,} corrupt files (<100 bytes). "
-                      f"Re-run `python preprocess_dataset.py` to regenerate them.")
+                      f"Re-run `python -m scripts.preprocess_dataset` to regenerate them.")
         else:
             self.files = all_files
 

@@ -12,14 +12,14 @@ Inference defaults match eval_full / paper: time limit 120s, maxSteps 3x,
 tau=0.3, consensus=3, numIntegrationSteps=3 (override with flags).
 
 Usage:
-  python eval_rishi_paper.py -m large_scale_flow_wave8_base_best.pt \\
+  python -m scripts.eval_rishi_paper -m large_scale_flow_wave8_base_best.pt \\
       --output checkpoints_and_evaluations/eval_rishi_wave8_base.csv
 
-  python eval_rishi_paper.py -m model.pt --quick --output logs/rishi_quick.csv
+  python -m scripts.eval_rishi_paper -m model.pt --quick --output logs/rishi_quick.csv
 
   # Paper-scale run is large (8 maps x 25 scens x 10 agent levels = 2000 sims).
   # Rishi's 12-map panel is larger:
-  python eval_rishi_paper.py -m model.pt --map-set rishi12 --output logs/rishi12.csv
+  python -m scripts.eval_rishi_paper -m model.pt --map-set rishi12 --output logs/rishi12.csv
 """
 from __future__ import annotations
 

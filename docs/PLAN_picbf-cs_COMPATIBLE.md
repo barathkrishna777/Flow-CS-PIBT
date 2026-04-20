@@ -24,7 +24,7 @@ Update Flow-CS-PIBT so `--shield-type picbf-cs` uses the new decentralized-facin
   - default `None`, meaning auto-compute:
     `2 * agent_radius + safety_margin + 2 * max_speed * dt + max(0.4, 4 * safety_margin)`
   - validate provided radius is positive
-- Thread this option through `eval_continuous.py`, `run_continuous_benchmark.py`, and `ContinuousMAPFEnv`.
+- Thread this option through `scripts/eval_continuous.py`, `scripts/run_continuous_benchmark.py`, and `ContinuousMAPFEnv`.
 - Store lightweight shield debug info after each picbf step:
   - component count
   - max component size
@@ -45,12 +45,12 @@ Update Flow-CS-PIBT so `--shield-type picbf-cs` uses the new decentralized-facin
   - zero collisions and zero obstacle hits
   - debug info reports at least one local component and max component size no larger than agent count
 - Run:
-  - `python -m py_compile eval_continuous.py run_continuous_benchmark.py main_pys/continuous_env.py`
+  - `python -m py_compile scripts/eval_continuous.py scripts/run_continuous_benchmark.py main_pys/continuous_env.py`
   - the new focused picbf local adapter test
   - existing `picbf-cs` tests in the `picbf-cs` repo under Python 3.11
 - Smoke eval on Lambda after pulling both repos:
   ```sh
-  python3.11 eval_continuous.py \
+  python3.11 -m scripts.eval_continuous \
     --map-dir data/mapf-map \
     --scen-dir data/scen-random \
     --maps empty-48-48 \

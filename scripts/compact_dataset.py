@@ -12,9 +12,9 @@ disk usage during migration. Progress is checkpointed so it can resume
 after interruption. Compaction is parallelized across CPU workers.
 
 Usage:
-    python compact_dataset.py --dir data/preprocessed
-    python compact_dataset.py --dir data/preprocessed --keep-every 3 --dry-run
-    python compact_dataset.py --dir data/preprocessed --workers 64 --resume
+    python -m scripts.compact_dataset --dir data/preprocessed
+    python -m scripts.compact_dataset --dir data/preprocessed --keep-every 3 --dry-run
+    python -m scripts.compact_dataset --dir data/preprocessed --workers 64 --resume
 """
 from __future__ import annotations
 
