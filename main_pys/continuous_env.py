@@ -2,8 +2,9 @@ import importlib
 import math
 import os
 import sys
-from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from collections import deque
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from scipy.ndimage import distance_transform_edt
@@ -136,6 +137,18 @@ class StepMetrics:
     collisions: int = 0
     near_collisions: int = 0
     obstacle_hits: int = 0
+    shield_agent_steps: int = 0
+    shield_interventions: int = 0
+    shield_stops: int = 0
+    shield_speed_clips: int = 0
+    shield_projection_sum: float = 0.0
+    shield_projection_samples: List[float] = field(default_factory=list)
+    shield_backend_counts: Dict[str, int] = field(default_factory=dict)
+    orca_requested_steps: int = 0
+    orca_true_steps: int = 0
+    orca_fallback_steps: int = 0
+    stall_agent_checks: int = 0
+    stalled_agent_checks: int = 0
 
 
 def default_picbf_communication_radius(
@@ -470,6 +483,7 @@ class ORCAStyleShield:
         self.neighbor_dist = max(4.0 * agent_radius, 2.0)
         self.max_neighbors = 16
         self._sdf_cache: Dict[Tuple, Tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+        self.last_debug_info: Optional[Dict[str, object]] = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -495,13 +509,45 @@ class ORCAStyleShield:
                 Priority-Ordered ORCA (sequential processing, highest first).
         """
         use_priorities = priorities is not None
+        self.last_debug_info = {
+            "backend": "priority-heuristic" if use_priorities else "heuristic",
+            "requested_true_orca": bool(use_true_orca),
+            "used_true_orca": False,
+            "rvo2_available": bool(rvo2 is not None),
+            "used_priorities": bool(use_priorities),
+        }
         # rvo2 does not support asymmetric priorities, so only use it for
         # the standard symmetric mode.
         if not use_priorities and use_true_orca and rvo2 is not None:
             try:
-                return self._project_with_rvo2(positions, preferred_velocities, obstacle_map)
-            except Exception:
-                pass
+                projected = self._project_with_rvo2(positions, preferred_velocities, obstacle_map)
+            except Exception as exc:
+                self.last_debug_info = {
+                    "backend": "heuristic-fallback",
+                    "requested_true_orca": True,
+                    "used_true_orca": False,
+                    "rvo2_available": True,
+                    "used_priorities": False,
+                    "fallback_reason": type(exc).__name__,
+                }
+            else:
+                self.last_debug_info = {
+                    "backend": "rvo2",
+                    "requested_true_orca": True,
+                    "used_true_orca": True,
+                    "rvo2_available": True,
+                    "used_priorities": False,
+                }
+                return projected
+        elif not use_priorities and use_true_orca:
+            self.last_debug_info = {
+                "backend": "heuristic-fallback",
+                "requested_true_orca": True,
+                "used_true_orca": False,
+                "rvo2_available": False,
+                "used_priorities": False,
+                "fallback_reason": "rvo2_unavailable",
+            }
 
         if use_priorities:
             return self._project_priority_ordered(
@@ -1131,6 +1177,10 @@ class ContinuousMAPFEnv:
 
     DEADLOCK_CHECK_INTERVAL = 30
     DEADLOCK_PRIORITY_BOOST = 10.0
+    STALL_WINDOW_SECONDS = 2.0
+    SHIELD_INTERVENTION_EPS = 1e-3
+    SHIELD_STOPPED_SPEED_EPS = 1e-3
+    STALL_PROGRESS_FRACTION_OF_STEP = 0.25
 
     def __init__(
         self,
@@ -1167,6 +1217,13 @@ class ContinuousMAPFEnv:
 
         # Precompute SDF for obstacle checking
         self._sdf = compute_sdf(self.obstacle_map)
+        self.stall_window_steps = max(
+            2, int(round(self.STALL_WINDOW_SECONDS / max(self.dt, 1e-6)))
+        )
+        self.stall_progress_epsilon = max(
+            1e-3, self.STALL_PROGRESS_FRACTION_OF_STEP * self.max_speed * self.dt
+        )
+        self._goal_distance_window = deque(maxlen=self.stall_window_steps + 1)
 
     def reset(self, starts: np.ndarray, goals: np.ndarray) -> np.ndarray:
         self.positions = np.asarray(starts, dtype=np.float32).copy()
@@ -1183,6 +1240,8 @@ class ContinuousMAPFEnv:
         goal_dists = np.linalg.norm(self.goals - self.positions, axis=1)
         self.priorities = goal_dists.astype(np.float64)
         self._goal_dist_snapshot = goal_dists.copy()
+        self._goal_distance_window.clear()
+        self._goal_distance_window.append(goal_dists.copy())
 
         return self.positions.copy()
 
@@ -1198,32 +1257,41 @@ class ContinuousMAPFEnv:
         preferred_velocities = np.asarray(preferred_velocities, dtype=np.float32)
         self.last_shield_debug_info = None
         if shield_type == "none":
+            self.last_shield_debug_info = {"backend": "clip-only"}
             return self._clip_speeds(preferred_velocities)
         if shield_type == "simple":
+            self.last_shield_debug_info = {"backend": "simple-filter"}
             return self._simple_safety_filter(preferred_velocities)
         if shield_type == "heuristic-orca":
-            return self._shield.project(
+            safe_velocities = self._shield.project(
                 self.positions,
                 preferred_velocities,
                 self.obstacle_map,
                 use_true_orca=False,
             )
+            self.last_shield_debug_info = dict(self._shield.last_debug_info or {})
+            return safe_velocities
         if shield_type == "po-orca":
-            return self._shield.project(
+            safe_velocities = self._shield.project(
                 self.positions,
                 preferred_velocities,
                 self.obstacle_map,
                 use_true_orca=False,
                 priorities=self.priorities,
             )
+            self.last_shield_debug_info = dict(self._shield.last_debug_info or {})
+            return safe_velocities
         if shield_type == "orca":
-            return self._shield.project(
+            safe_velocities = self._shield.project(
                 self.positions,
                 preferred_velocities,
                 self.obstacle_map,
                 use_true_orca=True,
             )
+            self.last_shield_debug_info = dict(self._shield.last_debug_info or {})
+            return safe_velocities
         if shield_type == "epibt":
+            self.last_shield_debug_info = {"backend": "epibt"}
             return self._epibt_shield.project(
                 self.positions,
                 preferred_velocities,
@@ -1244,7 +1312,8 @@ class ContinuousMAPFEnv:
                 self.obstacle_map,
                 goals=self.goals,
             )
-            self.last_shield_debug_info = self._picbf_shield.last_debug_info
+            self.last_shield_debug_info = dict(self._picbf_shield.last_debug_info or {})
+            self.last_shield_debug_info.setdefault("backend", "picbf-cs")
             return safe_velocities
         raise ValueError(f"Unsupported shield type: {shield_type}")
 
@@ -1268,8 +1337,73 @@ class ContinuousMAPFEnv:
             self.priorities[stuck] += self.DEADLOCK_PRIORITY_BOOST
             self._goal_dist_snapshot = current_dists.copy()
 
-    def step(self, velocities: np.ndarray, shield_type: str = "orca") -> Tuple[np.ndarray, bool, Dict[str, float]]:
-        safe_velocities = self.apply_shield(velocities, shield_type=shield_type)
+    def _record_shield_observability(
+        self, preferred_velocities: np.ndarray, safe_velocities: np.ndarray
+    ) -> None:
+        deltas = np.linalg.norm(safe_velocities - preferred_velocities, axis=1)
+        preferred_speeds = np.linalg.norm(preferred_velocities, axis=1)
+        safe_speeds = np.linalg.norm(safe_velocities, axis=1)
+
+        self.metrics.shield_agent_steps += int(len(deltas))
+        self.metrics.shield_interventions += int(
+            np.count_nonzero(deltas > self.SHIELD_INTERVENTION_EPS)
+        )
+        self.metrics.shield_stops += int(
+            np.count_nonzero(
+                (preferred_speeds > self.SHIELD_INTERVENTION_EPS)
+                & (safe_speeds <= self.SHIELD_STOPPED_SPEED_EPS)
+                & (deltas > self.SHIELD_INTERVENTION_EPS)
+            )
+        )
+        self.metrics.shield_speed_clips += int(
+            np.count_nonzero(
+                (preferred_speeds > self.SHIELD_INTERVENTION_EPS)
+                & (safe_speeds + self.SHIELD_INTERVENTION_EPS < preferred_speeds)
+            )
+        )
+        self.metrics.shield_projection_sum += float(deltas.sum())
+        self.metrics.shield_projection_samples.extend(float(value) for value in deltas.tolist())
+
+    def _record_shield_backend(self) -> None:
+        debug_info = self.last_shield_debug_info or {}
+        backend = str(debug_info.get("backend") or "unknown")
+        self.metrics.shield_backend_counts[backend] = (
+            self.metrics.shield_backend_counts.get(backend, 0) + 1
+        )
+
+        if debug_info.get("requested_true_orca"):
+            self.metrics.orca_requested_steps += 1
+            if debug_info.get("used_true_orca"):
+                self.metrics.orca_true_steps += 1
+            elif backend == "heuristic-fallback":
+                self.metrics.orca_fallback_steps += 1
+
+    def _record_stall_metrics(self) -> None:
+        current_dists = np.linalg.norm(self.goals - self.positions, axis=1)
+        self._goal_distance_window.append(current_dists.copy())
+        if len(self._goal_distance_window) < self._goal_distance_window.maxlen:
+            return
+
+        window_start = self._goal_distance_window[0]
+        at_goal = self.agents_at_goal()
+        stalled = ((window_start - current_dists) <= self.stall_progress_epsilon) & ~at_goal
+        self.metrics.stall_agent_checks += int(len(current_dists))
+        self.metrics.stalled_agent_checks += int(stalled.sum())
+
+    def _summarize_shield_backends(self) -> str:
+        if not self.metrics.shield_backend_counts:
+            return ""
+        items = sorted(self.metrics.shield_backend_counts.items())
+        if len(items) == 1:
+            return items[0][0]
+        summary = ",".join(f"{backend}={count}" for backend, count in items)
+        return f"mixed:{summary}"
+
+    def step(self, velocities: np.ndarray, shield_type: str = "orca") -> Tuple[np.ndarray, bool, Dict[str, object]]:
+        preferred_velocities = np.asarray(velocities, dtype=np.float32)
+        safe_velocities = self.apply_shield(preferred_velocities, shield_type=shield_type)
+        self._record_shield_observability(preferred_velocities, safe_velocities)
+        self._record_shield_backend()
         proposed = self.positions + safe_velocities * self.dt
 
         obstacle_hits = 0
@@ -1288,6 +1422,7 @@ class ContinuousMAPFEnv:
         self.history_positions.append(self.positions.copy())
         self.history_velocities.append(safe_velocities.copy())
         self.step_count += 1
+        self._record_stall_metrics()
 
         # Update priorities after each step
         self._update_priorities()
@@ -1297,12 +1432,20 @@ class ContinuousMAPFEnv:
         self.arrival_steps[newly_done] = self.step_count
         return self.positions.copy(), self.is_done(), self.current_metrics()
 
-    def current_metrics(self) -> Dict[str, float]:
+    def current_metrics(self) -> Dict[str, object]:
         at_goal = self.agents_at_goal()
         positions = np.asarray(self.history_positions, dtype=np.float32)
         velocities = np.asarray(self.history_velocities, dtype=np.float32) if self.history_velocities else np.zeros((0, len(self.positions), 2), dtype=np.float32)
         direct = np.linalg.norm(self.goals - self.history_positions[0], axis=1).sum()
         path_length = compute_path_length(positions)
+        shield_agent_steps = max(self.metrics.shield_agent_steps, 1)
+        orca_requested_steps = max(self.metrics.orca_requested_steps, 1)
+        stall_agent_checks = max(self.metrics.stall_agent_checks, 1)
+        projection_p95 = (
+            float(np.percentile(self.metrics.shield_projection_samples, 95))
+            if self.metrics.shield_projection_samples
+            else 0.0
+        )
         return {
             "success": float(np.all(at_goal)),
             "agents_at_goal": float(at_goal.sum()),
@@ -1314,6 +1457,15 @@ class ContinuousMAPFEnv:
             "near_collisions": float(self.metrics.near_collisions),
             "obstacle_hits": float(self.metrics.obstacle_hits),
             "mean_arrival_step": float(np.mean(np.where(self.arrival_steps >= 0, self.arrival_steps, self.step_count))),
+            "shield_backend": self._summarize_shield_backends(),
+            "shield_true_orca_rate": float(self.metrics.orca_true_steps / orca_requested_steps) if self.metrics.orca_requested_steps else 0.0,
+            "shield_fallback_rate": float(self.metrics.orca_fallback_steps / orca_requested_steps) if self.metrics.orca_requested_steps else 0.0,
+            "shield_intervention_rate": float(self.metrics.shield_interventions / shield_agent_steps),
+            "shield_projection_mean": float(self.metrics.shield_projection_sum / shield_agent_steps),
+            "shield_projection_p95": projection_p95,
+            "shield_stopped_rate": float(self.metrics.shield_stops / shield_agent_steps),
+            "shield_speed_clipped_rate": float(self.metrics.shield_speed_clips / shield_agent_steps),
+            "stall_rate": float(self.metrics.stalled_agent_checks / stall_agent_checks) if self.metrics.stall_agent_checks else 0.0,
         }
 
     def is_done(self) -> bool:

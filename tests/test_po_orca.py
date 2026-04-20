@@ -271,7 +271,83 @@ def test_obstacle_map():
 
 
 # ---------------------------------------------------------------
-# Test 7: picbf-cs adapter smoke test
+# Test 7: ORCA backend/debug observability
+# ---------------------------------------------------------------
+def test_orca_observability():
+    grid = np.zeros((20, 20), dtype=np.int8)
+    starts = np.array([
+        [10.5, 7.5],
+        [10.5, 12.5],
+    ], dtype=np.float32)
+    goals = np.array([
+        [10.5, 12.5],
+        [10.5, 7.5],
+    ], dtype=np.float32)
+
+    env = ContinuousMAPFEnv(grid, agent_radius=0.3)
+    env.reset(starts, goals)
+    env.step(env.goal_directed_velocities(), shield_type="orca")
+
+    debug = env.last_shield_debug_info or {}
+    metrics = env.current_metrics()
+    backend = debug.get("backend")
+    report(
+        "ORCA observability: backend recorded",
+        backend in {"rvo2", "heuristic-fallback"},
+        f"backend={backend}, debug={debug}",
+    )
+    report(
+        "ORCA observability: rollout backend summarized",
+        str(metrics.get("shield_backend", "")) != "",
+        f"shield_backend={metrics.get('shield_backend', '')}",
+    )
+    total_rate = float(metrics["shield_true_orca_rate"]) + float(metrics["shield_fallback_rate"])
+    report(
+        "ORCA observability: true/fallback rates sum to 1 when ORCA is requested",
+        abs(total_rate - 1.0) < 1e-6,
+        f"true_rate={metrics['shield_true_orca_rate']:.3f}, fallback_rate={metrics['shield_fallback_rate']:.3f}",
+    )
+
+
+# ---------------------------------------------------------------
+# Test 8: Shield intervention + stall metrics
+# ---------------------------------------------------------------
+def test_shield_observability_metrics():
+    grid = np.zeros((20, 20), dtype=np.int8)
+    starts = np.array([[5.5, 5.5]], dtype=np.float32)
+    goals = np.array([[15.5, 5.5]], dtype=np.float32)
+
+    clip_env = ContinuousMAPFEnv(grid, agent_radius=0.3, max_speed=1.0)
+    clip_env.reset(starts, goals)
+    clip_env.step(np.array([[2.0, 0.0]], dtype=np.float32), shield_type="none")
+    clip_metrics = clip_env.current_metrics()
+    report(
+        "Shield metrics: overspeed clipping is tracked",
+        clip_metrics["shield_speed_clipped_rate"] > 0.0,
+        f"clip_rate={clip_metrics['shield_speed_clipped_rate']:.3f}",
+    )
+    report(
+        "Shield metrics: intervention magnitude is tracked",
+        clip_metrics["shield_intervention_rate"] > 0.0 and clip_metrics["shield_projection_p95"] > 0.0,
+        f"intervention_rate={clip_metrics['shield_intervention_rate']:.3f}, "
+        f"p95={clip_metrics['shield_projection_p95']:.3f}",
+    )
+
+    stall_env = ContinuousMAPFEnv(grid, agent_radius=0.3)
+    stall_env.reset(starts, goals)
+    zero_vel = np.zeros((1, 2), dtype=np.float32)
+    for _ in range(stall_env.stall_window_steps + 2):
+        stall_env.step(zero_vel, shield_type="none")
+    stall_metrics = stall_env.current_metrics()
+    report(
+        "Stall metric: no-progress window is tracked",
+        stall_metrics["stall_rate"] > 0.0,
+        f"stall_rate={stall_metrics['stall_rate']:.3f}",
+    )
+
+
+# ---------------------------------------------------------------
+# Test 9: picbf-cs adapter smoke test
 # ---------------------------------------------------------------
 def test_picbf_cs_adapter():
     grid = np.zeros((20, 20), dtype=np.int8)
@@ -356,7 +432,13 @@ if __name__ == "__main__":
     print("\n--- Test 6: Obstacle Map ---")
     test_obstacle_map()
 
-    print("\n--- Test 7: picbf-cs Adapter ---")
+    print("\n--- Test 7: ORCA Observability ---")
+    test_orca_observability()
+
+    print("\n--- Test 8: Shield / Stall Metrics ---")
+    test_shield_observability_metrics()
+
+    print("\n--- Test 9: picbf-cs Adapter ---")
     test_picbf_cs_adapter()
 
     print("\n" + "=" * 60)

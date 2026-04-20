@@ -136,6 +136,18 @@ def load_model(model_path: str, device: torch.device):
     return model, checkpoint
 
 
+def checkpoint_model_variant(checkpoint: Dict[str, object]) -> str:
+    model_type = str(checkpoint.get("model_type", "gnn"))
+    if model_type != "transformer":
+        return model_type
+    config = checkpoint.get("model_config", {}) or {}
+    if not isinstance(config, dict):
+        return model_type
+    num_heads = int(config.get("num_heads", 8))
+    chunk_horizon = int(config.get("chunk_horizon", 1))
+    return f"transformer_h{num_heads}_chunk{chunk_horizon}"
+
+
 def run_learned_policy(
     model,
     env,
@@ -153,7 +165,7 @@ def run_learned_policy(
     flow_aggregation: str,
     progress_label: str = "",
     log_interval: int = 10,
-) -> Dict[str, float]:
+) -> Dict[str, object]:
     start_time = time.time()
     env.reset(positions, goals)
     for step_idx in range(max_steps):
@@ -203,7 +215,7 @@ def run_orca_baseline(
     shield_type: str = "orca",
     progress_label: str = "",
     log_interval: int = 10,
-) -> Dict[str, float]:
+) -> Dict[str, object]:
     start_time = time.time()
     env.reset(positions, goals)
     for step_idx in range(max_steps):
@@ -239,6 +251,12 @@ def format_shield_debug_info(debug_info) -> str:
     if not debug_info:
         return ""
     parts = []
+    backend = debug_info.get("backend")
+    if backend:
+        parts.append(f"shield_backend={backend}")
+    fallback_reason = debug_info.get("fallback_reason")
+    if fallback_reason:
+        parts.append(f"fallback={fallback_reason}")
     if "component_count" in debug_info:
         parts.append(f"picbf_components={int(debug_info['component_count'])}")
     if "max_component_size" in debug_info:
@@ -299,6 +317,17 @@ def write_rows(output_csv: str, rows: List[Dict[str, object]]) -> None:
         "obstacle_hits",
         "mean_arrival_step",
         "runtime",
+        "model_type",
+        "model_variant",
+        "shield_backend",
+        "shield_true_orca_rate",
+        "shield_fallback_rate",
+        "shield_intervention_rate",
+        "shield_projection_mean",
+        "shield_projection_p95",
+        "shield_stopped_rate",
+        "shield_speed_clipped_rate",
+        "stall_rate",
     ]
     write_header = not os.path.exists(output_csv)
     with open(output_csv, "a", newline="") as f:
@@ -365,10 +394,11 @@ def main():
     set_seed(args.eval_seed)
     device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
     model = None
+    checkpoint = None
     if args.policy != "orca":
         if not args.model_path:
             raise ValueError("--model-path is required for learned policies")
-        model, _ = load_model(args.model_path, device)
+        model, checkpoint = load_model(args.model_path, device)
 
     total_cases = 0
     completed_cases = 0
@@ -475,6 +505,8 @@ def main():
                     "num_consensus_samples": args.num_consensus_samples,
                     "tau": args.tau,
                     "flow_aggregation": args.flow_aggregation if args.policy == "flow" else "",
+                    "model_type": "" if checkpoint is None else str(checkpoint.get("model_type", "gnn")),
+                    "model_variant": "" if checkpoint is None else checkpoint_model_variant(checkpoint),
                     **metrics,
                 }
                 write_rows(args.output_csv, [row])

@@ -51,6 +51,25 @@ def build_checkpoint_name(policy: str, run_name: str) -> str:
     return f"continuous_{policy}_{run_name}_best.pt"
 
 
+def model_variant_tag(
+    model_type: str = "gnn",
+    num_heads: int = 8,
+    chunk_horizon: int = 1,
+) -> str:
+    if model_type == "transformer":
+        return f"transformer_h{num_heads}_chunk{chunk_horizon}"
+    return "gnn"
+
+
+def model_variant_suffix(
+    model_type: str = "gnn",
+    num_heads: int = 8,
+    chunk_horizon: int = 1,
+) -> str:
+    variant = model_variant_tag(model_type, num_heads, chunk_horizon)
+    return "" if variant == "gnn" else f"_{variant}"
+
+
 def write_csv(path: Path, fieldnames: Sequence[str], rows: Iterable[Dict[str, object]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="") as handle:
@@ -116,29 +135,37 @@ def summarize_main(rows: List[Dict[str, str]], output_dir: Path) -> None:
         "near_collisions",
         "obstacle_hits",
     ]
-    grouped: Dict[Tuple[str, str, int], Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
+    grouped: Dict[Tuple[str, str, str, int], Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
     for row in rows:
-        key = (row["policy"], row.get("flow_aggregation", ""), int(row["agents"]))
+        model_variant = row.get("model_variant", row.get("model_type", ""))
+        key = (row["policy"], model_variant, row.get("flow_aggregation", ""), int(row["agents"]))
         for metric in metrics:
             grouped[key][metric].append(float(row[metric]))
 
     summary_rows = []
-    for (policy, flow_aggregation, agents), metric_values in sorted(grouped.items()):
-        summary_row: Dict[str, object] = {"policy": policy, "flow_aggregation": flow_aggregation, "agents": agents}
+    for (policy, model_variant, flow_aggregation, agents), metric_values in sorted(grouped.items()):
+        summary_row: Dict[str, object] = {
+            "policy": policy,
+            "model_variant": model_variant,
+            "flow_aggregation": flow_aggregation,
+            "agents": agents,
+        }
         for metric in metrics:
             avg, std = mean_std(metric_values.get(metric, []))
             summary_row[f"{metric}_mean"] = avg
             summary_row[f"{metric}_std"] = std
         summary_rows.append(summary_row)
 
-    summary_fields = ["policy", "flow_aggregation", "agents"] + [f"{metric}_{suffix}" for metric in metrics for suffix in ("mean", "std")]
+    summary_fields = ["policy", "model_variant", "flow_aggregation", "agents"] + [f"{metric}_{suffix}" for metric in metrics for suffix in ("mean", "std")]
     write_csv(output_dir / "main_summary.csv", summary_fields, summary_rows)
 
-    policies = sorted({(row["policy"], row["flow_aggregation"]) for row in summary_rows})
+    policies = sorted({(row["policy"], row["model_variant"], row["flow_aggregation"]) for row in summary_rows})
     agent_counts = sorted({int(row["agents"]) for row in summary_rows})
     main_table_rows = []
-    for policy, flow_aggregation in policies:
-        label = policy if not flow_aggregation else f"{policy}[{flow_aggregation}]"
+    for policy, model_variant, flow_aggregation in policies:
+        label = policy if not model_variant or model_variant == "gnn" else f"{policy}[{model_variant}]"
+        if flow_aggregation:
+            label = f"{label}[{flow_aggregation}]"
         row: Dict[str, object] = {"policy": label}
         for agents in agent_counts:
             match = next(
@@ -146,6 +173,7 @@ def summarize_main(rows: List[Dict[str, str]], output_dir: Path) -> None:
                     entry
                     for entry in summary_rows
                     if entry["policy"] == policy
+                    and entry["model_variant"] == model_variant
                     and entry["flow_aggregation"] == flow_aggregation
                     and entry["agents"] == agents
                 ),
@@ -170,19 +198,23 @@ def summarize_main(rows: List[Dict[str, str]], output_dir: Path) -> None:
         ("runtime", "Runtime (s)", "runtime_scaling.png"),
     ]:
         plt.figure(figsize=(7, 4.5))
-        for policy, flow_aggregation in policies:
+        for policy, model_variant, flow_aggregation in policies:
             policy_rows = sorted(
                 [
                     entry
                     for entry in summary_rows
-                    if entry["policy"] == policy and entry["flow_aggregation"] == flow_aggregation
+                    if entry["policy"] == policy
+                    and entry["model_variant"] == model_variant
+                    and entry["flow_aggregation"] == flow_aggregation
                 ],
                 key=lambda entry: int(entry["agents"]),
             )
             xs = [int(entry["agents"]) for entry in policy_rows]
             ys = [float(entry[f"{metric}_mean"]) for entry in policy_rows]
             yerr = [float(entry[f"{metric}_std"]) for entry in policy_rows]
-            label = policy if not flow_aggregation else f"{policy}[{flow_aggregation}]"
+            label = policy if not model_variant or model_variant == "gnn" else f"{policy}[{model_variant}]"
+            if flow_aggregation:
+                label = f"{label}[{flow_aggregation}]"
             plt.errorbar(xs, ys, yerr=yerr, marker="o", capsize=3, linewidth=2, label=label)
         plt.xlabel("Agents")
         plt.ylabel(ylabel)
@@ -197,22 +229,24 @@ def summarize_consensus(rows: List[Dict[str, str]], output_dir: Path) -> None:
     if not rows:
         return
 
-    grouped: Dict[Tuple[int, str, int], List[float]] = defaultdict(list)
-    runtime_grouped: Dict[Tuple[int, str, int], List[float]] = defaultdict(list)
+    grouped: Dict[Tuple[str, int, str, int], List[float]] = defaultdict(list)
+    runtime_grouped: Dict[Tuple[str, int, str, int], List[float]] = defaultdict(list)
     for row in rows:
-        key = (int(row["num_consensus_samples"]), row.get("flow_aggregation", ""), int(row["agents"]))
+        model_variant = row.get("model_variant", row.get("model_type", ""))
+        key = (model_variant, int(row["num_consensus_samples"]), row.get("flow_aggregation", ""), int(row["agents"]))
         grouped[key].append(float(row["agent_fraction_at_goal"]))
         runtime_grouped[key].append(float(row["runtime"]))
 
     summary_rows = []
-    consensus_values = sorted({key[0] for key in grouped})
-    aggregations = sorted({key[1] for key in grouped})
-    agent_counts = sorted({key[2] for key in grouped})
-    for consensus, aggregation, agents in sorted(grouped):
-        goal_mean, goal_std = mean_std(grouped[(consensus, aggregation, agents)])
-        runtime_mean, runtime_std = mean_std(runtime_grouped[(consensus, aggregation, agents)])
+    consensus_values = sorted({key[1] for key in grouped})
+    aggregations = sorted({key[2] for key in grouped})
+    model_variants = sorted({key[0] for key in grouped})
+    for model_variant, consensus, aggregation, agents in sorted(grouped):
+        goal_mean, goal_std = mean_std(grouped[(model_variant, consensus, aggregation, agents)])
+        runtime_mean, runtime_std = mean_std(runtime_grouped[(model_variant, consensus, aggregation, agents)])
         summary_rows.append(
             {
+                "model_variant": model_variant,
                 "num_consensus_samples": consensus,
                 "flow_aggregation": aggregation,
                 "agents": agents,
@@ -226,6 +260,7 @@ def summarize_consensus(rows: List[Dict[str, str]], output_dir: Path) -> None:
     write_csv(
         output_dir / "consensus_sweep_summary.csv",
         [
+            "model_variant",
             "num_consensus_samples",
             "flow_aggregation",
             "agents",
@@ -245,23 +280,30 @@ def summarize_consensus(rows: List[Dict[str, str]], output_dir: Path) -> None:
         ("runtime", "Runtime (s)", "consensus_sweep_runtime.png"),
     ]:
         plt.figure(figsize=(7, 4.5))
-        for aggregation in aggregations:
-            for consensus in consensus_values:
-                subset = sorted(
-                    [
-                        row
-                        for row in summary_rows
-                        if int(row["num_consensus_samples"]) == consensus and row["flow_aggregation"] == aggregation
-                    ],
-                    key=lambda row: int(row["agents"]),
-                )
-                if not subset:
-                    continue
-                xs = [int(row["agents"]) for row in subset]
-                ys = [float(row[f"{metric}_mean"]) for row in subset]
-                yerr = [float(row[f"{metric}_std"]) for row in subset]
-                label = f"c={consensus}" if not aggregation else f"c={consensus}[{aggregation}]"
-                plt.errorbar(xs, ys, yerr=yerr, marker="o", capsize=3, linewidth=2, label=label)
+        for model_variant in model_variants:
+            for aggregation in aggregations:
+                for consensus in consensus_values:
+                    subset = sorted(
+                        [
+                            row
+                            for row in summary_rows
+                            if row["model_variant"] == model_variant
+                            and int(row["num_consensus_samples"]) == consensus
+                            and row["flow_aggregation"] == aggregation
+                        ],
+                        key=lambda row: int(row["agents"]),
+                    )
+                    if not subset:
+                        continue
+                    xs = [int(row["agents"]) for row in subset]
+                    ys = [float(row[f"{metric}_mean"]) for row in subset]
+                    yerr = [float(row[f"{metric}_std"]) for row in subset]
+                    label = f"c={consensus}"
+                    if model_variant and model_variant != "gnn":
+                        label = f"{label}[{model_variant}]"
+                    if aggregation:
+                        label = f"{label}[{aggregation}]"
+                    plt.errorbar(xs, ys, yerr=yerr, marker="o", capsize=3, linewidth=2, label=label)
         plt.xlabel("Agents")
         plt.ylabel(ylabel)
         plt.grid(alpha=0.3)
@@ -316,8 +358,15 @@ def summarize_dataset(data_dir: Path, output_dir: Path) -> None:
     )
 
 
-def phase_a_run_name(prefix: str, seed: int) -> str:
-    return f"{prefix}_s{seed}"
+def phase_a_run_name(
+    prefix: str,
+    seed: int,
+    model_type: str = "gnn",
+    num_heads: int = 8,
+    chunk_horizon: int = 1,
+) -> str:
+    suffix = model_variant_suffix(model_type, num_heads, chunk_horizon)
+    return f"{prefix}{suffix}_s{seed}"
 
 
 def stage_generate(args: argparse.Namespace, python_bin: str) -> None:
@@ -386,7 +435,13 @@ def stage_train(args: argparse.Namespace, python_bin: str) -> None:
     Path(args.checkpoint_dir).mkdir(parents=True, exist_ok=True)
     for policy in args.train_policies:
         for seed in args.seeds:
-            run_name = phase_a_run_name(args.run_prefix, seed)
+            run_name = phase_a_run_name(
+                args.run_prefix,
+                seed,
+                args.model_type,
+                args.num_heads,
+                args.chunk_horizon,
+            )
             checkpoint_path = Path(args.checkpoint_dir) / build_checkpoint_name(policy, run_name)
             if args.skip_existing and checkpoint_path.exists():
                 print(f"Skipping existing checkpoint: {checkpoint_path}")
@@ -401,6 +456,8 @@ def stage_train(args: argparse.Namespace, python_bin: str) -> None:
                 args.map_dir,
                 "--policy-type",
                 policy,
+                "--model-type",
+                args.model_type,
                 "--run-name",
                 run_name,
                 "--output-dir",
@@ -411,6 +468,10 @@ def stage_train(args: argparse.Namespace, python_bin: str) -> None:
                 str(args.hidden_dim),
                 "--num-layers",
                 str(args.num_layers),
+                "--num-heads",
+                str(args.num_heads),
+                "--chunk-horizon",
+                str(args.chunk_horizon),
                 "--k",
                 str(args.k),
                 "--m",
@@ -582,12 +643,23 @@ def stage_eval(args: argparse.Namespace, python_bin: str) -> None:
 
     for policy in args.train_policies:
         for seed in args.seeds:
-            run_name = phase_a_run_name(args.run_prefix, seed)
+            run_name = phase_a_run_name(
+                args.run_prefix,
+                seed,
+                args.model_type,
+                args.num_heads,
+                args.chunk_horizon,
+            )
+            variant_suffix = model_variant_suffix(
+                args.model_type,
+                args.num_heads,
+                args.chunk_horizon,
+            )
             checkpoint_path = Path(args.checkpoint_dir) / build_checkpoint_name(policy, run_name)
             if not checkpoint_path.exists() and not args.dry_run:
                 raise FileNotFoundError(f"Missing checkpoint for evaluation: {checkpoint_path}")
 
-            output_csv = eval_main_dir / f"{policy}_seed{seed}.csv"
+            output_csv = eval_main_dir / f"{policy}{variant_suffix}_seed{seed}.csv"
             if not args.skip_existing or not output_csv.exists():
                 run_command(
                     build_eval_command(
@@ -596,7 +668,7 @@ def stage_eval(args: argparse.Namespace, python_bin: str) -> None:
                         output_csv=output_csv,
                         policy=policy,
                         model_path=checkpoint_path,
-                        run_name=f"{args.run_prefix}_{policy}_main",
+                        run_name=f"{args.run_prefix}_{policy}{variant_suffix}_main",
                         train_seed=seed,
                         num_consensus_samples=args.default_consensus_samples if policy == "flow" else 1,
                         flow_aggregation=args.default_flow_aggregation if policy == "flow" else "mean",
@@ -608,7 +680,7 @@ def stage_eval(args: argparse.Namespace, python_bin: str) -> None:
                 for consensus in args.consensus_sweep:
                     if consensus == args.default_consensus_samples:
                         continue
-                    sweep_csv = eval_sweep_dir / f"flow_c{consensus}_seed{seed}.csv"
+                    sweep_csv = eval_sweep_dir / f"flow{variant_suffix}_c{consensus}_seed{seed}.csv"
                     if args.skip_existing and sweep_csv.exists():
                         print(f"Skipping existing sweep eval: {sweep_csv}")
                         continue
@@ -619,7 +691,7 @@ def stage_eval(args: argparse.Namespace, python_bin: str) -> None:
                             output_csv=sweep_csv,
                             policy="flow",
                             model_path=checkpoint_path,
-                            run_name=f"{args.run_prefix}_flow_consensus_sweep",
+                            run_name=f"{args.run_prefix}_flow{variant_suffix}_consensus_sweep",
                             train_seed=seed,
                             num_consensus_samples=consensus,
                             flow_aggregation=args.default_flow_aggregation,
@@ -630,7 +702,7 @@ def stage_eval(args: argparse.Namespace, python_bin: str) -> None:
                 for aggregation in args.aggregation_sweep:
                     if aggregation == args.default_flow_aggregation:
                         continue
-                    sweep_csv = eval_sweep_dir / f"flow_{aggregation}_seed{seed}.csv"
+                    sweep_csv = eval_sweep_dir / f"flow{variant_suffix}_{aggregation}_seed{seed}.csv"
                     if args.skip_existing and sweep_csv.exists():
                         print(f"Skipping existing aggregation eval: {sweep_csv}")
                         continue
@@ -641,7 +713,7 @@ def stage_eval(args: argparse.Namespace, python_bin: str) -> None:
                             output_csv=sweep_csv,
                             policy="flow",
                             model_path=checkpoint_path,
-                            run_name=f"{args.run_prefix}_flow_aggregation_sweep",
+                            run_name=f"{args.run_prefix}_flow{variant_suffix}_aggregation_sweep",
                             train_seed=seed,
                             num_consensus_samples=args.default_consensus_samples,
                             flow_aggregation=aggregation,
@@ -671,19 +743,33 @@ def stage_eval(args: argparse.Namespace, python_bin: str) -> None:
         )
         if "flow" in args.train_policies:
             flow_seed = args.seeds[0]
-            flow_checkpoint = Path(args.checkpoint_dir) / build_checkpoint_name("flow", phase_a_run_name(args.run_prefix, flow_seed))
+            variant_suffix = model_variant_suffix(
+                args.model_type,
+                args.num_heads,
+                args.chunk_horizon,
+            )
+            flow_checkpoint = Path(args.checkpoint_dir) / build_checkpoint_name(
+                "flow",
+                phase_a_run_name(
+                    args.run_prefix,
+                    flow_seed,
+                    args.model_type,
+                    args.num_heads,
+                    args.chunk_horizon,
+                ),
+            )
             run_command(
                 build_eval_command(
                     args,
                     python_bin,
-                    output_csv=viz_main_dir / f"flow_seed{flow_seed}_viz.csv",
+                    output_csv=viz_main_dir / f"flow{variant_suffix}_seed{flow_seed}_viz.csv",
                     policy="flow",
                     model_path=flow_checkpoint,
-                    run_name=f"{args.run_prefix}_flow_viz",
+                    run_name=f"{args.run_prefix}_flow{variant_suffix}_viz",
                     train_seed=flow_seed,
                     num_consensus_samples=args.default_consensus_samples,
                     flow_aggregation=args.default_flow_aggregation,
-                    viz_dir=viz_main_dir / "flow",
+                    viz_dir=viz_main_dir / f"flow{variant_suffix}",
                     max_scenarios=args.viz_max_scenarios,
                     agent_counts=args.viz_agent_counts,
                 ),
@@ -735,6 +821,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--hidden-dim", type=int, default=512)
     parser.add_argument("--num-layers", type=int, default=4)
+    parser.add_argument("--model-type", choices=["gnn", "transformer"], default="gnn")
+    parser.add_argument("--num-heads", type=int, default=8)
+    parser.add_argument("--chunk-horizon", type=int, default=1)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--val-split", type=float, default=0.05)
