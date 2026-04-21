@@ -281,6 +281,7 @@ def create_continuous_data_object(
     m,
     labels=None,
     action_labels=None,
+    prev_velocities=None,
     neighbor_radius=None,
     max_speed=1.0,
 ):
@@ -320,6 +321,17 @@ def create_continuous_data_object(
             np.clip(goal_dist / max(k, 1), 0.0, 1.0),
             at_goal,
             np.full((num_agents, 1), max_speed, dtype=np.float32),
+            np.clip(
+                np.asarray(
+                    np.zeros((num_agents, 2), dtype=np.float32)
+                    if prev_velocities is None
+                    else prev_velocities,
+                    dtype=np.float32,
+                )
+                / max(max_speed, 1e-6),
+                -1.0,
+                1.0,
+            ),
         ],
         axis=1,
     ).astype(np.float32)
@@ -337,6 +349,23 @@ def create_continuous_data_object(
         y=torch.from_numpy(np.asarray(labels, dtype=np.float32)),
         action_label=torch.from_numpy(np.asarray(action_labels, dtype=np.int64)),
     )
+
+
+def align_continuous_aux_features(data, expected_aux_feature_dim):
+    if expected_aux_feature_dim is None:
+        return data
+    aux_features = getattr(data, "aux_features", None)
+    if aux_features is None:
+        return data
+    current_dim = int(aux_features.shape[-1])
+    expected_dim = int(expected_aux_feature_dim)
+    if current_dim == expected_dim:
+        return data
+    if current_dim < expected_dim:
+        data.aux_features = F.pad(aux_features.float(), (0, expected_dim - current_dim))
+    else:
+        data.aux_features = aux_features[:, :expected_dim].float()
+    return data
 
 
 def normalize_continuous_graph_data(data, k, max_speed=1.0):

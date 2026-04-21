@@ -155,7 +155,11 @@ def main() -> None:
     parser.add_argument("--scen-dir", required=True)
     parser.add_argument("--maps", nargs="+", default=["empty-48-48"])
     parser.add_argument("--agent-counts", nargs="+", type=int, default=[16, 32, 64, 96, 128, 160])
-    parser.add_argument("--expert-source", choices=["eecbs", "orca", "po-orca", "hybrid"], default="hybrid")
+    parser.add_argument(
+        "--expert-source",
+        choices=["eecbs", "eecbs-guided-orca", "orca", "po-orca", "hybrid"],
+        default="hybrid",
+    )
     parser.add_argument("--max-scenarios", type=int, default=80)
     parser.add_argument("--scenario-start", type=int, default=1)
     parser.add_argument("--scenario-end", type=int, default=80)
@@ -172,6 +176,14 @@ def main() -> None:
     parser.add_argument("--goal-tolerance", type=float, default=0.25)
     parser.add_argument("--wait-threshold", type=float, default=0.1)
     parser.add_argument("--num-directions", type=int, default=8)
+    parser.add_argument("--tracker-lookahead-distance", type=float, default=0.75)
+    parser.add_argument("--tracker-waypoint-tolerance", type=float, default=0.25)
+    parser.add_argument("--tracker-goal-slowdown-radius", type=float, default=1.0)
+    parser.add_argument(
+        "--tracker-shield-type",
+        choices=["orca", "heuristic-orca", "po-orca"],
+        default="orca",
+    )
     parser.add_argument("--suboptimality", type=float, default=1.2)
     parser.add_argument("--time-limit", type=int, default=60)
     parser.add_argument("--eecbs-repo", default=str(REPO_ROOT.parent / "EECBS-flow"))
@@ -223,6 +235,14 @@ def main() -> None:
             str(args.wait_threshold),
             "--num-directions",
             str(args.num_directions),
+            "--tracker-lookahead-distance",
+            str(args.tracker_lookahead_distance),
+            "--tracker-waypoint-tolerance",
+            str(args.tracker_waypoint_tolerance),
+            "--tracker-goal-slowdown-radius",
+            str(args.tracker_goal_slowdown_radius),
+            "--tracker-shield-type",
+            str(args.tracker_shield_type),
             "--suboptimality",
             str(args.suboptimality),
             "--time-limit",
@@ -252,6 +272,10 @@ def main() -> None:
         "goal_tolerance": args.goal_tolerance,
         "wait_threshold": args.wait_threshold,
         "num_directions": args.num_directions,
+        "tracker_lookahead_distance": args.tracker_lookahead_distance,
+        "tracker_waypoint_tolerance": args.tracker_waypoint_tolerance,
+        "tracker_goal_slowdown_radius": args.tracker_goal_slowdown_radius,
+        "tracker_shield_type": args.tracker_shield_type,
         "suboptimality": args.suboptimality,
         "time_limit": args.time_limit,
     }

@@ -18,6 +18,7 @@ from main_pys.continuous_scenarios import scenario_id_from_path, select_scenario
 from main_pys.generative_model import FlowGNNModel
 from main_pys.transformer_model import FlowTransformerModel
 from main_pys.model_inputs import (
+    align_continuous_aux_features,
     create_continuous_data_object,
     labels_to_direction_vectors,
     load_grid_map_from_file,
@@ -65,6 +66,8 @@ def find_scenarios(
 
 
 def score_candidate_velocities(env, velocities: np.ndarray) -> float:
+    if velocities.ndim == 3:
+        velocities = velocities[:, 0, :]
     clipped = np.asarray(velocities, dtype=np.float32)
     norms = np.linalg.norm(clipped, axis=1)
     clipping_penalty = float(np.mean(np.maximum(norms - env.max_speed, 0.0)))
@@ -178,35 +181,55 @@ def run_learned_policy(
     for step_idx in range(max_steps):
         step_start = time.time()
         graph_start = time.perf_counter()
-        data = create_continuous_data_object(env.positions, goals, env.obstacle_map, k=k, m=m, max_speed=env.max_speed)
+        prev_velocities = (
+            np.asarray(env.history_velocities[-1], dtype=np.float32)
+            if env.history_velocities
+            else np.zeros_like(env.positions, dtype=np.float32)
+        )
+        data = create_continuous_data_object(
+            env.positions,
+            goals,
+            env.obstacle_map,
+            k=k,
+            m=m,
+            prev_velocities=prev_velocities,
+            max_speed=env.max_speed,
+        )
         data = normalize_continuous_graph_data(data, k=k, max_speed=env.max_speed)
+        data = align_continuous_aux_features(data, getattr(model, "aux_feature_dim", None))
         data = data.to(device)
         graph_construction_time += time.perf_counter() - graph_start
         n_agents = env.positions.shape[0]
+        velocity_dim = int(getattr(model, "velocity_dim", 2))
+        chunk_horizon = int(getattr(model, "chunk_horizon", 1))
+        flow_dim = velocity_dim * chunk_horizon
 
         with torch.no_grad():
             if policy_type == "flow":
                 dt = 1.0 / max(num_integration_steps, 1)
                 candidate_velocities: List[np.ndarray] = []
                 for _ in range(max(num_consensus_samples, 1)):
-                    v = torch.randn(n_agents, 2, device=device)
+                    v = torch.randn(n_agents, flow_dim, device=device)
                     for step in range(num_integration_steps):
                         t = torch.full((n_agents, 1), step * dt, device=device)
                         inference_start = time.perf_counter()
                         flow = model(v, t, data)
                         model_inference_time += time.perf_counter() - inference_start
                         v = v + flow * dt
-                    candidate_velocities.append((v.cpu().numpy() * env.max_speed).astype(np.float32))
-                velocities = aggregate_flow_samples(candidate_velocities, aggregation=flow_aggregation, env=env)
+                    candidate_chunk = v.reshape(n_agents, chunk_horizon, velocity_dim)
+                    candidate_velocities.append((candidate_chunk.cpu().numpy() * env.max_speed).astype(np.float32))
+                velocity_chunk = aggregate_flow_samples(candidate_velocities, aggregation=flow_aggregation, env=env)
+                velocities = velocity_chunk[:, 0, :] if velocity_chunk.ndim == 3 else velocity_chunk
             else:
-                zero_v = torch.zeros(n_agents, 2, device=device)
+                zero_v = torch.zeros(n_agents, flow_dim, device=device)
                 zero_t = torch.zeros(n_agents, 1, device=device)
                 inference_start = time.perf_counter()
                 _, action_logits = model(zero_v, zero_t, data, return_action_logits=True)
                 model_inference_time += time.perf_counter() - inference_start
-                logits = (action_logits / max(tau, 1e-6)).cpu().numpy()
-                labels = logits.argmax(axis=1)
-                velocities = labels_to_direction_vectors(labels, num_directions=action_logits.shape[1] - 1) * env.max_speed
+                action_dim = int(getattr(model, "action_dim", max(action_logits.shape[1], 1)))
+                logits = (action_logits / max(tau, 1e-6)).reshape(n_agents, -1, action_dim).cpu().numpy()
+                labels = logits[:, 0, :].argmax(axis=1)
+                velocities = labels_to_direction_vectors(labels, num_directions=action_dim - 1) * env.max_speed
 
         env.step(velocities, shield_type=shield_type)
         done = env.is_done()

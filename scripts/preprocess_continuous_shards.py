@@ -55,6 +55,7 @@ def main() -> None:
     parser.add_argument("--out", required=True, help="Output directory for shard files and manifest")
     parser.add_argument("--k", type=int, default=4)
     parser.add_argument("--m", type=int, default=5)
+    parser.add_argument("--chunk-horizon", type=int, default=1, help="Future supervision horizon to encode into each sample")
     parser.add_argument("--num-directions", type=int, default=8)
     parser.add_argument("--wait-threshold", type=float, default=0.1)
     parser.add_argument("--max-speed", type=float, default=1.0)
@@ -93,6 +94,7 @@ def main() -> None:
         map_dir=args.map_dir,
         k=args.k,
         m=args.m,
+        chunk_horizon=args.chunk_horizon,
         num_directions=args.num_directions,
         wait_threshold=args.wait_threshold,
         max_speed=args.max_speed,
@@ -201,6 +203,7 @@ def main() -> None:
         "total_samples": sample_idx,
         "num_shards": len(shard_files),
         "shard_size": args.shard_size,
+        "chunk_horizon": int(args.chunk_horizon),
         "shard_files": shard_files,
         "sample_to_shard": np.asarray(sample_to_shard, dtype=np.int32),
         "sample_to_offset": np.asarray(sample_to_offset, dtype=np.int32),

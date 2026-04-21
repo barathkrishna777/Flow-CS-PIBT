@@ -19,6 +19,7 @@ from main_pys.dataset_continuous_preprocessed import (
     build_preprocessed_continuous_weighted_sampler,
 )
 from main_pys.generative_model import FlowGNNModel
+from main_pys.model_inputs import align_continuous_aux_features
 from main_pys.transformer_model import FlowTransformerModel
 
 
@@ -78,10 +79,50 @@ def _shield_project_batch(predicted_velocity, batch, map_cache, max_speed, shiel
     return torch.cat(shielded_chunks, dim=0).to(predicted_velocity.device, dtype=predicted_velocity.dtype)
 
 
-def compute_flow_loss(model, batch, device, use_amp, args, map_cache):
+def _prepare_batch_for_model(batch, model, device):
     batch = batch.to(device)
-    x_1 = batch.y.view(-1, 2)
-    weights = batch.node_weights.view(-1, 1)
+    return align_continuous_aux_features(batch, getattr(model, "aux_feature_dim", None))
+
+
+def _reshape_velocity_targets(targets: torch.Tensor, velocity_dim: int) -> tuple[torch.Tensor, int]:
+    if targets.dim() == 1:
+        targets = targets.unsqueeze(1)
+    targets = targets.reshape(targets.shape[0], -1).float()
+    if targets.shape[1] % velocity_dim != 0:
+        raise ValueError(
+            f"Velocity target width {targets.shape[1]} is not divisible by velocity_dim={velocity_dim}"
+        )
+    return targets, targets.shape[1] // velocity_dim
+
+
+def _compute_action_loss(action_logits, action_labels, weights, action_dim: int):
+    if action_labels.dim() == 1:
+        action_targets = action_labels.unsqueeze(1)
+    else:
+        action_targets = action_labels.reshape(action_labels.shape[0], -1)
+
+    action_chunk_horizon = action_logits.shape[1] // action_dim
+    if action_logits.shape[1] % action_dim != 0:
+        raise ValueError(
+            f"Action logits width {action_logits.shape[1]} is not divisible by action_dim={action_dim}"
+        )
+    if action_targets.shape[1] != action_chunk_horizon:
+        raise ValueError(
+            f"Action target horizon {action_targets.shape[1]} does not match logits horizon {action_chunk_horizon}"
+        )
+
+    flat_logits = action_logits.reshape(-1, action_chunk_horizon, action_dim).reshape(-1, action_dim)
+    flat_targets = action_targets.reshape(-1)
+    per_step_loss = F.cross_entropy(flat_logits, flat_targets, reduction="none").view(-1, action_chunk_horizon)
+    return (per_step_loss * weights.expand(-1, action_chunk_horizon)).mean()
+
+
+def compute_flow_loss(model, batch, device, use_amp, args, map_cache):
+    batch = _prepare_batch_for_model(batch, model, device)
+    velocity_dim = int(getattr(model, "velocity_dim", 2))
+    action_dim = int(getattr(model, "action_dim", args.num_directions + 1))
+    x_1, chunk_horizon = _reshape_velocity_targets(batch.y, velocity_dim)
+    weights = batch.node_weights.float().view(-1, 1)
 
     num_graphs = int(batch.batch.max().item()) + 1
     t_per_graph = torch.sigmoid(torch.randn(num_graphs, 1, device=device)).clamp(0.01, 0.99)
@@ -97,8 +138,12 @@ def compute_flow_loss(model, batch, device, use_amp, args, map_cache):
         predicted_velocity = x_t + (1.0 - t) * predicted_flow
         shield_loss = torch.tensor(0.0, device=device)
         if args.shield_aware_loss:
+            predicted_velocity_steps = predicted_velocity.reshape(-1, chunk_horizon, velocity_dim)
+            target_velocity_steps = x_1.reshape(-1, chunk_horizon, velocity_dim)
+            predicted_first = predicted_velocity_steps[:, 0]
+            target_first = target_velocity_steps[:, 0]
             shielded_velocity = _shield_project_batch(
-                predicted_velocity=predicted_velocity,
+                predicted_velocity=predicted_first,
                 batch=batch,
                 map_cache=map_cache,
                 max_speed=args.max_speed,
@@ -106,11 +151,10 @@ def compute_flow_loss(model, batch, device, use_amp, args, map_cache):
                 dt=args.dt,
                 agent_radius=args.agent_radius,
             )
-            shielded_velocity = predicted_velocity + (shielded_velocity - predicted_velocity).detach()
-            shield_loss = (F.mse_loss(shielded_velocity, x_1, reduction="none") * weights).mean()
+            shielded_velocity = predicted_first + (shielded_velocity - predicted_first).detach()
+            shield_loss = (F.mse_loss(shielded_velocity, target_first, reduction="none") * weights).mean()
 
-        action_loss = F.cross_entropy(action_logits, batch.action_label, reduction="none")
-        action_loss = (action_loss * weights.squeeze(1)).mean()
+        action_loss = _compute_action_loss(action_logits, batch.action_label, weights, action_dim)
 
         total_loss = (
             args.flow_loss_weight * flow_loss
@@ -121,16 +165,18 @@ def compute_flow_loss(model, batch, device, use_amp, args, map_cache):
 
 
 def compute_discrete_loss(model, batch, device, use_amp):
-    batch = batch.to(device)
+    batch = _prepare_batch_for_model(batch, model, device)
     n = batch.action_label.shape[0]
-    zero_v = torch.zeros(n, 2, device=device)
+    velocity_dim = int(getattr(model, "velocity_dim", 2))
+    chunk_horizon = int(getattr(model, "chunk_horizon", 1))
+    action_dim = int(getattr(model, "action_dim", 5))
+    zero_v = torch.zeros(n, velocity_dim * chunk_horizon, device=device)
     zero_t = torch.zeros(n, 1, device=device)
-    weights = batch.node_weights.view(-1)
+    weights = batch.node_weights.float().view(-1, 1)
 
     with torch.cuda.amp.autocast(enabled=use_amp):
         _, action_logits = model(zero_v, zero_t, batch, return_action_logits=True)
-        loss = F.cross_entropy(action_logits, batch.action_label, reduction="none")
-        loss = (loss * weights).mean()
+        loss = _compute_action_loss(action_logits, batch.action_label, weights, action_dim)
     return loss
 
 
@@ -154,6 +200,9 @@ def train(args):
         torch.multiprocessing.set_sharing_strategy("file_system")
 
     set_seed(args.seed)
+    if getattr(args, "chunk_horizon", 1) > 1 and getattr(args, "model_type", "gnn") != "transformer":
+        raise ValueError("--chunk-horizon > 1 is currently supported only with --model-type transformer")
+
     device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
     use_amp = device.type == "cuda"
     data_loader_generator = torch.Generator().manual_seed(args.seed)
@@ -174,6 +223,7 @@ def train(args):
             num_directions=args.num_directions,
             wait_threshold=args.wait_threshold,
             max_speed=args.max_speed,
+            chunk_horizon=args.chunk_horizon,
         )
 
     preload = getattr(args, "preload_shards", False) and args.preprocessed_dir is not None
@@ -214,6 +264,21 @@ def train(args):
 
     train_size = len(train_dataset)
     val_size = len(val_dataset) if val_dataset is not None else 0
+    if train_size <= 0:
+        raise RuntimeError("Training dataset is empty after applying filters")
+
+    sample_graph = train_dataset[0]
+    sample_input_channels = int(sample_graph.x.shape[1])
+    sample_aux_dim = int(getattr(sample_graph, "aux_features").shape[1])
+    sample_target_dim = int(sample_graph.y.shape[1] if sample_graph.y.dim() > 1 else sample_graph.y.shape[0])
+    sample_chunk_horizon = sample_target_dim // 2
+    if sample_target_dim % 2 != 0:
+        raise RuntimeError(f"Unexpected target width {sample_target_dim}; expected a multiple of 2")
+    if sample_chunk_horizon != int(args.chunk_horizon):
+        raise RuntimeError(
+            f"Dataset emits chunk_horizon={sample_chunk_horizon}, but --chunk-horizon={args.chunk_horizon}. "
+            "Rebuild raw/preprocessed continuous data for the requested chunk horizon."
+        )
 
     sampler = None
     if not args.no_weighted_sampling:
@@ -275,8 +340,8 @@ def train(args):
             hidden_dim=args.hidden_dim,
             num_layers=args.num_layers,
             num_heads=getattr(args, "num_heads", 8),
-            num_input_channels=4,
-            aux_feature_dim=5,
+            num_input_channels=sample_input_channels,
+            aux_feature_dim=sample_aux_dim,
             action_dim=args.num_directions + 1,
             chunk_horizon=getattr(args, "chunk_horizon", 1),
         ).to(device)
@@ -285,8 +350,8 @@ def train(args):
             k=args.k,
             hidden_dim=args.hidden_dim,
             num_layers=args.num_layers,
-            num_input_channels=4,
-            aux_feature_dim=5,
+            num_input_channels=sample_input_channels,
+            aux_feature_dim=sample_aux_dim,
             action_dim=args.num_directions + 1,
         ).to(device)
 
@@ -336,8 +401,8 @@ def train(args):
                 "hidden_dim": args.hidden_dim,
                 "num_layers": args.num_layers,
                 "num_heads": getattr(args, "num_heads", 8),
-                "num_input_channels": 4,
-                "aux_feature_dim": 5,
+                "num_input_channels": sample_input_channels,
+                "aux_feature_dim": sample_aux_dim,
                 "action_dim": args.num_directions + 1,
                 "velocity_dim": 2,
                 "chunk_horizon": getattr(args, "chunk_horizon", 1),
@@ -347,6 +412,7 @@ def train(args):
                 "wait_threshold": args.wait_threshold,
                 "max_speed": args.max_speed,
                 "expert_sources": args.expert_sources,
+                "chunk_horizon": args.chunk_horizon,
                 "preprocessed_dir": args.preprocessed_dir,
                 "val_preprocessed_dir": args.val_preprocessed_dir,
                 "preload_shards": bool(args.preload_shards),

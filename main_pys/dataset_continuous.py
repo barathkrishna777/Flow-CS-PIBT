@@ -33,6 +33,7 @@ class ContinuousFlowDataset(Dataset):
         num_directions: int = 8,
         wait_threshold: float = 0.1,
         max_speed: float = 1.0,
+        chunk_horizon: int = 1,
         expert_sources: Optional[Sequence[str]] = None,
         scenario_ids: Optional[Sequence[int]] = None,
         scenario_start: Optional[int] = None,
@@ -45,6 +46,7 @@ class ContinuousFlowDataset(Dataset):
         self.num_directions = num_directions
         self.wait_threshold = wait_threshold
         self.max_speed = max_speed
+        self.chunk_horizon = max(1, int(chunk_horizon))
         self.allowed_expert_sources = set(expert_sources) if expert_sources else None
         self.allowed_scenario_ids = set(int(v) for v in scenario_ids) if scenario_ids else None
         self.scenario_start = scenario_start
@@ -109,7 +111,8 @@ class ContinuousFlowDataset(Dataset):
         for rollout_idx, info in enumerate(self.rollout_infos):
             data = _load_npz(str(info["path"]))
             steps = int(data["positions"].shape[0] - 1)
-            for t in range(steps):
+            max_start = steps - self.chunk_horizon + 1
+            for t in range(max(0, max_start)):
                 index.append((rollout_idx, t))
         random.shuffle(index)
         return index
@@ -126,16 +129,39 @@ class ContinuousFlowDataset(Dataset):
 
         positions = data["positions"][t].astype(np.float32)
         goals = data["goals"].astype(np.float32)
-        velocities = data["velocities"][t].astype(np.float32)
-        action_labels = data["action_labels"][t].astype(np.int64) if "action_labels" in data else velocity_to_direction_labels(
-            velocities,
-            num_directions=self.num_directions,
-            wait_threshold=self.wait_threshold,
-        )
+        velocity_chunk = data["velocities"][t : t + self.chunk_horizon].astype(np.float32)
+        if "previous_velocities" in data:
+            previous_velocities = data["previous_velocities"][t].astype(np.float32)
+        elif t > 0:
+            previous_velocities = data["velocities"][t - 1].astype(np.float32)
+        else:
+            previous_velocities = np.zeros((positions.shape[0], 2), dtype=np.float32)
 
-        moving = np.linalg.norm(velocities, axis=1) >= self.wait_threshold
+        if "action_labels" in data:
+            action_chunk = data["action_labels"][t : t + self.chunk_horizon].astype(np.int64)
+        else:
+            action_chunk = np.asarray(
+                [
+                    velocity_to_direction_labels(
+                        step_velocities,
+                        num_directions=self.num_directions,
+                        wait_threshold=self.wait_threshold,
+                    )
+                    for step_velocities in velocity_chunk
+                ],
+                dtype=np.int64,
+            )
+
+        if self.chunk_horizon == 1:
+            labels = velocity_chunk[0]
+            action_labels = action_chunk[0]
+        else:
+            labels = np.transpose(velocity_chunk, (1, 0, 2)).reshape(positions.shape[0], -1)
+            action_labels = np.transpose(action_chunk, (1, 0))
+
+        moving = np.any(np.linalg.norm(velocity_chunk, axis=2) >= self.wait_threshold, axis=0)
         moving_ratio = moving.mean() if len(moving) else 0.0
-        weights = np.ones(len(velocities), dtype=np.float32)
+        weights = np.ones(positions.shape[0], dtype=np.float32)
         if len(weights):
             moving_weight = 1.0 / max(moving_ratio, 1e-3)
             waiting_weight = 1.0 / max(1.0 - moving_ratio, 1e-3)
@@ -149,8 +175,9 @@ class ContinuousFlowDataset(Dataset):
             grid,
             self.k,
             self.m,
-            labels=velocities,
+            labels=labels,
             action_labels=action_labels,
+            prev_velocities=previous_velocities,
             max_speed=self.max_speed,
         )
         graph.node_weights = torch.from_numpy(weights)
@@ -162,6 +189,7 @@ class ContinuousFlowDataset(Dataset):
         graph.rollout_id = int(rollout_idx)
         graph.positions = torch.from_numpy(positions)
         graph.goals = torch.from_numpy(goals)
+        graph.prev_velocities = torch.from_numpy(previous_velocities)
         graph = normalize_continuous_graph_data(graph, self.k, max_speed=self.max_speed)
         return graph
 

@@ -6,7 +6,7 @@ import tempfile
 from functools import partial
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -206,6 +206,214 @@ def discrete_paths_to_continuous(
     return positions_arr, velocities_arr
 
 
+def compress_waypoint_polyline(
+    waypoints: np.ndarray,
+    duplicate_tolerance: float = 1e-4,
+    collinear_tolerance: float = 1e-5,
+) -> np.ndarray:
+    waypoints = np.asarray(waypoints, dtype=np.float32)
+    if len(waypoints) <= 2:
+        return waypoints.copy()
+
+    deduped = [waypoints[0]]
+    for point in waypoints[1:]:
+        if np.linalg.norm(point - deduped[-1]) > duplicate_tolerance:
+            deduped.append(point)
+    if len(deduped) <= 2:
+        return np.asarray(deduped, dtype=np.float32)
+
+    compressed = [deduped[0]]
+    for idx in range(1, len(deduped) - 1):
+        prev_point = compressed[-1]
+        point = deduped[idx]
+        next_point = deduped[idx + 1]
+        v1 = point - prev_point
+        v2 = next_point - point
+        norm1 = float(np.linalg.norm(v1))
+        norm2 = float(np.linalg.norm(v2))
+        if norm1 <= duplicate_tolerance or norm2 <= duplicate_tolerance:
+            continue
+        cross = float(v1[0] * v2[1] - v1[1] * v2[0])
+        dot = float(np.dot(v1, v2))
+        if abs(cross) <= collinear_tolerance * max(norm1 * norm2, 1.0) and dot >= 0.0:
+            continue
+        compressed.append(point)
+    compressed.append(deduped[-1])
+    return np.asarray(compressed, dtype=np.float32)
+
+
+def discrete_paths_to_waypoints(
+    discrete_positions: np.ndarray,
+    compress_waypoints: bool = True,
+) -> List[np.ndarray]:
+    continuous_paths = discrete_positions.astype(np.float32) + 0.5
+    routes: List[np.ndarray] = []
+    for agent_idx in range(continuous_paths.shape[0]):
+        route = continuous_paths[agent_idx]
+        if compress_waypoints:
+            route = compress_waypoint_polyline(route)
+        routes.append(route.astype(np.float32, copy=False))
+    return routes
+
+
+def shifted_previous_velocities(velocities: np.ndarray) -> np.ndarray:
+    velocities = np.asarray(velocities, dtype=np.float32)
+    previous = np.zeros_like(velocities, dtype=np.float32)
+    if len(velocities) > 1:
+        previous[1:] = velocities[:-1]
+    return previous
+
+
+def _advance_waypoint_index(
+    route: np.ndarray,
+    position: np.ndarray,
+    waypoint_idx: int,
+    waypoint_tolerance: float,
+) -> int:
+    if len(route) == 0:
+        return 0
+    idx = min(max(int(waypoint_idx), 0), len(route) - 1)
+    final_idx = len(route) - 1
+    while idx < final_idx and np.linalg.norm(route[idx] - position) <= waypoint_tolerance:
+        idx += 1
+    return idx
+
+
+def _lookahead_target(
+    route: np.ndarray,
+    position: np.ndarray,
+    waypoint_idx: int,
+    lookahead_distance: float,
+) -> np.ndarray:
+    if len(route) == 0:
+        return np.asarray(position, dtype=np.float32)
+
+    idx = min(max(int(waypoint_idx), 0), len(route) - 1)
+    anchor = np.asarray(position, dtype=np.float32)
+    remaining = max(float(lookahead_distance), 0.0)
+    if remaining <= 1e-6:
+        return route[idx].astype(np.float32, copy=True)
+
+    for next_idx in range(idx, len(route)):
+        waypoint = route[next_idx]
+        segment = waypoint - anchor
+        segment_length = float(np.linalg.norm(segment))
+        if segment_length >= remaining and segment_length > 1e-6:
+            return (anchor + segment * (remaining / segment_length)).astype(np.float32)
+        anchor = waypoint
+        remaining -= segment_length
+    return route[-1].astype(np.float32, copy=True)
+
+
+def _tracker_preferred_velocity(
+    position: np.ndarray,
+    target: np.ndarray,
+    goal: np.ndarray,
+    dt: float,
+    max_speed: float,
+    goal_tolerance: float,
+    slowdown_radius: float,
+) -> np.ndarray:
+    goal_delta = goal - position
+    goal_distance = float(np.linalg.norm(goal_delta))
+    if goal_distance <= goal_tolerance:
+        return np.zeros(2, dtype=np.float32)
+
+    target_delta = target - position
+    target_distance = float(np.linalg.norm(target_delta))
+    if target_distance <= 1e-6:
+        target_delta = goal_delta
+        target_distance = max(goal_distance, 1e-6)
+
+    slowdown_scale = 1.0
+    if slowdown_radius > 1e-6:
+        slowdown_scale = min(1.0, goal_distance / slowdown_radius)
+
+    desired_speed = min(max_speed * slowdown_scale, target_distance / max(dt, 1e-6))
+    if desired_speed <= 1e-6:
+        return np.zeros(2, dtype=np.float32)
+    return (target_delta / max(target_distance, 1e-6) * desired_speed).astype(np.float32)
+
+
+def rollout_eecbs_guided_tracker(
+    obstacle_map: np.ndarray,
+    starts: np.ndarray,
+    goals: np.ndarray,
+    routes: List[np.ndarray],
+    dt: float,
+    max_speed: float,
+    max_steps: int,
+    agent_radius: float,
+    goal_tolerance: float,
+    lookahead_distance: float,
+    waypoint_tolerance: float,
+    slowdown_radius: float,
+    shield_type: str = "orca",
+) -> Tuple[np.ndarray, np.ndarray, Dict[str, np.ndarray]]:
+    env = ContinuousMAPFEnv(
+        obstacle_map=obstacle_map,
+        dt=dt,
+        max_speed=max_speed,
+        agent_radius=agent_radius,
+        goal_tolerance=goal_tolerance,
+    )
+    env.reset(starts, goals)
+    num_agents = len(starts)
+    waypoint_indices = np.zeros(num_agents, dtype=np.int32)
+    preferred_history: List[np.ndarray] = []
+    waypoint_history: List[np.ndarray] = []
+
+    for _ in range(max_steps):
+        preferred = np.zeros((num_agents, 2), dtype=np.float32)
+        for agent_idx in range(num_agents):
+            route = routes[agent_idx]
+            if len(route) == 0:
+                continue
+            waypoint_indices[agent_idx] = _advance_waypoint_index(
+                route,
+                env.positions[agent_idx],
+                int(waypoint_indices[agent_idx]),
+                waypoint_tolerance,
+            )
+            target = _lookahead_target(
+                route,
+                env.positions[agent_idx],
+                int(waypoint_indices[agent_idx]),
+                lookahead_distance,
+            )
+            preferred[agent_idx] = _tracker_preferred_velocity(
+                env.positions[agent_idx],
+                target,
+                goals[agent_idx],
+                dt=dt,
+                max_speed=max_speed,
+                goal_tolerance=goal_tolerance,
+                slowdown_radius=slowdown_radius,
+            )
+        preferred_history.append(preferred.copy())
+        waypoint_history.append(waypoint_indices.copy())
+        env.step(preferred, shield_type=shield_type)
+        if env.is_done():
+            break
+
+    positions = np.asarray(env.history_positions, dtype=np.float32)
+    velocities = np.asarray(env.history_velocities, dtype=np.float32)
+    metadata = {
+        "tracker_preferred_velocities": (
+            np.asarray(preferred_history, dtype=np.float32)
+            if preferred_history
+            else np.zeros((0, num_agents, 2), dtype=np.float32)
+        ),
+        "tracker_waypoint_indices": (
+            np.asarray(waypoint_history, dtype=np.int32)
+            if waypoint_history
+            else np.zeros((0, num_agents), dtype=np.int32)
+        ),
+        "tracker_waypoint_counts": np.asarray([len(route) for route in routes], dtype=np.int32),
+    }
+    return positions, velocities, metadata
+
+
 def rollout_orca_policy(
     obstacle_map: np.ndarray,
     starts: np.ndarray,
@@ -379,33 +587,37 @@ def save_rollout(
     fallback_reason: str,
     num_directions: int,
     wait_threshold: float,
+    additional_fields: Optional[Dict[str, object]] = None,
 ) -> None:
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    np.savez_compressed(
-        output_path,
-        map_name=np.asarray(map_name),
-        scenario_name=np.asarray(scenario_name),
-        scenario_id=np.asarray(scenario_id, dtype=np.int32),
-        positions=positions.astype(np.float32),
-        velocities=velocities.astype(np.float32),
-        goals=goals.astype(np.float32),
-        dt=np.asarray(dt, dtype=np.float32),
-        expert_recipe_requested=np.asarray(expert_recipe_requested),
-        expert_source_used=np.asarray(expert_source_used),
-        expert_source=np.asarray(expert_source_used),
-        fallback_reason=np.asarray(fallback_reason),
-        agent_count=np.asarray(positions.shape[1], dtype=np.int32),
-        rollout_length=np.asarray(len(velocities), dtype=np.int32),
-        fraction_moving=np.asarray(
+    payload: Dict[str, object] = {
+        "map_name": np.asarray(map_name),
+        "scenario_name": np.asarray(scenario_name),
+        "scenario_id": np.asarray(scenario_id, dtype=np.int32),
+        "positions": positions.astype(np.float32),
+        "velocities": velocities.astype(np.float32),
+        "previous_velocities": shifted_previous_velocities(velocities),
+        "goals": goals.astype(np.float32),
+        "dt": np.asarray(dt, dtype=np.float32),
+        "expert_recipe_requested": np.asarray(expert_recipe_requested),
+        "expert_source_used": np.asarray(expert_source_used),
+        "expert_source": np.asarray(expert_source_used),
+        "fallback_reason": np.asarray(fallback_reason),
+        "agent_count": np.asarray(positions.shape[1], dtype=np.int32),
+        "rollout_length": np.asarray(len(velocities), dtype=np.int32),
+        "fraction_moving": np.asarray(
             float(np.mean(np.linalg.norm(velocities, axis=2) >= wait_threshold)) if len(velocities) else 0.0,
             dtype=np.float32,
         ),
-        mean_nearest_neighbor_distance=np.asarray(
+        "mean_nearest_neighbor_distance": np.asarray(
             _mean_nearest_neighbor_distance(positions[0]) if len(positions) else 0.0,
             dtype=np.float32,
         ),
-        action_labels=derive_action_labels(velocities, num_directions, wait_threshold),
-    )
+        "action_labels": derive_action_labels(velocities, num_directions, wait_threshold),
+    }
+    for key, value in (additional_fields or {}).items():
+        payload[key] = value if isinstance(value, np.ndarray) else np.asarray(value)
+    np.savez_compressed(output_path, **payload)
 
 
 def build_map_scenario_pairs(
@@ -447,8 +659,9 @@ def generate_single_rollout(task, args, eecbs_binary: Optional[str], lacam3_bina
     velocities = None
     source_used = ""
     fallback_reason = "none"
+    additional_fields: Dict[str, object] = {}
 
-    if args.expert_source in {"eecbs", "hybrid"}:
+    if args.expert_source in {"eecbs", "hybrid", "eecbs-guided-orca"}:
         try:
             discrete_paths = run_eecbs(
                 map_path,
@@ -458,13 +671,42 @@ def generate_single_rollout(task, args, eecbs_binary: Optional[str], lacam3_bina
                 args.time_limit,
                 eecbs_binary,
             )
-            positions, velocities = discrete_paths_to_continuous(discrete_paths, args.dt, args.max_speed)
-            source_used = "eecbs"
-            # Skip validate_replay for EECBS: it's a provably correct solver,
-            # and the SDF obstacle margin causes false-positive hits when
-            # continuous-interpolated positions pass near wall boundaries.
+            if args.expert_source == "eecbs-guided-orca":
+                routes = discrete_paths_to_waypoints(discrete_paths, compress_waypoints=True)
+                positions, velocities, tracker_metadata = rollout_eecbs_guided_tracker(
+                    obstacle_map,
+                    starts,
+                    goals,
+                    routes,
+                    args.dt,
+                    args.max_speed,
+                    args.rollout_horizon,
+                    args.agent_radius,
+                    args.goal_tolerance,
+                    lookahead_distance=args.tracker_lookahead_distance,
+                    waypoint_tolerance=args.tracker_waypoint_tolerance,
+                    slowdown_radius=args.tracker_goal_slowdown_radius,
+                    shield_type=args.tracker_shield_type,
+                )
+                additional_fields.update(tracker_metadata)
+                additional_fields.update(
+                    {
+                        "tracker_shield_type": args.tracker_shield_type,
+                        "tracker_lookahead_distance": np.asarray(args.tracker_lookahead_distance, dtype=np.float32),
+                        "tracker_waypoint_tolerance": np.asarray(args.tracker_waypoint_tolerance, dtype=np.float32),
+                        "tracker_goal_slowdown_radius": np.asarray(args.tracker_goal_slowdown_radius, dtype=np.float32),
+                        "tracker_compress_waypoints": np.asarray(True),
+                    }
+                )
+                source_used = "eecbs-guided-orca"
+            else:
+                positions, velocities = discrete_paths_to_continuous(discrete_paths, args.dt, args.max_speed)
+                source_used = "eecbs"
+                # Skip validate_replay for EECBS: it's a provably correct solver,
+                # and the SDF obstacle margin causes false-positive hits when
+                # continuous-interpolated positions pass near wall boundaries.
         except Exception as e:
-            fallback_reason = "eecbs_failed"
+            fallback_reason = "eecbs_guided_tracker_failed" if args.expert_source == "eecbs-guided-orca" else "eecbs_failed"
             positions, velocities = None, None
 
     if positions is None and args.expert_source in {"lacam3", "hybrid"} and lacam3_binary:
@@ -520,6 +762,7 @@ def generate_single_rollout(task, args, eecbs_binary: Optional[str], lacam3_bina
         fallback_reason,
         args.num_directions,
         args.wait_threshold,
+        additional_fields=additional_fields,
     )
     return f"saved {output_path} [{source_used}]"
 
@@ -531,7 +774,11 @@ def main():
     parser.add_argument("--maps", nargs="*", default=None)
     parser.add_argument("--agent-counts", nargs="+", type=int, default=[100])
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--expert-source", choices=["eecbs", "lacam3", "orca", "po-orca", "hybrid"], default="hybrid")
+    parser.add_argument(
+        "--expert-source",
+        choices=["eecbs", "eecbs-guided-orca", "lacam3", "orca", "po-orca", "hybrid"],
+        default="hybrid",
+    )
     parser.add_argument("--max-scenarios", type=int, default=1)
     parser.add_argument("--scenario-ids", nargs="*", type=int, default=None)
     parser.add_argument("--scenario-start", type=int, default=None)
@@ -543,6 +790,14 @@ def main():
     parser.add_argument("--goal-tolerance", type=float, default=0.25)
     parser.add_argument("--wait-threshold", type=float, default=0.1)
     parser.add_argument("--num-directions", type=int, default=8)
+    parser.add_argument("--tracker-lookahead-distance", type=float, default=0.75)
+    parser.add_argument("--tracker-waypoint-tolerance", type=float, default=0.25)
+    parser.add_argument("--tracker-goal-slowdown-radius", type=float, default=1.0)
+    parser.add_argument(
+        "--tracker-shield-type",
+        choices=["orca", "heuristic-orca", "po-orca"],
+        default="orca",
+    )
     parser.add_argument("--eecbs-repo", default=DEFAULT_EECBS_REPO)
     parser.add_argument("--eecbs-binary", default=None)
     parser.add_argument("--lacam3-repo", default=DEFAULT_LACAM3_REPO)
@@ -553,12 +808,12 @@ def main():
     args = parser.parse_args()
 
     eecbs_binary = None
-    if args.expert_source in {"eecbs", "hybrid"}:
+    if args.expert_source in {"eecbs", "hybrid", "eecbs-guided-orca"}:
         try:
             eecbs_binary = resolve_eecbs_binary(args.eecbs_binary, args.eecbs_repo)
             print(f"Using EECBS binary: {eecbs_binary}")
         except FileNotFoundError as e:
-            if args.expert_source == "eecbs":
+            if args.expert_source in {"eecbs", "eecbs-guided-orca"}:
                 raise
             print(f"[hybrid] EECBS unavailable, will fall back to ORCA:\n{e}")
 
