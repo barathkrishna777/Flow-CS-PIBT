@@ -191,6 +191,8 @@ def train(args):
         if val_preprocessed_dir and args.preprocessed_dir:
             val_kwargs = dict(dataset_kwargs)
             val_kwargs["preprocessed_dir"] = val_preprocessed_dir
+            if preload:
+                val_kwargs["preload"] = True
             val_dataset = PreprocessedContinuousShardDataset(**val_kwargs)
         else:
             val_dataset = dataset_cls(
@@ -345,6 +347,9 @@ def train(args):
                 "wait_threshold": args.wait_threshold,
                 "max_speed": args.max_speed,
                 "expert_sources": args.expert_sources,
+                "preprocessed_dir": args.preprocessed_dir,
+                "val_preprocessed_dir": args.val_preprocessed_dir,
+                "preload_shards": bool(args.preload_shards),
                 "train_scenario_ids": args.train_scenario_ids,
                 "train_scenario_start": args.train_scenario_start,
                 "train_scenario_end": args.train_scenario_end,

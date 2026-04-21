@@ -2,6 +2,7 @@ import importlib
 import math
 import os
 import sys
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -144,6 +145,7 @@ class StepMetrics:
     shield_projection_sum: float = 0.0
     shield_projection_samples: List[float] = field(default_factory=list)
     shield_backend_counts: Dict[str, int] = field(default_factory=dict)
+    shield_time_sum: float = 0.0
     orca_requested_steps: int = 0
     orca_true_steps: int = 0
     orca_fallback_steps: int = 0
@@ -1401,7 +1403,9 @@ class ContinuousMAPFEnv:
 
     def step(self, velocities: np.ndarray, shield_type: str = "orca") -> Tuple[np.ndarray, bool, Dict[str, object]]:
         preferred_velocities = np.asarray(velocities, dtype=np.float32)
+        shield_start = time.perf_counter()
         safe_velocities = self.apply_shield(preferred_velocities, shield_type=shield_type)
+        self.metrics.shield_time_sum += time.perf_counter() - shield_start
         self._record_shield_observability(preferred_velocities, safe_velocities)
         self._record_shield_backend()
         proposed = self.positions + safe_velocities * self.dt
@@ -1457,6 +1461,7 @@ class ContinuousMAPFEnv:
             "near_collisions": float(self.metrics.near_collisions),
             "obstacle_hits": float(self.metrics.obstacle_hits),
             "mean_arrival_step": float(np.mean(np.where(self.arrival_steps >= 0, self.arrival_steps, self.step_count))),
+            "shield_time": float(self.metrics.shield_time_sum),
             "shield_backend": self._summarize_shield_backends(),
             "shield_true_orca_rate": float(self.metrics.orca_true_steps / orca_requested_steps) if self.metrics.orca_requested_steps else 0.0,
             "shield_fallback_rate": float(self.metrics.orca_fallback_steps / orca_requested_steps) if self.metrics.orca_requested_steps else 0.0,

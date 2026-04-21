@@ -143,9 +143,14 @@ def checkpoint_model_variant(checkpoint: Dict[str, object]) -> str:
     config = checkpoint.get("model_config", {}) or {}
     if not isinstance(config, dict):
         return model_type
+    hidden_dim = int(config.get("hidden_dim", 512))
+    num_layers = int(config.get("num_layers", 4))
     num_heads = int(config.get("num_heads", 8))
     chunk_horizon = int(config.get("chunk_horizon", 1))
-    return f"transformer_h{num_heads}_chunk{chunk_horizon}"
+    return (
+        f"transformer_hd{hidden_dim}_l{num_layers}_"
+        f"h{num_heads}_chunk{chunk_horizon}"
+    )
 
 
 def run_learned_policy(
@@ -167,12 +172,16 @@ def run_learned_policy(
     log_interval: int = 10,
 ) -> Dict[str, object]:
     start_time = time.time()
+    graph_construction_time = 0.0
+    model_inference_time = 0.0
     env.reset(positions, goals)
     for step_idx in range(max_steps):
         step_start = time.time()
+        graph_start = time.perf_counter()
         data = create_continuous_data_object(env.positions, goals, env.obstacle_map, k=k, m=m, max_speed=env.max_speed)
         data = normalize_continuous_graph_data(data, k=k, max_speed=env.max_speed)
         data = data.to(device)
+        graph_construction_time += time.perf_counter() - graph_start
         n_agents = env.positions.shape[0]
 
         with torch.no_grad():
@@ -183,14 +192,18 @@ def run_learned_policy(
                     v = torch.randn(n_agents, 2, device=device)
                     for step in range(num_integration_steps):
                         t = torch.full((n_agents, 1), step * dt, device=device)
+                        inference_start = time.perf_counter()
                         flow = model(v, t, data)
+                        model_inference_time += time.perf_counter() - inference_start
                         v = v + flow * dt
                     candidate_velocities.append((v.cpu().numpy() * env.max_speed).astype(np.float32))
                 velocities = aggregate_flow_samples(candidate_velocities, aggregation=flow_aggregation, env=env)
             else:
                 zero_v = torch.zeros(n_agents, 2, device=device)
                 zero_t = torch.zeros(n_agents, 1, device=device)
+                inference_start = time.perf_counter()
                 _, action_logits = model(zero_v, zero_t, data, return_action_logits=True)
+                model_inference_time += time.perf_counter() - inference_start
                 logits = (action_logits / max(tau, 1e-6)).cpu().numpy()
                 labels = logits.argmax(axis=1)
                 velocities = labels_to_direction_vectors(labels, num_directions=action_logits.shape[1] - 1) * env.max_speed
@@ -204,6 +217,8 @@ def run_learned_policy(
 
     metrics = env.current_metrics()
     metrics["runtime"] = time.time() - start_time
+    metrics["graph_construction_time"] = graph_construction_time
+    metrics["model_inference_time"] = model_inference_time
     return metrics
 
 
@@ -228,6 +243,8 @@ def run_orca_baseline(
             break
     metrics = env.current_metrics()
     metrics["runtime"] = time.time() - start_time
+    metrics["graph_construction_time"] = 0.0
+    metrics["model_inference_time"] = 0.0
     return metrics
 
 
@@ -317,6 +334,9 @@ def write_rows(output_csv: str, rows: List[Dict[str, object]]) -> None:
         "obstacle_hits",
         "mean_arrival_step",
         "runtime",
+        "graph_construction_time",
+        "model_inference_time",
+        "shield_time",
         "model_type",
         "model_variant",
         "shield_backend",

@@ -53,20 +53,27 @@ def build_checkpoint_name(policy: str, run_name: str) -> str:
 
 def model_variant_tag(
     model_type: str = "gnn",
+    hidden_dim: int = 512,
+    num_layers: int = 4,
     num_heads: int = 8,
     chunk_horizon: int = 1,
 ) -> str:
     if model_type == "transformer":
-        return f"transformer_h{num_heads}_chunk{chunk_horizon}"
+        return (
+            f"transformer_hd{hidden_dim}_l{num_layers}_"
+            f"h{num_heads}_chunk{chunk_horizon}"
+        )
     return "gnn"
 
 
 def model_variant_suffix(
     model_type: str = "gnn",
+    hidden_dim: int = 512,
+    num_layers: int = 4,
     num_heads: int = 8,
     chunk_horizon: int = 1,
 ) -> str:
-    variant = model_variant_tag(model_type, num_heads, chunk_horizon)
+    variant = model_variant_tag(model_type, hidden_dim, num_layers, num_heads, chunk_horizon)
     return "" if variant == "gnn" else f"_{variant}"
 
 
@@ -362,10 +369,18 @@ def phase_a_run_name(
     prefix: str,
     seed: int,
     model_type: str = "gnn",
+    hidden_dim: int = 512,
+    num_layers: int = 4,
     num_heads: int = 8,
     chunk_horizon: int = 1,
 ) -> str:
-    suffix = model_variant_suffix(model_type, num_heads, chunk_horizon)
+    suffix = model_variant_suffix(
+        model_type,
+        hidden_dim,
+        num_layers,
+        num_heads,
+        chunk_horizon,
+    )
     return f"{prefix}{suffix}_s{seed}"
 
 
@@ -439,6 +454,8 @@ def stage_train(args: argparse.Namespace, python_bin: str) -> None:
                 args.run_prefix,
                 seed,
                 args.model_type,
+                args.hidden_dim,
+                args.num_layers,
                 args.num_heads,
                 args.chunk_horizon,
             )
@@ -505,6 +522,12 @@ def stage_train(args: argparse.Namespace, python_bin: str) -> None:
                 cmd.append("--oversample-difficult")
             if args.shield_aware_loss:
                 cmd.append("--shield-aware-loss")
+            if args.preprocessed_dir:
+                cmd.extend(["--preprocessed-dir", args.preprocessed_dir])
+            if args.val_preprocessed_dir:
+                cmd.extend(["--val-preprocessed-dir", args.val_preprocessed_dir])
+            if args.preload_shards:
+                cmd.append("--preload-shards")
             cmd.extend(
                 [
                     "--dt",
@@ -647,11 +670,15 @@ def stage_eval(args: argparse.Namespace, python_bin: str) -> None:
                 args.run_prefix,
                 seed,
                 args.model_type,
+                args.hidden_dim,
+                args.num_layers,
                 args.num_heads,
                 args.chunk_horizon,
             )
             variant_suffix = model_variant_suffix(
                 args.model_type,
+                args.hidden_dim,
+                args.num_layers,
                 args.num_heads,
                 args.chunk_horizon,
             )
@@ -745,6 +772,8 @@ def stage_eval(args: argparse.Namespace, python_bin: str) -> None:
             flow_seed = args.seeds[0]
             variant_suffix = model_variant_suffix(
                 args.model_type,
+                args.hidden_dim,
+                args.num_layers,
                 args.num_heads,
                 args.chunk_horizon,
             )
@@ -754,6 +783,8 @@ def stage_eval(args: argparse.Namespace, python_bin: str) -> None:
                     args.run_prefix,
                     flow_seed,
                     args.model_type,
+                    args.hidden_dim,
+                    args.num_layers,
                     args.num_heads,
                     args.chunk_horizon,
                 ),
@@ -824,6 +855,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-type", choices=["gnn", "transformer"], default="gnn")
     parser.add_argument("--num-heads", type=int, default=8)
     parser.add_argument("--chunk-horizon", type=int, default=1)
+    parser.add_argument(
+        "--preprocessed-dir",
+        default=None,
+        help="Forwarded to main_pys.train_continuous for shard-based continuous training input.",
+    )
+    parser.add_argument(
+        "--val-preprocessed-dir",
+        default=None,
+        help="Optional separate validation shard directory forwarded to main_pys.train_continuous.",
+    )
+    parser.add_argument(
+        "--preload-shards",
+        action="store_true",
+        help="Forwarded to main_pys.train_continuous to preload matched shards into RAM.",
+    )
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--val-split", type=float, default=0.05)
