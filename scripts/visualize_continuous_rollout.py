@@ -7,7 +7,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib import cm
+from matplotlib import colormaps
 import numpy as np
 from PIL import Image
 
@@ -35,13 +35,13 @@ def save_overview_png(
 ) -> None:
     positions = np.asarray(positions, dtype=np.float32)
     goals = np.asarray(goals, dtype=np.float32)
-    cmap = cm.get_cmap("tab20", positions.shape[1])
+    cmap = colormaps.get_cmap("tab20")
 
     fig, ax = plt.subplots(figsize=(8, 8))
     ax.imshow(obstacle_map, cmap="Greys", origin="upper")
     for agent_idx in range(positions.shape[1]):
         traj = positions[:: max(stride, 1), agent_idx]
-        color = cmap(agent_idx % cmap.N)
+        color = cmap((agent_idx % 20) / max(19, 1))
         ax.plot(traj[:, 1], traj[:, 0], linewidth=1.0, alpha=0.9, color=color)
         ax.scatter(positions[0, agent_idx, 1], positions[0, agent_idx, 0], s=12, color=color, marker="o")
         ax.scatter(goals[agent_idx, 1], goals[agent_idx, 0], s=18, color=color, marker="*")
@@ -65,7 +65,7 @@ def save_gif(
 ) -> None:
     positions = np.asarray(positions, dtype=np.float32)
     goals = np.asarray(goals, dtype=np.float32)
-    cmap = cm.get_cmap("tab20", positions.shape[1])
+    cmap = colormaps.get_cmap("tab20")
     frames = []
     render_indices = list(range(0, positions.shape[0], max(frame_stride, 1)))
     if render_indices[-1] != positions.shape[0] - 1:
@@ -75,7 +75,7 @@ def save_gif(
         fig, ax = plt.subplots(figsize=(8, 8))
         ax.imshow(obstacle_map, cmap="Greys", origin="upper")
         for agent_idx in range(positions.shape[1]):
-            color = cmap(agent_idx % cmap.N)
+            color = cmap((agent_idx % 20) / max(19, 1))
             trail_start = max(0, t - trail_length)
             trail = positions[trail_start : t + 1, agent_idx]
             ax.plot(trail[:, 1], trail[:, 0], linewidth=1.0, alpha=0.9, color=color)
@@ -86,9 +86,9 @@ def save_gif(
         ax.set_yticks([])
         fig.tight_layout()
         fig.canvas.draw()
-        frame = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
-        frame = frame.reshape(fig.canvas.get_width_height()[::-1] + (3,))
-        frames.append(Image.fromarray(frame))
+        width, height = fig.canvas.get_width_height()
+        rgba = np.asarray(fig.canvas.buffer_rgba(), dtype=np.uint8).reshape(height, width, 4)
+        frames.append(Image.fromarray(rgba[..., :3].copy()))
         plt.close(fig)
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
