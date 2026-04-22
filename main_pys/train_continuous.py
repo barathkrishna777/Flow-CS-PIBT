@@ -95,7 +95,41 @@ def _reshape_velocity_targets(targets: torch.Tensor, velocity_dim: int) -> tuple
     return targets, targets.shape[1] // velocity_dim
 
 
-def _compute_action_loss(action_logits, action_labels, weights, action_dim: int):
+def _chunk_step_weights(
+    chunk_horizon: int,
+    device: torch.device,
+    dtype: torch.dtype,
+    first_step_only_loss: bool,
+) -> torch.Tensor:
+    step_weights = torch.ones(chunk_horizon, device=device, dtype=dtype)
+    if first_step_only_loss and chunk_horizon > 1:
+        step_weights[1:] = 0.0
+    return step_weights
+
+
+def _reduce_chunked_step_losses(
+    per_step_loss: torch.Tensor,
+    node_weights: torch.Tensor,
+    step_weights: torch.Tensor,
+) -> torch.Tensor:
+    if per_step_loss.dim() != 2:
+        raise ValueError(f"Expected per_step_loss to have shape (N, H); got {tuple(per_step_loss.shape)}")
+    if node_weights.dim() == 1:
+        node_weights = node_weights.unsqueeze(1)
+    if node_weights.dim() != 2 or node_weights.shape[0] != per_step_loss.shape[0]:
+        raise ValueError(
+            "node_weights must have shape (N, 1) or (N,) matching per_step_loss"
+        )
+    if step_weights.dim() != 1 or step_weights.shape[0] != per_step_loss.shape[1]:
+        raise ValueError(
+            "step_weights must have shape (H,) matching per_step_loss"
+        )
+    denom = step_weights.sum().clamp_min(torch.finfo(per_step_loss.dtype).eps)
+    per_agent_loss = (per_step_loss * step_weights.view(1, -1)).sum(dim=1, keepdim=True) / denom
+    return (per_agent_loss * node_weights.float()).mean()
+
+
+def _compute_action_loss(action_logits, action_labels, weights, action_dim: int, step_weights: torch.Tensor | None = None):
     if action_labels.dim() == 1:
         action_targets = action_labels.unsqueeze(1)
     else:
@@ -114,7 +148,9 @@ def _compute_action_loss(action_logits, action_labels, weights, action_dim: int)
     flat_logits = action_logits.reshape(-1, action_chunk_horizon, action_dim).reshape(-1, action_dim)
     flat_targets = action_targets.reshape(-1)
     per_step_loss = F.cross_entropy(flat_logits, flat_targets, reduction="none").view(-1, action_chunk_horizon)
-    return (per_step_loss * weights.expand(-1, action_chunk_horizon)).mean()
+    if step_weights is None:
+        step_weights = torch.ones(action_chunk_horizon, device=per_step_loss.device, dtype=per_step_loss.dtype)
+    return _reduce_chunked_step_losses(per_step_loss, weights, step_weights.to(device=per_step_loss.device, dtype=per_step_loss.dtype))
 
 
 def compute_flow_loss(model, batch, device, use_amp, args, map_cache):
@@ -123,6 +159,12 @@ def compute_flow_loss(model, batch, device, use_amp, args, map_cache):
     action_dim = int(getattr(model, "action_dim", args.num_directions + 1))
     x_1, chunk_horizon = _reshape_velocity_targets(batch.y, velocity_dim)
     weights = batch.node_weights.float().view(-1, 1)
+    step_weights = _chunk_step_weights(
+        chunk_horizon,
+        device=x_1.device,
+        dtype=x_1.dtype,
+        first_step_only_loss=getattr(args, "first_step_only_loss", False),
+    )
 
     num_graphs = int(batch.batch.max().item()) + 1
     t_per_graph = torch.sigmoid(torch.randn(num_graphs, 1, device=device)).clamp(0.01, 0.99)
@@ -133,7 +175,10 @@ def compute_flow_loss(model, batch, device, use_amp, args, map_cache):
     with torch.cuda.amp.autocast(enabled=use_amp):
         predicted_flow, action_logits = model(x_t, t, batch, return_action_logits=True)
         target_flow = x_1 - x_0
-        flow_loss = (F.mse_loss(predicted_flow, target_flow, reduction="none") * weights).mean()
+        predicted_flow_steps = predicted_flow.reshape(-1, chunk_horizon, velocity_dim)
+        target_flow_steps = target_flow.reshape(-1, chunk_horizon, velocity_dim)
+        per_step_flow_loss = F.mse_loss(predicted_flow_steps, target_flow_steps, reduction="none").mean(dim=2)
+        flow_loss = _reduce_chunked_step_losses(per_step_flow_loss, weights, step_weights)
 
         predicted_velocity = x_t + (1.0 - t) * predicted_flow
         shield_loss = torch.tensor(0.0, device=device)
@@ -154,7 +199,7 @@ def compute_flow_loss(model, batch, device, use_amp, args, map_cache):
             shielded_velocity = predicted_first + (shielded_velocity - predicted_first).detach()
             shield_loss = (F.mse_loss(shielded_velocity, target_first, reduction="none") * weights).mean()
 
-        action_loss = _compute_action_loss(action_logits, batch.action_label, weights, action_dim)
+        action_loss = _compute_action_loss(action_logits, batch.action_label, weights, action_dim, step_weights=step_weights)
 
         total_loss = (
             args.flow_loss_weight * flow_loss
@@ -445,6 +490,7 @@ def train(args):
                 "flow_loss_weight": args.flow_loss_weight,
                 "shield_loss_weight": args.shield_loss_weight,
                 "action_loss_weight": args.action_loss_weight,
+                "first_step_only_loss": args.first_step_only_loss,
             },
             "seed": args.seed,
             "train_loss": avg_train,
@@ -508,6 +554,14 @@ def main():
     parser.add_argument("--flow-loss-weight", type=float, default=1.0)
     parser.add_argument("--shield-loss-weight", type=float, default=1.0)
     parser.add_argument("--action-loss-weight", type=float, default=0.1)
+    parser.add_argument(
+        "--first-step-only-loss",
+        action="store_true",
+        help=(
+            "For chunked continuous targets, supervise only the first step. "
+            "This matches receding-horizon eval that predicts a chunk but executes only step 1."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--cpu", action="store_true")
     parser.add_argument("--preprocessed-dir", default=None, help="Directory of compact continuous shard files")

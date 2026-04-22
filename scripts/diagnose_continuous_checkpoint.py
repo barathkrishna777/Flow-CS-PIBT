@@ -90,6 +90,13 @@ def _summaries(values: Dict[str, List[float]]) -> Dict[str, float]:
     return out
 
 
+def resolve_target_velocity_source(args: argparse.Namespace, checkpoint: Dict[str, object]) -> str:
+    if args.target_velocity_source is not None:
+        return str(args.target_velocity_source)
+    data_cfg = checkpoint.get("dataset_config", {}) or {}
+    return str(data_cfg.get("target_velocity_source", "executed"))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Diagnose continuous checkpoint vs expert targets")
     parser.add_argument("--map-dir", required=True)
@@ -104,6 +111,7 @@ def main() -> None:
     parser.add_argument("--max-batches", type=int, default=0)
     parser.add_argument("--num-integration-steps", type=int, default=3)
     parser.add_argument("--flow-init-mode", choices=["randn", "zeros", "prev"], default="randn")
+    parser.add_argument("--target-velocity-source", choices=["executed", "tracker-preferred"], default=None)
     parser.add_argument("--output-csv", default="")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--cpu", action="store_true")
@@ -120,6 +128,7 @@ def main() -> None:
     model.eval()
     model_cfg = checkpoint.get("model_config", {}) or {}
     data_cfg = checkpoint.get("dataset_config", {}) or {}
+    target_velocity_source = resolve_target_velocity_source(args, checkpoint)
 
     velocity_dim = int(getattr(model, "velocity_dim", 2))
     chunk_horizon = int(getattr(model, "chunk_horizon", 1))
@@ -127,6 +136,11 @@ def main() -> None:
     wait_threshold = float(data_cfg.get("wait_threshold", 0.1))
 
     if args.preprocessed_dir:
+        if target_velocity_source != "executed":
+            raise ValueError(
+                "Preprocessed continuous shards only store executed targets; "
+                "use --data-dir when diagnosing tracker-preferred supervision."
+            )
         dataset = PreprocessedContinuousShardDataset(
             preprocessed_dir=args.preprocessed_dir,
             map_dir=args.map_dir,
@@ -144,6 +158,7 @@ def main() -> None:
             wait_threshold=wait_threshold,
             max_speed=max_speed,
             chunk_horizon=chunk_horizon,
+            target_velocity_source=target_velocity_source,
             expert_sources=args.expert_sources,
             scenario_ids=args.scenario_ids,
             scenario_start=args.scenario_start,
@@ -245,9 +260,21 @@ def main() -> None:
         _accumulate_metric(overall, "expert_later_speed_mean", later_target_speed)
 
     summary_rows = []
-    summary_rows.append({"map": "__overall__", **_summaries(overall)})
+    summary_rows.append(
+        {
+            "map": "__overall__",
+            "target_velocity_source": target_velocity_source,
+            **_summaries(overall),
+        }
+    )
     for map_name in sorted(per_map):
-        summary_rows.append({"map": map_name, **_summaries(per_map[map_name])})
+        summary_rows.append(
+            {
+                "map": map_name,
+                "target_velocity_source": target_velocity_source,
+                **_summaries(per_map[map_name]),
+            }
+        )
 
     fieldnames = sorted({key for row in summary_rows for key in row.keys()})
     if args.output_csv:
