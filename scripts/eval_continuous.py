@@ -48,6 +48,112 @@ def log_progress(message: str) -> None:
     print(f"[eval] {message}", flush=True)
 
 
+def clip_velocity_rows(velocities: np.ndarray, max_speed: float) -> np.ndarray:
+    velocities = np.asarray(velocities, dtype=np.float32)
+    norms = np.linalg.norm(velocities, axis=1, keepdims=True)
+    scale = np.maximum(norms / max(max_speed, 1e-6), 1.0)
+    return velocities / scale
+
+
+def init_preferred_velocity_stats() -> Dict[str, object]:
+    return {
+        "first_speed_values": [],
+        "first_progress_sum": 0.0,
+        "first_progress_count": 0,
+        "first_goal_cosine_sum": 0.0,
+        "first_goal_cosine_count": 0,
+        "later_speed_sum": 0.0,
+        "later_speed_count": 0,
+    }
+
+
+def update_preferred_velocity_stats(
+    stats: Dict[str, object],
+    env,
+    velocity_chunk: np.ndarray,
+) -> None:
+    chunk = np.asarray(velocity_chunk, dtype=np.float32)
+    if chunk.ndim == 2:
+        chunk = chunk[:, None, :]
+
+    first = chunk[:, 0, :]
+    first_speeds = np.linalg.norm(first, axis=1)
+    stats["first_speed_values"].extend(float(v) for v in first_speeds.tolist())
+
+    first_clipped = clip_velocity_rows(first, env.max_speed)
+    goal_delta = np.asarray(env.goals - env.positions, dtype=np.float32)
+    goal_dist = np.linalg.norm(goal_delta, axis=1)
+    active_mask = goal_dist > float(env.goal_tolerance)
+    if np.any(active_mask):
+        next_positions = env.positions + first_clipped * float(env.dt)
+        next_goal_dist = np.linalg.norm(env.goals - next_positions, axis=1)
+        progress = goal_dist[active_mask] - next_goal_dist[active_mask]
+        stats["first_progress_sum"] += float(progress.sum())
+        stats["first_progress_count"] += int(progress.size)
+
+        moving_mask = active_mask & (np.linalg.norm(first_clipped, axis=1) > 1e-6)
+        if np.any(moving_mask):
+            goal_dir = goal_delta[moving_mask] / np.maximum(goal_dist[moving_mask, None], 1e-6)
+            vel_dir = first_clipped[moving_mask] / np.maximum(
+                np.linalg.norm(first_clipped[moving_mask], axis=1, keepdims=True),
+                1e-6,
+            )
+            cosine = np.sum(goal_dir * vel_dir, axis=1)
+            stats["first_goal_cosine_sum"] += float(cosine.sum())
+            stats["first_goal_cosine_count"] += int(cosine.size)
+
+    if chunk.shape[1] > 1:
+        later = chunk[:, 1:, :].reshape(-1, chunk.shape[-1])
+        later_speeds = np.linalg.norm(later, axis=1)
+        stats["later_speed_sum"] += float(later_speeds.sum())
+        stats["later_speed_count"] += int(later_speeds.size)
+
+
+def finalize_preferred_velocity_stats(stats: Dict[str, object]) -> Dict[str, object]:
+    first_speed_values = np.asarray(stats["first_speed_values"], dtype=np.float32)
+    first_speed_mean = float(first_speed_values.mean()) if first_speed_values.size else 0.0
+    first_speed_p95 = float(np.percentile(first_speed_values, 95)) if first_speed_values.size else 0.0
+
+    first_progress_count = max(int(stats["first_progress_count"]), 1)
+    first_goal_cosine_count = max(int(stats["first_goal_cosine_count"]), 1)
+    later_speed_count = int(stats["later_speed_count"])
+    later_speed_mean: object = ""
+    if later_speed_count > 0:
+        later_speed_mean = float(stats["later_speed_sum"] / later_speed_count)
+
+    return {
+        "preferred_first_speed_mean": first_speed_mean,
+        "preferred_first_speed_p95": first_speed_p95,
+        "preferred_first_progress_mean": float(stats["first_progress_sum"] / first_progress_count),
+        "preferred_first_goal_cosine_mean": float(
+            stats["first_goal_cosine_sum"] / first_goal_cosine_count
+        ),
+        "preferred_later_speed_mean": later_speed_mean,
+    }
+
+
+def initial_flow_state(
+    init_mode: str,
+    n_agents: int,
+    flow_dim: int,
+    device: torch.device,
+    prev_velocities: np.ndarray,
+    chunk_horizon: int,
+    velocity_dim: int,
+    max_speed: float,
+) -> torch.Tensor:
+    if init_mode == "randn":
+        return torch.randn(n_agents, flow_dim, device=device)
+    if init_mode == "zeros":
+        return torch.zeros(n_agents, flow_dim, device=device)
+    if init_mode == "prev":
+        prev = np.asarray(prev_velocities, dtype=np.float32) / max(max_speed, 1e-6)
+        prev = torch.from_numpy(prev).to(device=device, dtype=torch.float32)
+        prev = prev.reshape(n_agents, 1, velocity_dim).expand(-1, chunk_horizon, -1)
+        return prev.reshape(n_agents, flow_dim)
+    raise ValueError(f"Unsupported flow init mode: {init_mode}")
+
+
 def find_scenarios(
     scen_dir: str,
     map_name: str,
@@ -171,12 +277,14 @@ def run_learned_policy(
     num_consensus_samples: int,
     tau: float,
     flow_aggregation: str,
+    flow_init_mode: str = "randn",
     progress_label: str = "",
     log_interval: int = 10,
 ) -> Dict[str, object]:
     start_time = time.time()
     graph_construction_time = 0.0
     model_inference_time = 0.0
+    preferred_stats = init_preferred_velocity_stats()
     env.reset(positions, goals)
     for step_idx in range(max_steps):
         step_start = time.time()
@@ -209,7 +317,16 @@ def run_learned_policy(
                 dt = 1.0 / max(num_integration_steps, 1)
                 candidate_velocities: List[np.ndarray] = []
                 for _ in range(max(num_consensus_samples, 1)):
-                    v = torch.randn(n_agents, flow_dim, device=device)
+                    v = initial_flow_state(
+                        flow_init_mode,
+                        n_agents,
+                        flow_dim,
+                        device,
+                        prev_velocities,
+                        chunk_horizon,
+                        velocity_dim,
+                        env.max_speed,
+                    )
                     for step in range(num_integration_steps):
                         t = torch.full((n_agents, 1), step * dt, device=device)
                         inference_start = time.perf_counter()
@@ -230,7 +347,9 @@ def run_learned_policy(
                 logits = (action_logits / max(tau, 1e-6)).reshape(n_agents, -1, action_dim).cpu().numpy()
                 labels = logits[:, 0, :].argmax(axis=1)
                 velocities = labels_to_direction_vectors(labels, num_directions=action_dim - 1) * env.max_speed
+                velocity_chunk = velocities[:, None, :]
 
+        update_preferred_velocity_stats(preferred_stats, env, velocity_chunk)
         env.step(velocities, shield_type=shield_type)
         done = env.is_done()
         if log_interval > 0 and ((step_idx + 1) % log_interval == 0 or done):
@@ -242,6 +361,7 @@ def run_learned_policy(
     metrics["runtime"] = time.time() - start_time
     metrics["graph_construction_time"] = graph_construction_time
     metrics["model_inference_time"] = model_inference_time
+    metrics.update(finalize_preferred_velocity_stats(preferred_stats))
     return metrics
 
 
@@ -255,10 +375,13 @@ def run_orca_baseline(
     log_interval: int = 10,
 ) -> Dict[str, object]:
     start_time = time.time()
+    preferred_stats = init_preferred_velocity_stats()
     env.reset(positions, goals)
     for step_idx in range(max_steps):
         step_start = time.time()
-        env.step(env.goal_directed_velocities(), shield_type=shield_type)
+        preferred = env.goal_directed_velocities()
+        update_preferred_velocity_stats(preferred_stats, env, preferred[:, None, :])
+        env.step(preferred, shield_type=shield_type)
         done = env.is_done()
         if log_interval > 0 and ((step_idx + 1) % log_interval == 0 or done):
             log_rollout_step(env, progress_label, step_idx + 1, max_steps, start_time, step_start)
@@ -268,6 +391,7 @@ def run_orca_baseline(
     metrics["runtime"] = time.time() - start_time
     metrics["graph_construction_time"] = 0.0
     metrics["model_inference_time"] = 0.0
+    metrics.update(finalize_preferred_velocity_stats(preferred_stats))
     return metrics
 
 
@@ -346,6 +470,7 @@ def write_rows(output_csv: str, rows: List[Dict[str, object]]) -> None:
         "num_consensus_samples",
         "tau",
         "flow_aggregation",
+        "flow_init_mode",
         "success",
         "agents_at_goal",
         "agent_fraction_at_goal",
@@ -371,6 +496,11 @@ def write_rows(output_csv: str, rows: List[Dict[str, object]]) -> None:
         "shield_stopped_rate",
         "shield_speed_clipped_rate",
         "stall_rate",
+        "preferred_first_speed_mean",
+        "preferred_first_speed_p95",
+        "preferred_first_progress_mean",
+        "preferred_first_goal_cosine_mean",
+        "preferred_later_speed_mean",
     ]
     write_header = not os.path.exists(output_csv)
     with open(output_csv, "a", newline="") as f:
@@ -415,6 +545,17 @@ def main():
     parser.add_argument("--num-integration-steps", type=int, default=3)
     parser.add_argument("--num-consensus-samples", type=int, default=1)
     parser.add_argument("--flow-aggregation", choices=["mean", "medoid", "best"], default="mean")
+    parser.add_argument(
+        "--flow-init-mode",
+        choices=["randn", "zeros", "prev"],
+        default="randn",
+        help=(
+            "Initial latent state for flow rollout. "
+            "'randn' keeps the current rectified-flow sampler, "
+            "'zeros' tests deterministic zero-start decoding, and "
+            "'prev' warm-starts from the previous executed velocity repeated across the chunk."
+        ),
+    )
     parser.add_argument("--tau", type=float, default=0.3)
     parser.add_argument("--k", type=int, default=4)
     parser.add_argument("--m", type=int, default=5)
@@ -529,6 +670,7 @@ def main():
                         args.num_consensus_samples,
                         args.tau,
                         args.flow_aggregation,
+                        args.flow_init_mode,
                         progress_label=case_label,
                         log_interval=args.log_interval,
                     )
@@ -548,6 +690,7 @@ def main():
                     "num_consensus_samples": args.num_consensus_samples,
                     "tau": args.tau,
                     "flow_aggregation": args.flow_aggregation if args.policy == "flow" else "",
+                    "flow_init_mode": args.flow_init_mode if args.policy == "flow" else "",
                     "model_type": "" if checkpoint is None else str(checkpoint.get("model_type", "gnn")),
                     "model_variant": "" if checkpoint is None else checkpoint_model_variant(checkpoint),
                     **metrics,
