@@ -476,9 +476,9 @@ Current interpretation:
 
 ## Relevant Files
 
-- `PLAN.md`
+- `docs/FLOW_ADVANCED_PLAN.md`
 - `README.md`
-- `implementation_details.md`
+- `docs/implementation_details.md`
 - `main_pys/continuous_env.py`
 - `main_pys/dataset_continuous.py`
 - `scripts/generate_continuous_data.py`

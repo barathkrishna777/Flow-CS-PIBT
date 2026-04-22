@@ -132,6 +132,95 @@ def finalize_preferred_velocity_stats(stats: Dict[str, object]) -> Dict[str, obj
     }
 
 
+def init_executed_velocity_stats() -> Dict[str, object]:
+    return {
+        "first_speed_values": [],
+        "first_progress_sum": 0.0,
+        "first_progress_count": 0,
+        "first_goal_cosine_sum": 0.0,
+        "first_goal_cosine_count": 0,
+        "pref_vs_exec_cosine_sum": 0.0,
+        "pref_vs_exec_cosine_count": 0,
+        "pref_vs_exec_projection_sum": 0.0,
+        "pref_vs_exec_projection_count": 0,
+    }
+
+
+def update_executed_velocity_stats(
+    stats: Dict[str, object],
+    env,
+    pre_positions: np.ndarray,
+    preferred_first: np.ndarray,
+) -> None:
+    if not env.history_velocities:
+        return
+    executed = np.asarray(env.history_velocities[-1], dtype=np.float32)
+    preferred = np.asarray(preferred_first, dtype=np.float32)
+    preferred_clipped = clip_velocity_rows(preferred, env.max_speed)
+
+    exec_speeds = np.linalg.norm(executed, axis=1)
+    stats["first_speed_values"].extend(float(v) for v in exec_speeds.tolist())
+
+    pre = np.asarray(pre_positions, dtype=np.float32)
+    post = np.asarray(env.positions, dtype=np.float32)
+    goals = np.asarray(env.goals, dtype=np.float32)
+    pre_dist = np.linalg.norm(goals - pre, axis=1)
+    post_dist = np.linalg.norm(goals - post, axis=1)
+    active_mask = pre_dist > float(env.goal_tolerance)
+    if np.any(active_mask):
+        progress = pre_dist[active_mask] - post_dist[active_mask]
+        stats["first_progress_sum"] += float(progress.sum())
+        stats["first_progress_count"] += int(progress.size)
+
+        goal_delta = goals - pre
+        moving_mask = active_mask & (exec_speeds > 1e-6)
+        if np.any(moving_mask):
+            goal_dir = goal_delta[moving_mask] / np.maximum(pre_dist[moving_mask, None], 1e-6)
+            vel_dir = executed[moving_mask] / np.maximum(exec_speeds[moving_mask, None], 1e-6)
+            cosine = np.sum(goal_dir * vel_dir, axis=1)
+            stats["first_goal_cosine_sum"] += float(cosine.sum())
+            stats["first_goal_cosine_count"] += int(cosine.size)
+
+    pref_speeds = np.linalg.norm(preferred_clipped, axis=1)
+    both_moving = (pref_speeds > 1e-6) & (exec_speeds > 1e-6)
+    if np.any(both_moving):
+        pref_dir = preferred_clipped[both_moving] / np.maximum(pref_speeds[both_moving, None], 1e-6)
+        exec_dir = executed[both_moving] / np.maximum(exec_speeds[both_moving, None], 1e-6)
+        cosine = np.sum(pref_dir * exec_dir, axis=1)
+        stats["pref_vs_exec_cosine_sum"] += float(cosine.sum())
+        stats["pref_vs_exec_cosine_count"] += int(cosine.size)
+
+    proj_mag = np.linalg.norm(preferred_clipped - executed, axis=1)
+    stats["pref_vs_exec_projection_sum"] += float(proj_mag.sum())
+    stats["pref_vs_exec_projection_count"] += int(proj_mag.size)
+
+
+def finalize_executed_velocity_stats(stats: Dict[str, object]) -> Dict[str, object]:
+    first_speed_values = np.asarray(stats["first_speed_values"], dtype=np.float32)
+    first_speed_mean = float(first_speed_values.mean()) if first_speed_values.size else 0.0
+
+    first_progress_count = max(int(stats["first_progress_count"]), 1)
+    first_goal_cosine_count = max(int(stats["first_goal_cosine_count"]), 1)
+    pref_vs_exec_cosine_count = max(int(stats["pref_vs_exec_cosine_count"]), 1)
+    pref_vs_exec_projection_count = max(int(stats["pref_vs_exec_projection_count"]), 1)
+
+    return {
+        "executed_first_speed_mean": first_speed_mean,
+        "executed_first_progress_mean": float(
+            stats["first_progress_sum"] / first_progress_count
+        ),
+        "executed_first_goal_cosine_mean": float(
+            stats["first_goal_cosine_sum"] / first_goal_cosine_count
+        ),
+        "preferred_vs_executed_cosine_mean": float(
+            stats["pref_vs_exec_cosine_sum"] / pref_vs_exec_cosine_count
+        ),
+        "preferred_vs_executed_projection_mean": float(
+            stats["pref_vs_exec_projection_sum"] / pref_vs_exec_projection_count
+        ),
+    }
+
+
 def initial_flow_state(
     init_mode: str,
     n_agents: int,
@@ -285,6 +374,7 @@ def run_learned_policy(
     graph_construction_time = 0.0
     model_inference_time = 0.0
     preferred_stats = init_preferred_velocity_stats()
+    executed_stats = init_executed_velocity_stats()
     env.reset(positions, goals)
     for step_idx in range(max_steps):
         step_start = time.time()
@@ -350,7 +440,10 @@ def run_learned_policy(
                 velocity_chunk = velocities[:, None, :]
 
         update_preferred_velocity_stats(preferred_stats, env, velocity_chunk)
+        pre_positions = env.positions.copy()
+        preferred_first = velocity_chunk[:, 0, :] if velocity_chunk.ndim == 3 else velocity_chunk
         env.step(velocities, shield_type=shield_type)
+        update_executed_velocity_stats(executed_stats, env, pre_positions, preferred_first)
         done = env.is_done()
         if log_interval > 0 and ((step_idx + 1) % log_interval == 0 or done):
             log_rollout_step(env, progress_label, step_idx + 1, max_steps, start_time, step_start)
@@ -362,6 +455,7 @@ def run_learned_policy(
     metrics["graph_construction_time"] = graph_construction_time
     metrics["model_inference_time"] = model_inference_time
     metrics.update(finalize_preferred_velocity_stats(preferred_stats))
+    metrics.update(finalize_executed_velocity_stats(executed_stats))
     return metrics
 
 
@@ -376,12 +470,15 @@ def run_orca_baseline(
 ) -> Dict[str, object]:
     start_time = time.time()
     preferred_stats = init_preferred_velocity_stats()
+    executed_stats = init_executed_velocity_stats()
     env.reset(positions, goals)
     for step_idx in range(max_steps):
         step_start = time.time()
         preferred = env.goal_directed_velocities()
         update_preferred_velocity_stats(preferred_stats, env, preferred[:, None, :])
+        pre_positions = env.positions.copy()
         env.step(preferred, shield_type=shield_type)
+        update_executed_velocity_stats(executed_stats, env, pre_positions, preferred)
         done = env.is_done()
         if log_interval > 0 and ((step_idx + 1) % log_interval == 0 or done):
             log_rollout_step(env, progress_label, step_idx + 1, max_steps, start_time, step_start)
@@ -392,6 +489,7 @@ def run_orca_baseline(
     metrics["graph_construction_time"] = 0.0
     metrics["model_inference_time"] = 0.0
     metrics.update(finalize_preferred_velocity_stats(preferred_stats))
+    metrics.update(finalize_executed_velocity_stats(executed_stats))
     return metrics
 
 
@@ -501,6 +599,11 @@ def write_rows(output_csv: str, rows: List[Dict[str, object]]) -> None:
         "preferred_first_progress_mean",
         "preferred_first_goal_cosine_mean",
         "preferred_later_speed_mean",
+        "executed_first_speed_mean",
+        "executed_first_progress_mean",
+        "executed_first_goal_cosine_mean",
+        "preferred_vs_executed_cosine_mean",
+        "preferred_vs_executed_projection_mean",
     ]
     write_header = not os.path.exists(output_csv)
     with open(output_csv, "a", newline="") as f:

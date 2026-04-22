@@ -289,8 +289,13 @@ def main() -> None:
         for key in fieldnames:
             if key == "map":
                 continue
-            if key in row:
-                print(f"  {key}: {row[key]:.6f}")
+            if key not in row:
+                continue
+            value = row[key]
+            if isinstance(value, (int, float)):
+                print(f"  {key}: {float(value):.6f}")
+            else:
+                print(f"  {key}: {value}")
 
 
 if __name__ == "__main__":

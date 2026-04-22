@@ -1,5 +1,77 @@
 # Flow Matching Advanced Action and Representation Plan
 
+## Branch Scope: Continuous MAPF Is The Active Track
+
+This is the plan of record for the `barath/flow-advanced` branch. On this
+branch the active research question is **continuous-space MAPF with a
+transformer nominal policy and ORCA shielding**, not richer grid actions.
+
+The grid-action phases below (Phase 1–3, Phase 6–8) remain reference material
+for the longer-term roadmap, but are paused. The phases that map onto current
+work are:
+
+- **Phase 4 — Continuous velocity targets.** Active. `FlowTransformerModel`
+  predicts a continuous velocity (optionally a short chunk); ORCA projects it
+  to a safe velocity before the environment integrates it.
+- **Phase 5 — Short-horizon flow supervision.** Active via
+  `--chunk-horizon 2` and the `tracker-preferred` supervision target in
+  `main_pys/dataset_continuous.py`.
+
+Supporting context for the continuous stack — data generation, dataset
+construction, environment dynamics, shield variants, benchmark defaults — is
+maintained as a living reference in
+[docs/implementation_details.md](./implementation_details.md). Research notes
+that motivated this pivot live under `docs/research/`.
+
+## Active Continuous-MAPF Checklist
+
+Progress on this branch should be tracked against these items rather than the
+grid-action checklist lower in this document.
+
+1. **Supervision target audit.** Tracker-preferred velocities are now the
+   default supervision for chunked continuous training
+   (`main_pys/dataset_continuous.py:_target_velocities`,
+   `main_pys/train_continuous.py --target-velocity-source`). Keep this unless
+   a concrete bug in `scripts/generate_continuous_data.py` is found.
+2. **First-step-only chunked loss.** Training supports
+   `--first-step-only-loss` so chunked horizons do not mis-supervise tail
+   steps that eval will never execute
+   (`main_pys/train_continuous.py:_chunk_step_weights`). First-step-only
+   helped modestly but did not close the rollout gap, so the remaining
+   failure mode is not chunk-tail mismatch alone.
+3. **Rollout observability parity.** Eval reports preferred-velocity
+   statistics (`preferred_first_speed_*`, `preferred_first_goal_cosine_mean`,
+   `preferred_later_speed_mean`) and shield diagnostics
+   (`shield_projection_mean`, `shield_stopped_rate`, `stall_rate`). Extend
+   these with **executed-velocity** statistics when diagnosing preferred vs
+   post-shield behavior.
+4. **Checkpoint ↔ dataset diagnostic.**
+   `scripts/diagnose_continuous_checkpoint.py` compares model outputs to
+   dataset targets using the same `target_velocity_source` and
+   `--flow-init-mode` as training/eval. Use this before any retrain to
+   verify imitation quality in-distribution.
+5. **Rollout init mode.** Eval exposes `--flow-init-mode {randn,zeros,prev}`
+   so the flow sampler can be decoded deterministically or warm-started from
+   the previous executed velocity.
+6. **Do not regress obstacle-map coverage.** Obstacle-map continuous claims
+   remain out of scope on this branch per
+   `docs/implementation_details.md`.
+
+## Current Diagnosis Hooks (2026-04-22)
+
+Two diagnostic invariants the next work should hold onto:
+
+- The original learned checkpoint already closely matched dataset expert
+  targets once supervision switched to `tracker-preferred`
+  (`pred_vs_expert_first_cosine_mean ≈ 0.96`,
+  `pred_first_speed_mean ≈ expert_first_speed_mean`). Further loss/data
+  changes should not degrade these numbers.
+- Despite strong in-distribution imitation, rollout
+  `preferred_first_speed_mean` is higher than dataset expert speed and
+  `agent_fraction_at_goal` stays at 0. This points at distribution shift
+  during rollout and/or ORCA-induced gridlock, not a bad expert label. The
+  executed-velocity diagnostics added in step 3 above are the right lens.
+
 ## Motivation
 
 The current grid pipeline primarily treats each agent decision as a wait action plus the four cardinal moves. That is a reliable execution model, but it also makes the learned flow field unnecessarily coarse. In open space, around obstacle corners, through bottlenecks, and in dense multi-agent traffic, the desired motion is often richer than "pick one of five cells." Flow matching can benefit from exposing more geometric intent during training while still keeping PIBT-style conflict handling as the safety layer at execution time.

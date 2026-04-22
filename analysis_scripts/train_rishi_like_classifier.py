@@ -1,7 +1,9 @@
 """Train a local Rishi-like discrete-action classifier.
 
-This is the Phase 3 sanity check from FLOW_VS_SSIL_ABLATION_PLAN.md. It uses
+Grid-era sanity check (flow vs SSIL discrete classifier) that uses
 preprocessed PyG samples with exact next-action labels in `action_y`.
+Kept as a reference utility; not part of the active continuous-MAPF plan on
+this branch.
 """
 from __future__ import annotations
 
