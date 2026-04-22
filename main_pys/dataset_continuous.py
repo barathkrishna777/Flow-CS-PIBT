@@ -34,6 +34,7 @@ class ContinuousFlowDataset(Dataset):
         wait_threshold: float = 0.1,
         max_speed: float = 1.0,
         chunk_horizon: int = 1,
+        target_velocity_source: str = "executed",
         expert_sources: Optional[Sequence[str]] = None,
         scenario_ids: Optional[Sequence[int]] = None,
         scenario_start: Optional[int] = None,
@@ -47,6 +48,7 @@ class ContinuousFlowDataset(Dataset):
         self.wait_threshold = wait_threshold
         self.max_speed = max_speed
         self.chunk_horizon = max(1, int(chunk_horizon))
+        self.target_velocity_source = str(target_velocity_source)
         self.allowed_expert_sources = set(expert_sources) if expert_sources else None
         self.allowed_scenario_ids = set(int(v) for v in scenario_ids) if scenario_ids else None
         self.scenario_start = scenario_start
@@ -59,6 +61,19 @@ class ContinuousFlowDataset(Dataset):
         self.maps = self._load_maps()
         self.rollout_infos = self._build_rollout_infos()
         self.index = self._build_index()
+
+    def _target_velocities(self, data: Dict[str, np.ndarray]) -> np.ndarray:
+        if self.target_velocity_source == "executed":
+            return data["velocities"]
+        if self.target_velocity_source == "tracker-preferred":
+            preferred = data.get("tracker_preferred_velocities")
+            if preferred is None:
+                raise KeyError(
+                    "Requested target_velocity_source='tracker-preferred', "
+                    "but rollout is missing tracker_preferred_velocities."
+                )
+            return preferred.astype(np.float32)
+        raise ValueError(f"Unsupported target_velocity_source: {self.target_velocity_source}")
 
     def _load_maps(self) -> Dict[str, np.ndarray]:
         maps = {}
@@ -126,10 +141,11 @@ class ContinuousFlowDataset(Dataset):
         data = _load_npz(str(info["path"]))
         map_name = str(data["map_name"].item() if data["map_name"].ndim == 0 else data["map_name"][0])
         grid = self.maps[map_name]
+        target_velocities = self._target_velocities(data)
 
         positions = data["positions"][t].astype(np.float32)
         goals = data["goals"].astype(np.float32)
-        velocity_chunk = data["velocities"][t : t + self.chunk_horizon].astype(np.float32)
+        velocity_chunk = target_velocities[t : t + self.chunk_horizon].astype(np.float32)
         if "previous_velocities" in data:
             previous_velocities = data["previous_velocities"][t].astype(np.float32)
         elif t > 0:
@@ -187,6 +203,7 @@ class ContinuousFlowDataset(Dataset):
         graph.expert_source = str(info["expert_source"])
         graph.agent_count = int(info["agent_count"])
         graph.rollout_id = int(rollout_idx)
+        graph.target_velocity_source = self.target_velocity_source
         graph.positions = torch.from_numpy(positions)
         graph.goals = torch.from_numpy(goals)
         graph.prev_velocities = torch.from_numpy(previous_velocities)

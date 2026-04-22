@@ -214,6 +214,11 @@ def train(args):
         expert_sources=args.expert_sources,
     )
     if args.preprocessed_dir:
+        if args.target_velocity_source != "executed":
+            raise ValueError(
+                "--target-velocity-source tracker-preferred currently requires raw .npz data; "
+                "existing preprocessed shards only store executed-velocity supervision."
+            )
         dataset_kwargs["preprocessed_dir"] = args.preprocessed_dir
     else:
         dataset_kwargs.update(
@@ -224,6 +229,7 @@ def train(args):
             wait_threshold=args.wait_threshold,
             max_speed=args.max_speed,
             chunk_horizon=args.chunk_horizon,
+            target_velocity_source=args.target_velocity_source,
         )
 
     preload = getattr(args, "preload_shards", False) and args.preprocessed_dir is not None
@@ -355,6 +361,15 @@ def train(args):
             action_dim=args.num_directions + 1,
         ).to(device)
 
+    if args.init_checkpoint:
+        checkpoint = torch.load(args.init_checkpoint, map_location=device, weights_only=False)
+        state_dict = checkpoint["model_state_dict"] if "model_state_dict" in checkpoint else checkpoint
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        print(
+            "Loaded init checkpoint "
+            f"{args.init_checkpoint} | missing={len(missing)} unexpected={len(unexpected)}"
+        )
+
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
@@ -413,6 +428,7 @@ def train(args):
                 "max_speed": args.max_speed,
                 "expert_sources": args.expert_sources,
                 "chunk_horizon": args.chunk_horizon,
+                "target_velocity_source": args.target_velocity_source,
                 "preprocessed_dir": args.preprocessed_dir,
                 "val_preprocessed_dir": args.val_preprocessed_dir,
                 "preload_shards": bool(args.preload_shards),
@@ -450,6 +466,7 @@ def main():
     parser.add_argument("--model-type", choices=["gnn", "transformer"], default="gnn")
     parser.add_argument("--run-name", default="")
     parser.add_argument("--output-dir", default=".")
+    parser.add_argument("--init-checkpoint", default=None, help="Optional checkpoint to load before training/fine-tuning")
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=0)
     parser.add_argument("--num-workers", type=int, default=0)
@@ -461,6 +478,16 @@ def main():
     parser.add_argument("--m", type=int, default=5)
     parser.add_argument("--num-directions", type=int, default=8)
     parser.add_argument("--wait-threshold", type=float, default=0.1)
+    parser.add_argument(
+        "--target-velocity-source",
+        choices=["executed", "tracker-preferred"],
+        default="executed",
+        help=(
+            "Continuous supervision target. "
+            "'executed' matches shielded realized velocities in the dataset. "
+            "'tracker-preferred' uses pre-shield tracker preferred velocities when present."
+        ),
+    )
     parser.add_argument("--dt", type=float, default=0.2)
     parser.add_argument("--max-speed", type=float, default=1.0)
     parser.add_argument("--agent-radius", type=float, default=0.3)
