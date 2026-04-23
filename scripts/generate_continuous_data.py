@@ -274,8 +274,19 @@ def _advance_waypoint_index(
         return 0
     idx = min(max(int(waypoint_idx), 0), len(route) - 1)
     final_idx = len(route) - 1
-    while idx < final_idx and np.linalg.norm(route[idx] - position) <= waypoint_tolerance:
-        idx += 1
+    while idx < final_idx:
+        if float(np.linalg.norm(route[idx] - position)) <= waypoint_tolerance:
+            idx += 1
+            continue
+        if idx > 0:
+            seg = route[idx] - route[idx - 1]
+            seg_len_sq = float(np.dot(seg, seg))
+            if seg_len_sq > 1e-12:
+                t = float(np.dot(position - route[idx - 1], seg)) / seg_len_sq
+                if t >= 1.0:
+                    idx += 1
+                    continue
+        break
     return idx
 
 
@@ -421,13 +432,20 @@ def rollout_eecbs_guided_tracker(
                 lookahead_distance,
             )
             nearest_route_dist = float(np.min(np.linalg.norm(route - env.positions[agent_idx], axis=1)))
+            if off_route_distance > 1e-6:
+                effective_alpha = goal_blend_alpha * max(
+                    0.0,
+                    1.0 - nearest_route_dist / off_route_distance,
+                )
+            else:
+                effective_alpha = 0.0
             if nearest_route_dist > off_route_distance:
                 target = goals[agent_idx]
             preferred[agent_idx] = _blended_preferred_velocity(
                 env.positions[agent_idx],
                 target,
                 goals[agent_idx],
-                alpha=goal_blend_alpha,
+                alpha=effective_alpha,
                 dt=dt,
                 max_speed=max_speed,
                 goal_tolerance=goal_tolerance,
@@ -840,7 +858,7 @@ def main():
     parser.add_argument("--wait-threshold", type=float, default=0.1)
     parser.add_argument("--num-directions", type=int, default=8)
     parser.add_argument("--tracker-lookahead-distance", type=float, default=2.0)
-    parser.add_argument("--tracker-off-route-distance", type=float, default=1.5)
+    parser.add_argument("--tracker-off-route-distance", type=float, default=1.0)
     parser.add_argument("--tracker-goal-blend-alpha", type=float, default=0.5)
     parser.add_argument(
         "--tracker-compress-waypoints",
