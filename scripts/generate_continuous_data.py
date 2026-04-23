@@ -335,6 +335,43 @@ def _tracker_preferred_velocity(
     return (target_delta / max(target_distance, 1e-6) * desired_speed).astype(np.float32)
 
 
+def _blended_preferred_velocity(
+    position: np.ndarray,
+    target: np.ndarray,
+    goal: np.ndarray,
+    alpha: float,
+    dt: float,
+    max_speed: float,
+    goal_tolerance: float,
+    slowdown_radius: float,
+) -> np.ndarray:
+    goal_delta = goal - position
+    goal_distance = float(np.linalg.norm(goal_delta))
+    if goal_distance <= goal_tolerance:
+        return np.zeros(2, dtype=np.float32)
+
+    tracker_delta = target - position
+    tracker_dist = float(np.linalg.norm(tracker_delta))
+    tracker_dir = tracker_delta / max(tracker_dist, 1e-6)
+    goal_dir = goal_delta / max(goal_distance, 1e-6)
+
+    blended = alpha * tracker_dir + (1.0 - alpha) * goal_dir
+    blended_norm = float(np.linalg.norm(blended))
+    if blended_norm <= 1e-6:
+        blended_dir = goal_dir
+    else:
+        blended_dir = blended / blended_norm
+
+    slowdown_scale = 1.0
+    if slowdown_radius > 1e-6:
+        slowdown_scale = min(1.0, goal_distance / slowdown_radius)
+
+    desired_speed = max_speed * slowdown_scale
+    if desired_speed <= 1e-6:
+        return np.zeros(2, dtype=np.float32)
+    return (blended_dir * desired_speed).astype(np.float32)
+
+
 def rollout_eecbs_guided_tracker(
     obstacle_map: np.ndarray,
     starts: np.ndarray,
@@ -348,6 +385,8 @@ def rollout_eecbs_guided_tracker(
     lookahead_distance: float,
     waypoint_tolerance: float,
     slowdown_radius: float,
+    off_route_distance: float = 1.5,
+    goal_blend_alpha: float = 0.5,
     shield_type: str = "orca",
 ) -> Tuple[np.ndarray, np.ndarray, Dict[str, np.ndarray]]:
     env = ContinuousMAPFEnv(
@@ -381,10 +420,14 @@ def rollout_eecbs_guided_tracker(
                 int(waypoint_indices[agent_idx]),
                 lookahead_distance,
             )
-            preferred[agent_idx] = _tracker_preferred_velocity(
+            nearest_route_dist = float(np.min(np.linalg.norm(route - env.positions[agent_idx], axis=1)))
+            if nearest_route_dist > off_route_distance:
+                target = goals[agent_idx]
+            preferred[agent_idx] = _blended_preferred_velocity(
                 env.positions[agent_idx],
                 target,
                 goals[agent_idx],
+                alpha=goal_blend_alpha,
                 dt=dt,
                 max_speed=max_speed,
                 goal_tolerance=goal_tolerance,
@@ -672,7 +715,9 @@ def generate_single_rollout(task, args, eecbs_binary: Optional[str], lacam3_bina
                 eecbs_binary,
             )
             if args.expert_source == "eecbs-guided-orca":
-                routes = discrete_paths_to_waypoints(discrete_paths, compress_waypoints=True)
+                routes = discrete_paths_to_waypoints(
+                    discrete_paths, compress_waypoints=args.tracker_compress_waypoints
+                )
                 positions, velocities, tracker_metadata = rollout_eecbs_guided_tracker(
                     obstacle_map,
                     starts,
@@ -686,6 +731,8 @@ def generate_single_rollout(task, args, eecbs_binary: Optional[str], lacam3_bina
                     lookahead_distance=args.tracker_lookahead_distance,
                     waypoint_tolerance=args.tracker_waypoint_tolerance,
                     slowdown_radius=args.tracker_goal_slowdown_radius,
+                    off_route_distance=args.tracker_off_route_distance,
+                    goal_blend_alpha=args.tracker_goal_blend_alpha,
                     shield_type=args.tracker_shield_type,
                 )
                 additional_fields.update(tracker_metadata)
@@ -695,7 +742,9 @@ def generate_single_rollout(task, args, eecbs_binary: Optional[str], lacam3_bina
                         "tracker_lookahead_distance": np.asarray(args.tracker_lookahead_distance, dtype=np.float32),
                         "tracker_waypoint_tolerance": np.asarray(args.tracker_waypoint_tolerance, dtype=np.float32),
                         "tracker_goal_slowdown_radius": np.asarray(args.tracker_goal_slowdown_radius, dtype=np.float32),
-                        "tracker_compress_waypoints": np.asarray(True),
+                        "tracker_compress_waypoints": np.asarray(bool(args.tracker_compress_waypoints)),
+                        "tracker_off_route_distance": np.asarray(args.tracker_off_route_distance, dtype=np.float32),
+                        "tracker_goal_blend_alpha": np.asarray(args.tracker_goal_blend_alpha, dtype=np.float32),
                     }
                 )
                 source_used = "eecbs-guided-orca"
@@ -790,7 +839,14 @@ def main():
     parser.add_argument("--goal-tolerance", type=float, default=0.25)
     parser.add_argument("--wait-threshold", type=float, default=0.1)
     parser.add_argument("--num-directions", type=int, default=8)
-    parser.add_argument("--tracker-lookahead-distance", type=float, default=0.75)
+    parser.add_argument("--tracker-lookahead-distance", type=float, default=2.0)
+    parser.add_argument("--tracker-off-route-distance", type=float, default=1.5)
+    parser.add_argument("--tracker-goal-blend-alpha", type=float, default=0.5)
+    parser.add_argument(
+        "--tracker-compress-waypoints",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
     parser.add_argument("--tracker-waypoint-tolerance", type=float, default=0.25)
     parser.add_argument("--tracker-goal-slowdown-radius", type=float, default=1.0)
     parser.add_argument(
