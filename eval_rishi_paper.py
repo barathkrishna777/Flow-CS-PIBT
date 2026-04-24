@@ -105,6 +105,9 @@ def main():
                    help="Policy/model family to evaluate. flow_action_head loads a flow model and uses its action logits; local_classifier loads the repo's Rishi-like classifier.")
     p.add_argument("--hidden-dim", type=int, default=1024)
     p.add_argument("--num-layers", type=int, default=6)
+    p.add_argument("--action-head-conditioning", choices=["integrated", "zero_t0", "zero_t05"],
+                   default="integrated",
+                   help="Action head conditioning for flow_action_head policy (default: integrated)")
     args = p.parse_args()
 
     if not os.path.isfile(args.model):
@@ -203,6 +206,7 @@ def main():
             f"--numConsensusSamples={args.consensus}",
             f"--policyType={simulator_policy_type}",
             f"--useActionHead={'True' if use_action_head else 'False'}",
+            f"--actionHeadConditioning={args.action_head_conditioning}",
             f"--hiddenDim={args.hidden_dim}",
             f"--numLayers={args.num_layers}",
         ]

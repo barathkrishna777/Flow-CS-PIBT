@@ -302,12 +302,34 @@ def runNNOnState(cur_locs, bd, grid_map, k, m, model, device, goal_locations, ti
             probs = torch.softmax(predictions, dim=1).cpu().numpy()
             timer.stop("forward_pass")
         elif args.useActionHead or args.policyType == "flow_action_head":
-            # Direct action prediction via auxiliary head (single forward pass)
-            v_dummy = torch.zeros(n_agents, 2, device=device)
-            t_dummy = torch.full((n_agents, 1), 0.5, device=device)
-            timer.start("forward_pass")
-            _, action_logits = model(v_dummy, t_dummy, data, return_action_logits=True)
-            timer.stop("forward_pass")
+            conditioning = getattr(args, 'actionHeadConditioning', 'integrated')
+            if conditioning == "integrated":
+                # Run flow ODE to get v ≈ x_1 before querying action head — matches training distribution at t→1
+                num_steps = args.numIntegrationSteps
+                dt = 1.0 / num_steps
+                v = torch.randn(n_agents, 2, device=device)
+                for step in range(num_steps):
+                    t_step = torch.full((n_agents, 1), step * dt, device=device)
+                    timer.start("forward_pass")
+                    flow = model(v, t_step, data)
+                    timer.stop("forward_pass")
+                    v = v + flow * dt
+                t_final = torch.full((n_agents, 1), 0.99, device=device)
+                timer.start("forward_pass")
+                _, action_logits = model(v, t_final, data, return_action_logits=True)
+                timer.stop("forward_pass")
+            elif conditioning == "zero_t0":
+                v_dummy = torch.zeros(n_agents, 2, device=device)
+                t_dummy = torch.full((n_agents, 1), 0.0, device=device)
+                timer.start("forward_pass")
+                _, action_logits = model(v_dummy, t_dummy, data, return_action_logits=True)
+                timer.stop("forward_pass")
+            else:  # zero_t05
+                v_dummy = torch.zeros(n_agents, 2, device=device)
+                t_dummy = torch.full((n_agents, 1), 0.5, device=device)
+                timer.start("forward_pass")
+                _, action_logits = model(v_dummy, t_dummy, data, return_action_logits=True)
+                timer.stop("forward_pass")
             scores = action_logits.cpu().numpy()
             scores = scores / args.tau
             scores = scores - np.max(scores, axis=1, keepdims=True)
@@ -639,6 +661,9 @@ if __name__ == '__main__':
     parser.add_argument('--waitThreshold', type=float, help="Wait magnitude threshold (default 0.25)", default=0.25)
     parser.add_argument('--numConsensusSamples', type=int, help="Number of flow samples to average (default 3)", default=3)
     parser.add_argument('--useActionHead', type=lambda x: bool(str2bool(x)), help="Use auxiliary action head instead of flow (default False)", default=False)
+    parser.add_argument('--actionHeadConditioning', type=str,
+                        choices=['integrated', 'zero_t0', 'zero_t05'], default='integrated',
+                        help="How to condition action head: integrated=run flow ODE first (default), zero_t0=v=0 t=0, zero_t05=v=0 t=0.5")
     parser.add_argument('--policyType', '--policy-type', dest='policyType', type=str, choices=['flow', 'classifier', 'flow_action_head', 'local_classifier'], default='flow',
                         help="Policy/model family to load: flow for FlowGNNModel, classifier for Rishi/SSIL GNNStack, flow_action_head for FlowGNNModel action logits, local_classifier for RishiLikeClassifier")
     parser.add_argument('--hiddenDim', type=int, help="Model hidden dimension (default 1024)", default=1024)
