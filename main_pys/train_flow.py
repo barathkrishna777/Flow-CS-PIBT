@@ -47,6 +47,7 @@ def compute_flow_loss(
     action_loss_weight=0.3,
     unweighted_action_loss=False,
     unweighted_flow_loss=False,
+    discrete_forward_mode="both",
 ):
     """Shared flow matching loss computation for train and val, with optional auxiliary action loss."""
     batch = batch.to(device)
@@ -77,11 +78,30 @@ def compute_flow_loss(
             expert_actions = batch.action_y.view(-1).long().to(device)
         else:
             expert_actions = velocity_to_action_labels(x_1, device)
+
+        # shared: use logits from the noisy forward (original behaviour)
         action_loss = F.cross_entropy(action_logits, expert_actions, reduction='none')
         if unweighted_action_loss:
             action_loss = action_loss.mean()
         else:
             action_loss = (action_loss * node_weights.squeeze(1)).mean()
+
+        # zero_v: second forward with v=0, t=0 so head can't read answer from v_t
+        if discrete_forward_mode in ("zero_v", "both"):
+            zero_v = torch.zeros_like(x_1)
+            zero_t = torch.zeros(x_1.shape[0], 1, device=device)
+            _, action_logits_zero = model(zero_v, zero_t, batch, return_action_logits=True)
+            ce_zero = F.cross_entropy(action_logits_zero, expert_actions, reduction='none')
+            if unweighted_action_loss:
+                ce_zero = ce_zero.mean()
+            else:
+                ce_zero = (ce_zero * node_weights.squeeze(1)).mean()
+
+        if discrete_forward_mode == "zero_v":
+            action_loss = ce_zero
+        elif discrete_forward_mode == "both":
+            action_loss = 0.5 * action_loss + 0.5 * ce_zero
+        # else "shared": keep action_loss as computed above
 
         loss = flow_loss + action_loss_weight * action_loss
 
@@ -96,6 +116,7 @@ def validate(
     action_loss_weight,
     unweighted_action_loss,
     unweighted_flow_loss,
+    discrete_forward_mode="both",
 ):
     """Run validation and return average loss."""
     model.eval()
@@ -111,6 +132,7 @@ def validate(
                 action_loss_weight=action_loss_weight,
                 unweighted_action_loss=unweighted_action_loss,
                 unweighted_flow_loss=unweighted_flow_loss,
+                discrete_forward_mode=discrete_forward_mode,
             )
             total_loss += loss.item()
             num_batches += 1
@@ -121,7 +143,7 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
           preprocessed_dir=None, no_weighted_sampling=False, val_split=0.05, patience=0,
           resume=None, start_epoch=0, hidden_dim=1024, num_layers=6,
           action_loss_weight=0.3, unweighted_action_loss=False,
-          unweighted_flow_loss=False, epochs=10):
+          unweighted_flow_loss=False, epochs=10, discrete_forward_mode="both"):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_amp = device.type == "cuda"
     print(f"Device: {device} | AMP: {use_amp}")
@@ -260,6 +282,7 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
             "action_loss_weight": action_loss_weight,
             "unweighted_action_loss": unweighted_action_loss,
             "unweighted_flow_loss": unweighted_flow_loss,
+            "discrete_forward_mode": discrete_forward_mode,
         })
 
     log_batch_every = 10
@@ -269,7 +292,8 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
         "Loss weighting: "
         f"flow={'unweighted' if unweighted_flow_loss else 'weighted'}, "
         f"action={'unweighted' if unweighted_action_loss else 'weighted'}, "
-        f"action_loss_weight={action_loss_weight}"
+        f"action_loss_weight={action_loss_weight}, "
+        f"discrete_forward_mode={discrete_forward_mode}"
     )
 
     # Initialize best_val_loss (may be overridden by resume checkpoint above)
@@ -298,6 +322,7 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
                 action_loss_weight=action_loss_weight,
                 unweighted_action_loss=unweighted_action_loss,
                 unweighted_flow_loss=unweighted_flow_loss,
+                discrete_forward_mode=discrete_forward_mode,
             )
 
             optimizer.zero_grad()
@@ -344,6 +369,7 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
                 action_loss_weight=action_loss_weight,
                 unweighted_action_loss=unweighted_action_loss,
                 unweighted_flow_loss=unweighted_flow_loss,
+                discrete_forward_mode=discrete_forward_mode,
             )
             val_str = f" | Val Loss: {val_loss:.4f}"
 
@@ -456,6 +482,9 @@ if __name__ == "__main__":
                         help="Do not apply node_weights to the flow MSE loss")
     parser.add_argument("--epochs", type=int, default=10,
                         help="Number of training epochs; --quick still forces 1 epoch")
+    parser.add_argument("--discrete-forward-mode", type=str,
+                        choices=["shared", "zero_v", "both"], default="both",
+                        help="Action CE forward mode: shared=noisy forward only, zero_v=v=0 t=0 forward only, both=average of both (default: both)")
     args = parser.parse_args()
     train(run_name=args.run_name, quick=args.quick, use_wandb=not args.no_wandb,
           wandb_project=args.wandb_project, wandb_entity=args.wandb_entity,
@@ -467,4 +496,5 @@ if __name__ == "__main__":
           action_loss_weight=args.action_loss_weight,
           unweighted_action_loss=args.unweighted_action_loss,
           unweighted_flow_loss=args.unweighted_flow_loss,
-          epochs=args.epochs)
+          epochs=args.epochs,
+          discrete_forward_mode=args.discrete_forward_mode)
