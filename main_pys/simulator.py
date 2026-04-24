@@ -334,6 +334,10 @@ def runNNOnState(cur_locs, bd, grid_map, k, m, model, device, goal_locations, ti
             scores = scores / args.tau
             scores = scores - np.max(scores, axis=1, keepdims=True)
             probs = np.exp(scores) / np.sum(np.exp(scores), axis=1, keepdims=True)
+            # Clip to floor so convertProbsToPreferences multinomial never sees an all-zero row
+            # (confident logits + low tau can underflow to 0 in float32 after the first scatter_)
+            probs = np.clip(probs, 1e-8, 1.0)
+            probs = probs / probs.sum(axis=1, keepdims=True)
         else:
             # Flow-based inference with multi-sample consensus
             num_steps = args.numIntegrationSteps
