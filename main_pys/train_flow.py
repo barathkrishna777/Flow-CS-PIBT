@@ -143,7 +143,8 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
           preprocessed_dir=None, no_weighted_sampling=False, val_split=0.05, patience=0,
           resume=None, start_epoch=0, hidden_dim=1024, num_layers=6,
           action_loss_weight=0.3, unweighted_action_loss=False,
-          unweighted_flow_loss=False, epochs=10, discrete_forward_mode="both"):
+          unweighted_flow_loss=False, epochs=10, discrete_forward_mode="both",
+          reset_best_val_loss=False):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_amp = device.type == "cuda"
     print(f"Device: {device} | AMP: {use_amp}")
@@ -249,8 +250,8 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
             epochs = start_epoch + epochs  # --epochs means additional epochs when resuming
             # Rebuild scheduler so T_max matches the actual number of epochs to run
             scheduler = CosineAnnealingLR(optimizer, T_max=max(epochs - start_epoch, 1), eta_min=1e-6)
-            best_val_loss = ckpt.get('best_val_loss', float('inf'))
-            print(f"  Restored full state: resuming from epoch {start_epoch + 1}, running until epoch {epochs}, best_val={best_val_loss:.4f}")
+            best_val_loss = float('inf') if reset_best_val_loss else ckpt.get('best_val_loss', float('inf'))
+            print(f"  Restored full state: resuming from epoch {start_epoch + 1}, running until epoch {epochs}, best_val={'reset' if reset_best_val_loss else f'{best_val_loss:.4f}'}")
         else:
             # Legacy checkpoint (model weights only)
             model.load_state_dict(ckpt)
@@ -489,6 +490,8 @@ if __name__ == "__main__":
     parser.add_argument("--discrete-forward-mode", type=str,
                         choices=["shared", "zero_v", "both"], default="both",
                         help="Action CE forward mode: shared=noisy forward only, zero_v=v=0 t=0 forward only, both=average of both (default: both)")
+    parser.add_argument("--reset-best-val-loss", action="store_true",
+                        help="Reset best_val_loss to inf on resume (use when loss function changes, e.g. repair retrains)")
     args = parser.parse_args()
     train(run_name=args.run_name, quick=args.quick, use_wandb=not args.no_wandb,
           wandb_project=args.wandb_project, wandb_entity=args.wandb_entity,
@@ -501,4 +504,5 @@ if __name__ == "__main__":
           unweighted_action_loss=args.unweighted_action_loss,
           unweighted_flow_loss=args.unweighted_flow_loss,
           epochs=args.epochs,
-          discrete_forward_mode=args.discrete_forward_mode)
+          discrete_forward_mode=args.discrete_forward_mode,
+          reset_best_val_loss=args.reset_best_val_loss)
