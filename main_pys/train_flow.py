@@ -227,8 +227,9 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
     optimizer = AdamW(model.parameters(), lr=1e-4, weight_decay=1e-4)
 
     epochs = 1 if quick else epochs
-    # Gentle cosine decay: LR goes from 1e-4 -> ~0 over all epochs
-    scheduler = CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
+    # Scheduler is rebuilt after resume so T_max reflects the actual run length.
+    # Placeholder T_max here; overwritten below if resuming.
+    scheduler = CosineAnnealingLR(optimizer, T_max=max(epochs, 1), eta_min=1e-6)
 
     # Mixed precision: ~2x throughput on A100 Tensor Cores
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
@@ -245,8 +246,11 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
             if ckpt.get('scaler_state_dict'):
                 scaler.load_state_dict(ckpt['scaler_state_dict'])
             start_epoch = ckpt['epoch']  # epoch is already 1-indexed, use as start
+            epochs = start_epoch + epochs  # --epochs means additional epochs when resuming
+            # Rebuild scheduler so T_max matches the actual number of epochs to run
+            scheduler = CosineAnnealingLR(optimizer, T_max=max(epochs - start_epoch, 1), eta_min=1e-6)
             best_val_loss = ckpt.get('best_val_loss', float('inf'))
-            print(f"  Restored full state: resuming from epoch {start_epoch + 1}, best_val={best_val_loss:.4f}")
+            print(f"  Restored full state: resuming from epoch {start_epoch + 1}, running until epoch {epochs}, best_val={best_val_loss:.4f}")
         else:
             # Legacy checkpoint (model weights only)
             model.load_state_dict(ckpt)
