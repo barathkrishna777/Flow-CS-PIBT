@@ -144,7 +144,7 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
           resume=None, start_epoch=0, hidden_dim=1024, num_layers=6,
           action_loss_weight=0.3, unweighted_action_loss=False,
           unweighted_flow_loss=False, epochs=10, discrete_forward_mode="both",
-          reset_best_val_loss=False):
+          reset_best_val_loss=False, action_head_only=False, action_head_lr=5e-4):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_amp = device.type == "cuda"
     print(f"Device: {device} | AMP: {use_amp}")
@@ -225,7 +225,15 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
         )
 
     model = FlowGNNModel(hidden_dim=hidden_dim, num_layers=num_layers).to(device)
-    optimizer = AdamW(model.parameters(), lr=1e-4, weight_decay=1e-4)
+
+    if action_head_only:
+        for name, param in model.named_parameters():
+            param.requires_grad = name.startswith("action_head.")
+        trainable = [p for p in model.parameters() if p.requires_grad]
+        print(f"action_head_only: freezing trunk, training {sum(p.numel() for p in trainable):,} action_head params at lr={action_head_lr}")
+        optimizer = AdamW(trainable, lr=action_head_lr, weight_decay=1e-4)
+    else:
+        optimizer = AdamW(model.parameters(), lr=1e-4, weight_decay=1e-4)
 
     epochs = 1 if quick else epochs
     # Scheduler is rebuilt after resume so T_max reflects the actual run length.
@@ -242,16 +250,25 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
         if isinstance(ckpt, dict) and 'model_state_dict' in ckpt:
             # Full checkpoint (model + optimizer + scheduler + metadata)
             model.load_state_dict(ckpt['model_state_dict'])
-            optimizer.load_state_dict(ckpt['optimizer_state_dict'])
-            scheduler.load_state_dict(ckpt['scheduler_state_dict'])
-            if ckpt.get('scaler_state_dict'):
-                scaler.load_state_dict(ckpt['scaler_state_dict'])
-            start_epoch = ckpt['epoch']  # epoch is already 1-indexed, use as start
-            epochs = start_epoch + epochs  # --epochs means additional epochs when resuming
-            # Rebuild scheduler so T_max matches the actual number of epochs to run
-            scheduler = CosineAnnealingLR(optimizer, T_max=max(epochs - start_epoch, 1), eta_min=1e-6)
-            best_val_loss = float('inf') if reset_best_val_loss else ckpt.get('best_val_loss', float('inf'))
-            print(f"  Restored full state: resuming from epoch {start_epoch + 1}, running until epoch {epochs}, best_val={'reset' if reset_best_val_loss else f'{best_val_loss:.4f}'}")
+            if action_head_only:
+                # Optimizer only covers action_head params — skip incompatible full-model state
+                start_epoch = ckpt['epoch']
+                epochs = start_epoch + epochs
+                scheduler = CosineAnnealingLR(optimizer, T_max=max(epochs - start_epoch, 1), eta_min=1e-6)
+                best_val_loss = float('inf')
+                print(f"  Loaded model weights (action_head_only: skipping optimizer/scheduler state). "
+                      f"Resuming from epoch {start_epoch + 1}, running until epoch {epochs}")
+            else:
+                optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+                scheduler.load_state_dict(ckpt['scheduler_state_dict'])
+                if ckpt.get('scaler_state_dict'):
+                    scaler.load_state_dict(ckpt['scaler_state_dict'])
+                start_epoch = ckpt['epoch']  # epoch is already 1-indexed, use as start
+                epochs = start_epoch + epochs  # --epochs means additional epochs when resuming
+                # Rebuild scheduler so T_max matches the actual number of epochs to run
+                scheduler = CosineAnnealingLR(optimizer, T_max=max(epochs - start_epoch, 1), eta_min=1e-6)
+                best_val_loss = float('inf') if reset_best_val_loss else ckpt.get('best_val_loss', float('inf'))
+                print(f"  Restored full state: resuming from epoch {start_epoch + 1}, running until epoch {epochs}, best_val={'reset' if reset_best_val_loss else f'{best_val_loss:.4f}'}")
         else:
             # Legacy checkpoint (model weights only)
             model.load_state_dict(ckpt)
@@ -492,6 +509,10 @@ if __name__ == "__main__":
                         help="Action CE forward mode: shared=noisy forward only, zero_v=v=0 t=0 forward only, both=average of both (default: both)")
     parser.add_argument("--reset-best-val-loss", action="store_true",
                         help="Reset best_val_loss to inf on resume (use when loss function changes, e.g. repair retrains)")
+    parser.add_argument("--action-head-only", action="store_true",
+                        help="Freeze all trunk params, train only action_head (for isolated head repair)")
+    parser.add_argument("--action-head-lr", type=float, default=5e-4,
+                        help="LR for action_head_only mode (default: 5e-4)")
     args = parser.parse_args()
     train(run_name=args.run_name, quick=args.quick, use_wandb=not args.no_wandb,
           wandb_project=args.wandb_project, wandb_entity=args.wandb_entity,
@@ -505,4 +526,6 @@ if __name__ == "__main__":
           unweighted_flow_loss=args.unweighted_flow_loss,
           epochs=args.epochs,
           discrete_forward_mode=args.discrete_forward_mode,
-          reset_best_val_loss=args.reset_best_val_loss)
+          reset_best_val_loss=args.reset_best_val_loss,
+          action_head_only=args.action_head_only,
+          action_head_lr=args.action_head_lr)
