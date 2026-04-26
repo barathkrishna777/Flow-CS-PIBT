@@ -97,10 +97,24 @@ def compute_flow_loss(
             else:
                 ce_zero = (ce_zero * node_weights.squeeze(1)).mean()
 
+        # x1_t1: forward with (x_1, t=0.99) — matches integrated inference distribution exactly.
+        # The trunk sees (v≈x_1, t≈1) at inference; training on the ground-truth x_1 at t=0.99
+        # is the cleanest way to teach the action head without the shortcut.
+        if discrete_forward_mode in ("x1_t1",):
+            t_high = torch.full((x_1.shape[0], 1), 0.99, device=device)
+            _, action_logits_x1 = model(x_1, t_high, batch, return_action_logits=True)
+            ce_x1 = F.cross_entropy(action_logits_x1, expert_actions, reduction='none')
+            if unweighted_action_loss:
+                ce_x1 = ce_x1.mean()
+            else:
+                ce_x1 = (ce_x1 * node_weights.squeeze(1)).mean()
+
         if discrete_forward_mode == "zero_v":
             action_loss = ce_zero
         elif discrete_forward_mode == "both":
             action_loss = 0.5 * action_loss + 0.5 * ce_zero
+        elif discrete_forward_mode == "x1_t1":
+            action_loss = ce_x1
         # else "shared": keep action_loss as computed above
 
         loss = flow_loss + action_loss_weight * action_loss
@@ -505,8 +519,10 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=10,
                         help="Number of training epochs; --quick still forces 1 epoch")
     parser.add_argument("--discrete-forward-mode", type=str,
-                        choices=["shared", "zero_v", "both"], default="both",
-                        help="Action CE forward mode: shared=noisy forward only, zero_v=v=0 t=0 forward only, both=average of both (default: both)")
+                        choices=["shared", "zero_v", "both", "x1_t1"], default="both",
+                        help="Action CE forward mode: shared=noisy forward only, zero_v=v=0 t=0 only, "
+                             "both=average of shared+zero_v, x1_t1=use ground-truth x_1 at t=0.99 "
+                             "(matches integrated inference; best for action_head_only). Default: both")
     parser.add_argument("--reset-best-val-loss", action="store_true",
                         help="Reset best_val_loss to inf on resume (use when loss function changes, e.g. repair retrains)")
     parser.add_argument("--action-head-only", action="store_true",
