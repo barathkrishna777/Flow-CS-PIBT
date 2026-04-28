@@ -2,11 +2,16 @@ import os
 import subprocess
 import re
 import argparse
+import json
 import numpy as np
-from scipy.signal import savgol_filter
 import glob
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from collections import deque
+
+try:
+    from scipy.signal import savgol_filter
+except ImportError:
+    savgol_filter = None
 
 # Configuration
 DEFAULT_EECBS_BIN = "./build/eecbs"
@@ -26,12 +31,29 @@ HELD_OUT_TEST = {
 WINDOW_LENGTH = 3 
 POLY_ORDER = 2    
 
-os.makedirs(OUTPUT_NPZ_DIR, exist_ok=True)
-os.makedirs(BD_DIR, exist_ok=True)
-
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Generate grid-world Flow-CS expert trajectories and BD heuristics."
+    )
+    parser.add_argument(
+        "--map-dir",
+        default=MAP_DIR,
+        help="Directory with .map files (default: data/mapf-map).",
+    )
+    parser.add_argument(
+        "--scen-dir",
+        default=SCEN_DIR,
+        help="Directory with .scen files (default: data/scen-random).",
+    )
+    parser.add_argument(
+        "--output-npz-dir",
+        default=OUTPUT_NPZ_DIR,
+        help="Output directory for trajectory .npz files.",
+    )
+    parser.add_argument(
+        "--bd-dir",
+        default=BD_DIR,
+        help="Output directory for BD heuristic .npz files.",
     )
     parser.add_argument(
         "--workers",
@@ -43,6 +65,78 @@ def parse_args():
         "--eecbs-bin",
         default=os.environ.get("EECBS_BIN", DEFAULT_EECBS_BIN),
         help="Path to the EECBS executable (default: ./build/eecbs or EECBS_BIN env var).",
+    )
+    parser.add_argument(
+        "--maps",
+        nargs="*",
+        default=None,
+        help="Optional explicit map names to process. Defaults to all maps in --map-dir.",
+    )
+    parser.add_argument(
+        "--exclude-maps",
+        nargs="*",
+        default=None,
+        help="Additional map names to skip.",
+    )
+    parser.add_argument(
+        "--agent-counts",
+        nargs="*",
+        type=int,
+        default=None,
+        help="Default agent counts for maps without a JSON override.",
+    )
+    parser.add_argument(
+        "--agent-counts-json",
+        default=None,
+        help=(
+            "JSON map-name -> [agent counts], or a manifest containing an "
+            "'agent_counts' object. Useful for custom coordination maps."
+        ),
+    )
+    parser.add_argument(
+        "--training-scenario-limit",
+        type=int,
+        default=128,
+        help="Max scenarios per non-held-out training map (default: 128).",
+    )
+    parser.add_argument(
+        "--heldout-scenario-limit",
+        type=int,
+        default=25,
+        help="Max scenarios per held-out map for BD generation (default: 25).",
+    )
+    parser.add_argument(
+        "--include-held-out-trajectories",
+        action="store_true",
+        help="Also generate training trajectories for Rishi held-out maps. Avoid for headline runs.",
+    )
+    parser.add_argument(
+        "--allow-large-32x32",
+        action="store_true",
+        help="Disable the legacy cap that skipped >200-agent trajectories on 32x32 maps.",
+    )
+    parser.add_argument(
+        "--suboptimality",
+        type=float,
+        default=2.0,
+        help="EECBS suboptimality bound used for labels (default: 2.0).",
+    )
+    parser.add_argument(
+        "--solver-timeout",
+        type=int,
+        default=120,
+        help="Per EECBS trajectory timeout in seconds (default: 120).",
+    )
+    parser.add_argument(
+        "--bd-max-agents",
+        type=int,
+        default=1000,
+        help="Max goals per scenario to precompute BD heuristics for.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print scheduled BD/trajectory jobs without running EECBS or writing files.",
     )
     return parser.parse_args()
 
@@ -71,7 +165,8 @@ def smooth_and_extract_velocities(paths_array):
     N, T, D = paths_array.shape
     window = min(WINDOW_LENGTH, T)
     if window % 2 == 0: window -= 1
-    if window < 3: return paths_array, np.gradient(paths_array, axis=1)
+    if window < 3 or savgol_filter is None:
+        return paths_array, np.gradient(paths_array, axis=1)
     smoothed_positions = savgol_filter(paths_array, window_length=window, polyorder=POLY_ORDER, axis=1, deriv=0)
     velocities = savgol_filter(paths_array, window_length=window, polyorder=POLY_ORDER, axis=1, deriv=1)
     return smoothed_positions, velocities
@@ -121,11 +216,11 @@ def compute_bd_heuristic(map_data, goals):
 # ==========================================
 # PHASE 1: Generate BD Heuristics Safely
 # ==========================================
-def generate_scenario_bd(map_path, scen_path):
+def generate_scenario_bd(map_path, scen_path, bd_dir, bd_max_agents):
     scen_name = os.path.basename(scen_path).replace(".scen", "")
     map_name = os.path.basename(map_path).replace(".map", "")
     bd_key = f"{map_name}-random-{scen_name.split('-random-')[-1]}"
-    out_bd_file = os.path.join(BD_DIR, f"{scen_name}_bds.npz")
+    out_bd_file = os.path.join(bd_dir, f"{scen_name}_bds.npz")
     
     if os.path.exists(out_bd_file):
         return f"BD exists: {scen_name}"
@@ -133,7 +228,7 @@ def generate_scenario_bd(map_path, scen_path):
     print_log(f"--> Building Heuristic Grid: {scen_name} (Takes ~30s)")
     try:
         map_data = read_map(map_path)
-        goals = parse_scenario_goals(scen_path, max_agents=1000)
+        goals = parse_scenario_goals(scen_path, max_agents=bd_max_agents)
         bd_array = compute_bd_heuristic(map_data, goals)
         
         # Atomic write to prevent file corruption
@@ -148,9 +243,17 @@ def generate_scenario_bd(map_path, scen_path):
 # ==========================================
 # PHASE 2: Generate EECBS Trajectories
 # ==========================================
-def generate_scenario_trajectory(map_path, scen_path, num_agents, eecbs_bin):
+def generate_scenario_trajectory(
+    map_path,
+    scen_path,
+    num_agents,
+    eecbs_bin,
+    output_npz_dir,
+    suboptimality,
+    solver_timeout,
+):
     scen_name = os.path.basename(scen_path).replace(".scen", "")
-    out_traj_file = os.path.join(OUTPUT_NPZ_DIR, f"{scen_name}_{num_agents}.npz")
+    out_traj_file = os.path.join(output_npz_dir, f"{scen_name}_{num_agents}.npz")
     tmp_path_file = f"tmp_{scen_name}_{num_agents}_{os.getpid()}.txt" 
     
     if os.path.exists(out_traj_file): 
@@ -158,11 +261,11 @@ def generate_scenario_trajectory(map_path, scen_path, num_agents, eecbs_bin):
         
     cmd = [
         eecbs_bin, "-m", map_path, "-a", scen_path, "-k", str(num_agents),
-        "--outputPaths", tmp_path_file, "--suboptimality", "2.0"
+        "--outputPaths", tmp_path_file, "--suboptimality", str(suboptimality)
     ]
     
     try:
-        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=solver_timeout)
         if os.path.exists(tmp_path_file):
             paths_discrete = parse_paths_txt(tmp_path_file)
             if len(paths_discrete) > 0:
@@ -181,55 +284,131 @@ def generate_scenario_trajectory(map_path, scen_path, num_agents, eecbs_bin):
 # ==========================================
 # EXECUTION PIPELINE
 # ==========================================
-def process_benchmark_parallel(max_workers, eecbs_bin):
-    map_files = glob.glob(os.path.join(MAP_DIR, "*.map"))
-    agent_counts = [20, 50, 100, 200, 400, 600, 800, 1000]
+def _max_agents_in_scen(scen_path):
+    with open(scen_path) as f:
+        return max(0, len(f.readlines()) - 1)
+
+
+def _load_agent_counts_json(path):
+    if not path:
+        return {}
+    with open(path) as f:
+        payload = json.load(f)
+    if "agent_counts" in payload and isinstance(payload["agent_counts"], dict):
+        payload = payload["agent_counts"]
+    return {str(k): [int(v) for v in values] for k, values in payload.items()}
+
+
+def _select_agent_counts(map_name, scen_path, default_counts, by_map_counts, allow_large_32x32):
+    counts = by_map_counts.get(map_name, default_counts)
+    max_available = _max_agents_in_scen(scen_path)
+    selected = []
+    for n in counts:
+        if n > max_available:
+            continue
+        if not allow_large_32x32 and n > 200 and "32-32" in map_name:
+            continue
+        selected.append(n)
+    return selected
+
+
+def process_benchmark_parallel(args):
+    os.makedirs(args.output_npz_dir, exist_ok=True)
+    os.makedirs(args.bd_dir, exist_ok=True)
+
+    requested_maps = set(args.maps) if args.maps else None
+    excluded_maps = set(args.exclude_maps or [])
+    agent_counts = args.agent_counts or [20, 50, 100, 200, 400, 600, 800, 1000]
+    by_map_counts = _load_agent_counts_json(args.agent_counts_json)
+
+    map_files = glob.glob(os.path.join(args.map_dir, "*.map"))
     
     bd_jobs = []
     traj_jobs = []
+    map_summary = []
     
     for map_path in map_files:
         map_name = os.path.basename(map_path).replace(".map", "")
-        if map_name in OMITTED_MAPS:
+        if requested_maps is not None and map_name not in requested_maps:
+            continue
+        if map_name in OMITTED_MAPS or map_name in excluded_maps:
             continue
             
-        scen_files = sorted(glob.glob(os.path.join(SCEN_DIR, f"{map_name}-random-*.scen")))
+        scen_files = sorted(glob.glob(os.path.join(args.scen_dir, f"{map_name}-random-*.scen")))
         
         # We need BD heuristics for the test set too!
-        limit = 25 if map_name in HELD_OUT_TEST else 128
+        is_held_out = map_name in HELD_OUT_TEST
+        limit = args.heldout_scenario_limit if is_held_out and not args.include_held_out_trajectories else args.training_scenario_limit
+        scheduled_bd = 0
+        scheduled_traj = 0
         
         for scen_path in scen_files[:limit]:
             # Queue exactly ONE heuristic calculation per scenario
             bd_jobs.append((map_path, scen_path))
+            scheduled_bd += 1
             
             # Queue trajectory generations (skip for held-out test set)
-            if map_name not in HELD_OUT_TEST:
-                for n in agent_counts:
-                    if n > 200 and "32-32" in map_name: continue
+            if map_name not in HELD_OUT_TEST or args.include_held_out_trajectories:
+                for n in _select_agent_counts(
+                    map_name,
+                    scen_path,
+                    agent_counts,
+                    by_map_counts,
+                    args.allow_large_32x32,
+                ):
                     traj_jobs.append((map_path, scen_path, n))
+                    scheduled_traj += 1
+
+        map_summary.append((map_name, len(scen_files[:limit]), scheduled_bd, scheduled_traj))
 
     cpu_count = os.cpu_count() or 1
     print_log(
-        f"Using {max_workers} workers (Python reports {cpu_count} CPU cores)."
+        f"Using {args.workers} workers (Python reports {cpu_count} CPU cores)."
     )
-    print_log(f"Using EECBS binary: {eecbs_bin}")
+    print_log(f"Map dir: {args.map_dir}")
+    print_log(f"Scenario dir: {args.scen_dir}")
+    print_log(f"BD dir: {args.bd_dir}")
+    print_log(f"Trajectory dir: {args.output_npz_dir}")
+    print_log(f"Using EECBS binary: {args.eecbs_bin}")
+    print_log("Scheduled jobs by map:")
+    for map_name, scens, bds, trajs in map_summary:
+        print_log(f"  {map_name}: scenarios={scens} bd_jobs={bds} traj_jobs={trajs}")
+
+    if args.dry_run:
+        print_log(f"Dry run only. BD jobs={len(bd_jobs)} trajectory jobs={len(traj_jobs)}")
+        return
 
     # Run Phase 1
     print_log(f"--- PHASE 1: Generating Heuristics ({len(bd_jobs)} files) ---")
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(generate_scenario_bd, m, s) for m, s in bd_jobs]
+    with ProcessPoolExecutor(max_workers=args.workers) as executor:
+        futures = [
+            executor.submit(generate_scenario_bd, m, s, args.bd_dir, args.bd_max_agents)
+            for m, s in bd_jobs
+        ]
         for future in as_completed(futures):
             # Print instantly when a job finishes
             print_log(future.result())
 
     # Run Phase 2
     print_log(f"\n--- PHASE 2: Generating Expert Trajectories ({len(traj_jobs)} files) ---")
-    if traj_jobs and not os.path.isfile(eecbs_bin):
+    if traj_jobs and not os.path.isfile(args.eecbs_bin):
         raise FileNotFoundError(
-            f"EECBS binary not found: {eecbs_bin}. Pass --eecbs-bin or set EECBS_BIN."
+            f"EECBS binary not found: {args.eecbs_bin}. Pass --eecbs-bin or set EECBS_BIN."
         )
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(generate_scenario_trajectory, m, s, a, eecbs_bin): (m, s, a) for m, s, a in traj_jobs}
+    with ProcessPoolExecutor(max_workers=args.workers) as executor:
+        futures = {
+            executor.submit(
+                generate_scenario_trajectory,
+                m,
+                s,
+                a,
+                args.eecbs_bin,
+                args.output_npz_dir,
+                args.suboptimality,
+                args.solver_timeout,
+            ): (m, s, a)
+            for m, s, a in traj_jobs
+        }
         for i, future in enumerate(as_completed(futures)):
             if i % 50 == 0: 
                 print_log(f"Progress: {i}/{len(traj_jobs)} | {future.result()}")
@@ -238,4 +417,4 @@ if __name__ == "__main__":
     args = parse_args()
     if args.workers < 1:
         raise ValueError("--workers must be at least 1")
-    process_benchmark_parallel(args.workers, args.eecbs_bin)
+    process_benchmark_parallel(args)

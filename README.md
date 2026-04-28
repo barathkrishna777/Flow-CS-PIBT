@@ -14,6 +14,8 @@ the classifier baseline on the paper's held-out maps.
 
 - `generate_flow_data_multi.py`: generate grid-world expert trajectories with
   EECBS and backward-Dijkstra (BD) heuristic files.
+- `generate_custom_coordination_maps.py`: generate training-only dense random,
+  bottleneck, and small-map scenarios for coordination ablations.
 - `preprocess_dataset.py`: optionally convert raw trajectory `.npz` files into
   ready-to-load PyTorch Geometric `.pt` files.
 - `main_pys/train_flow.py`: train the flow matching policy.
@@ -219,6 +221,13 @@ data/flow_training_data_multi/*.npz
 By default, `generate_flow_data_multi.py` follows the Rishi split: it generates
 BD files for held-out test maps, but does not generate training trajectories
 from those held-out maps.
+
+To run dense/custom coordination studies without contaminating the Rishi
+held-out maps, see:
+
+```text
+docs/custom_coordination_studies.md
+```
 
 ### Option C: Preprocess Raw Data
 

@@ -8,6 +8,9 @@ does a simple torch.load() per sample — no computation, pure I/O.
 Usage:
     python preprocess_dataset.py [--workers 32] [--out /media/.../preprocessed_data]
     python preprocess_dataset.py --migrate-from data/preprocessed --out /media/.../preprocessed_data
+    python preprocess_dataset.py --data-dir data/flow_training_data_custom_coordination \
+        --map-dir data/custom_coordination/maps --bd-dir data/bd_npzs/custom_coordination \
+        --out data/preprocessed_custom_coordination --output-prefix custom
 """
 import os
 import sys
@@ -44,10 +47,10 @@ def read_map(map_file, k):
 
 
 # ── Process one (file, timestep) pair ───────────────────────────────────────
-def process_sample(args, maps, k, m, out_dir):
+def process_sample(args, maps, k, m, out_dir, bd_dir, output_prefix):
     """Build and save one PyG Data object. Returns output path or None on error."""
     npz_path, t_step, sample_idx = args
-    out_path = os.path.join(out_dir, f"sample_{sample_idx:08d}.pt")
+    out_path = os.path.join(out_dir, f"{output_prefix}_{sample_idx:08d}.pt")
     if os.path.exists(out_path) and os.path.getsize(out_path) >= 100:
         return out_path  # already processed and not corrupt, skip
     try:
@@ -87,7 +90,7 @@ def process_sample(args, maps, k, m, out_dir):
 
         # BD loading
         scen_name = filename.replace('.npz', '').rsplit('_', 1)[0]
-        bd_file_path = os.path.join("data", "bd_npzs", "large_scale", f"{scen_name}_bds.npz")
+        bd_file_path = os.path.join(bd_dir, f"{scen_name}_bds.npz")
         bd_key = f"{map_name}-random-{scen_name.split('-random-')[-1]}"
         with np.load(bd_file_path) as bd_data:
             bd_grid = bd_data[bd_key][:cur_locs.shape[0]].astype(np.float32)
@@ -107,18 +110,24 @@ def process_sample(args, maps, k, m, out_dir):
         return None
 
 
-def worker_init(maps_dict, k_val, m_val, out_dir_val):
+def worker_init(maps_dict, k_val, m_val, out_dir_val, bd_dir_val, output_prefix_val):
     """Store shared data in each worker process."""
-    global _maps, _k, _m, _out_dir
+    global _maps, _k, _m, _out_dir, _bd_dir, _output_prefix
     _maps = maps_dict
     _k = k_val
     _m = m_val
     _out_dir = out_dir_val
+    _bd_dir = bd_dir_val
+    _output_prefix = output_prefix_val
 
 
 def worker_fn(args):
     """Wrapper that uses global worker state."""
-    return process_sample(args, _maps, _k, _m, _out_dir)
+    return process_sample(args, _maps, _k, _m, _out_dir, _bd_dir, _output_prefix)
+
+
+def split_dirs(value):
+    return [part.strip() for part in value.split(",") if part.strip()]
 
 
 def migrate_existing(old_dir, new_dir):
@@ -169,9 +178,13 @@ def main():
     parser.add_argument("--data-dir", default="data/flow_training_data_multi",
                         help="Directory with trajectory .npz files")
     parser.add_argument("--map-dir", default="data/mapf-map",
-                        help="Directory with .map files")
+                        help="Directory with .map files. Comma-separated dirs are supported.")
+    parser.add_argument("--bd-dir", default=os.path.join("data", "bd_npzs", "large_scale"),
+                        help="Directory with *_bds.npz files")
     parser.add_argument("--out", default="data/preprocessed",
                         help="Output directory for .pt files")
+    parser.add_argument("--output-prefix", default="sample",
+                        help="Filename prefix for .pt files (default: sample)")
     parser.add_argument("--migrate-from", default=None,
                         help="Old preprocessed dir to validate and move files from before processing")
     parser.add_argument("--workers", type=int, default=0,
@@ -196,9 +209,13 @@ def main():
     # 1) Load all maps
     print("Loading maps...")
     maps = {}
-    for map_path in glob.glob(os.path.join(args.map_dir, "*.map")):
-        map_name = os.path.basename(map_path).replace(".map", "")
-        maps[map_name] = read_map(map_path, k)
+    for map_dir in split_dirs(args.map_dir):
+        for map_path in glob.glob(os.path.join(map_dir, "*.map")):
+            map_name = os.path.basename(map_path).replace(".map", "")
+            if map_name in maps:
+                print(f"  Duplicate map name {map_name}; keeping first copy")
+                continue
+            maps[map_name] = read_map(map_path, k)
     print(f"  Loaded {len(maps)} maps")
 
     # 2) Build flat index of (file, timestep, global_idx)
@@ -225,7 +242,11 @@ def main():
 
     # 4) Process in parallel
     print(f"Processing with {num_workers} workers -> {args.out}/")
-    with Pool(num_workers, initializer=worker_init, initargs=(maps, k, m, args.out)) as pool:
+    with Pool(
+        num_workers,
+        initializer=worker_init,
+        initargs=(maps, k, m, args.out, args.bd_dir, args.output_prefix),
+    ) as pool:
         results = list(tqdm(
             pool.imap_unordered(worker_fn, index, chunksize=64),
             total=len(index),

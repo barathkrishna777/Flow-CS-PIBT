@@ -16,6 +16,7 @@ import json
 import random
 import torch
 import numpy as np
+from collections import Counter
 from torch.utils.data import Dataset, WeightedRandomSampler
 from tqdm import tqdm
 
@@ -124,12 +125,22 @@ class PreprocessedFlowMAPFDataset(Dataset):
             print("Loading cached agent counts...")
             with open(cache_path, 'r') as f:
                 cached = json.load(f)
-            # Map cached filenames to current file list
-            fname_to_count = {os.path.basename(k): v for k, v in cached.items()}
+
+            # New caches use absolute paths so comma-separated preprocessed dirs
+            # can contain overlapping sample_*.pt filenames. Fall back to the
+            # legacy basename cache only when basenames are unique.
+            abs_to_count = {os.path.abspath(k): v for k, v in cached.items()}
+            basenames = [os.path.basename(f) for f in self.files]
+            basename_freq = Counter(basenames)
+            legacy_basename_ok = all(c == 1 for c in basename_freq.values())
+            fname_to_count = {os.path.basename(k): v for k, v in cached.items()} if legacy_basename_ok else {}
+
             counts = []
             missing = 0
             for f in self.files:
-                c = fname_to_count.get(os.path.basename(f))
+                c = abs_to_count.get(os.path.abspath(f))
+                if c is None:
+                    c = fname_to_count.get(os.path.basename(f))
                 if c is not None:
                     counts.append(c)
                 else:
@@ -147,15 +158,15 @@ class PreprocessedFlowMAPFDataset(Dataset):
         for f in tqdm(self.files, desc="Scanning agent counts", mininterval=5):
             try:
                 data = torch.load(f, weights_only=False)
-                counts[os.path.basename(f)] = data.x.shape[0]
+                counts[os.path.abspath(f)] = data.x.shape[0]
             except Exception:
-                counts[os.path.basename(f)] = 50  # fallback
+                counts[os.path.abspath(f)] = 50  # fallback
 
         with open(cache_path, 'w') as fp:
             json.dump(counts, fp)
         print(f"  Cached to {cache_path}")
 
-        return np.array([counts[os.path.basename(f)] for f in self.files], dtype=np.int32)
+        return np.array([counts[os.path.abspath(f)] for f in self.files], dtype=np.int32)
 
 
 def build_weighted_sampler(dataset):
