@@ -6,7 +6,7 @@ __pycache__/
 # Generated / large artifacts (weights already ignored via *.pt)
 wandb/
 data/
-logs/
+logs/   
 *.pt
 *.pdf
 *.html
@@ -39,6 +39,8 @@ third_party/**/cmake_install.cmake
 
 # Evaluation CSV outputs (regenerate from eval scripts / sbatch)
 evals/*.csv
+
+paper/
 
 # Runtime path dumps from simulator / visualize_path
 *.npy
