@@ -20,6 +20,9 @@ Usage:
   # Paper-scale run is large (8 maps x 25 scens x 10 agent levels = 2000 sims).
   # Rishi's 12-map panel is larger:
   python eval_rishi_paper.py -m model.pt --map-set rishi12 --output logs/rishi12.csv
+
+  # Non-learned BD-guided PIBT baseline; no checkpoint required.
+  python eval_rishi_paper.py --policy-type pibt --map-set rishi8 --output logs/rishi8_pibt.csv
 """
 from __future__ import annotations
 
@@ -82,7 +85,8 @@ def _print_preflight(preflight: list[tuple[str, int, int, int]]) -> None:
 
 def main():
     p = argparse.ArgumentParser(description="Rishi-style grid benchmark")
-    p.add_argument("-m", "--model", required=True, help="Checkpoint .pt path")
+    p.add_argument("-m", "--model", default=None,
+                   help="Checkpoint .pt path. Not required for --policy-type pibt.")
     p.add_argument("--output", "-o", required=True, help="Output CSV (simulator format)")
     p.add_argument("--map-set", choices=sorted(MAP_PRESETS), default="rishi8",
                    help="Named map preset (default: rishi8). Ignored when --maps is set.")
@@ -101,8 +105,8 @@ def main():
     p.add_argument("--consensus", type=int, default=3)
     p.add_argument("--tau", type=float, default=0.3)
     p.add_argument("--wait-thresh", type=float, default=0.25)
-    p.add_argument("--policy-type", choices=["flow", "classifier", "flow_action_head", "local_classifier"], default="flow",
-                   help="Policy/model family to evaluate. flow_action_head loads a flow model and uses its action logits; local_classifier loads the repo's Rishi-like classifier.")
+    p.add_argument("--policy-type", choices=["flow", "classifier", "flow_action_head", "local_classifier", "pibt"], default="flow",
+                   help="Policy/model family to evaluate. pibt is the non-learned BD-guided PIBT baseline and does not load a checkpoint.")
     p.add_argument("--hidden-dim", type=int, default=1024)
     p.add_argument("--num-layers", type=int, default=6)
     p.add_argument("--action-head-conditioning", choices=["integrated", "zero_t0", "zero_t05"],
@@ -110,13 +114,21 @@ def main():
                    help="Action head conditioning for flow_action_head policy (default: integrated)")
     args = p.parse_args()
 
-    if not os.path.isfile(args.model):
-        print(f"ERROR: model not found: {args.model}", file=sys.stderr)
+    if args.policy_type == "pibt":
+        model_path = "BD-PIBT"
+    else:
+        if args.model is None:
+            print("ERROR: --model is required unless --policy-type pibt", file=sys.stderr)
+            sys.exit(1)
+        model_path = args.model
+
+    if args.policy_type != "pibt" and not os.path.isfile(model_path):
+        print(f"ERROR: model not found: {model_path}", file=sys.stderr)
         sys.exit(1)
 
     try:
         import torch
-        use_gpu = torch.cuda.is_available()
+        use_gpu = torch.cuda.is_available() and args.policy_type != "pibt"
     except ImportError:
         use_gpu = False
 
@@ -169,7 +181,7 @@ def main():
     total = len(runs)
     print("=" * 60)
     print("Rishi-style grid benchmark")
-    print(f"Model: {args.model}")
+    print(f"Model: {model_path}")
     print(f"Map set: {map_source} | Requested maps: {len(maps)}")
     print(f"Scenarios/map: <= {max_scen} | Agents: {agent_counts[0]}..{agent_counts[-1]}")
     print(f"Policy: {args.policy_type}")
@@ -192,7 +204,7 @@ def main():
             f"--mapName={map_name}",
             f"--scenFile={scen_path}",
             f"--bdNpzFile={bd_path}",
-            f"--modelPath={args.model}",
+            f"--modelPath={model_path}",
             f"--outputCSVFile={args.output}",
             f"--maxSteps={args.max_steps_multiplier}",
             f"--seed={args.seed}",

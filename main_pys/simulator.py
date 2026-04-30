@@ -451,15 +451,28 @@ def simulate(device, model, k, m, grid_map, bd, start_locations, goal_locations,
     wrapper_nn = WrapperNNWithCache(bd, grid_map, model, device, k, m, goal_locations, timer)
     wrapper_bd_prefs = WrapperBDGetActionPrefs(bd, grid_map, k, m, len(start_locations)) 
     def getActionPrefsFromLocs(locs):
+        action_mask = grid_map[locs[:, 0, None] + LABEL_TO_MOVES[:, 0], locs[:, 1, None] + LABEL_TO_MOVES[:, 1]] == 1
+        assert(not np.any(action_mask[:,0]))
+        at_goal = np.all(np.equal(locs, goal_locations), axis=1)
+
+        if args.policyType == "pibt":
+            preferences = wrapper_bd_prefs(locs)
+            preferences = preferences.copy()
+
+            for agent_id in range(preferences.shape[0]):
+                ordered = [int(a) for a in preferences[agent_id] if not action_mask[agent_id, a]]
+                ordered.extend(int(a) for a in preferences[agent_id] if action_mask[agent_id, a])
+                if at_goal[agent_id]:
+                    ordered = [0] + [a for a in ordered if a != 0]
+                preferences[agent_id] = ordered
+            return preferences
+
         probs = runNNOnState(locs, bd, grid_map, k, m, model, device, goal_locations, timer)
 
         # Force at-goal agents to wait — prevents wandering away from goal
-        at_goal = np.all(np.equal(locs, goal_locations), axis=1)
         probs[at_goal] = 1e-6  # small epsilon so multinomial can still rank all 5 actions
         probs[at_goal, 0] = 1.0  # action 0 = wait (dominant)
 
-        action_mask = grid_map[locs[:, 0, None] + LABEL_TO_MOVES[:, 0], locs[:, 1, None] + LABEL_TO_MOVES[:, 1]] == 1
-        assert(not np.any(action_mask[:,0]))
         probs[action_mask] = 1e-8
         probs = probs / probs.sum(axis=1, keepdims=True)
         return convertProbsToPreferences(probs, "sampled")
@@ -577,7 +590,7 @@ def main(args: argparse.ArgumentParser):
     bd = np.pad(bd, ((0,0),(k,k),(k,k)), 'constant', constant_values=10000) 
 
     device = torch.device("cuda:0" if torch.cuda.is_available() and args.useGPU else "cpu") 
-    if not os.path.exists(args.modelPath):
+    if args.policyType != "pibt" and not os.path.exists(args.modelPath):
         raise FileNotFoundError('Model file: {} not found.'.format(args.modelPath))
     
     if args.policyType in ("flow", "flow_action_head"):
@@ -586,10 +599,13 @@ def main(args: argparse.ArgumentParser):
         model = load_classifier_model(args, device, k)
     elif args.policyType == "local_classifier":
         model = load_local_classifier_model(args, device, k)
+    elif args.policyType == "pibt":
+        model = None
     else:
         raise ValueError(f"Unknown policyType: {args.policyType}")
         
-    model.eval()
+    if model is not None:
+        model.eval()
 
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -651,8 +667,8 @@ if __name__ == '__main__':
     parser.add_argument('--agentNum', type=int, required=True)
     parser.add_argument('--bdNpzFile', type=str, required=True)
     parser.add_argument('--debug', type=lambda x: bool(str2bool(x)), help="Whether to enable debugging stats", default=False)
-    parser.add_argument('--modelPath', type=str, required=True)
-    parser.add_argument('--useGPU', type=lambda x: bool(str2bool(x)), required=True)
+    parser.add_argument('--modelPath', type=str, default='BD-PIBT')
+    parser.add_argument('--useGPU', type=lambda x: bool(str2bool(x)), default=False)
     parser.add_argument('--maxSteps', type=str, help="int or [int]x, e.g. 100 or 2x to denote multiplicative factor", required=True)
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--shieldType', type=str, default='CS-PIBT', choices=['CS-PIBT', 'CS-Freeze', 'LaCAM', 'Real-Time-LaCAM'])
@@ -668,8 +684,8 @@ if __name__ == '__main__':
     parser.add_argument('--actionHeadConditioning', type=str,
                         choices=['integrated', 'zero_t0', 'zero_t05'], default='integrated',
                         help="How to condition action head: integrated=run flow ODE first (default), zero_t0=v=0 t=0, zero_t05=v=0 t=0.5")
-    parser.add_argument('--policyType', '--policy-type', dest='policyType', type=str, choices=['flow', 'classifier', 'flow_action_head', 'local_classifier'], default='flow',
-                        help="Policy/model family to load: flow for FlowGNNModel, classifier for Rishi/SSIL GNNStack, flow_action_head for FlowGNNModel action logits, local_classifier for RishiLikeClassifier")
+    parser.add_argument('--policyType', '--policy-type', dest='policyType', type=str, choices=['flow', 'classifier', 'flow_action_head', 'local_classifier', 'pibt'], default='flow',
+                        help="Policy/model family to load: pibt uses BD-guided preferences without a learned model; flow for FlowGNNModel, classifier for Rishi/SSIL GNNStack, flow_action_head for FlowGNNModel action logits, local_classifier for RishiLikeClassifier")
     parser.add_argument('--hiddenDim', type=int, help="Model hidden dimension (default 1024)", default=1024)
     parser.add_argument('--numLayers', type=int, help="Number of GNN layers (default 6)", default=6)
     parser.add_argument('--classifierLinearDim', type=int, default=-1,
@@ -696,6 +712,9 @@ if __name__ == '__main__':
         args.mapName = args.mapName.removesuffix('.map')
     if args.policyType == "flow_action_head":
         args.useActionHead = True
+    if args.policyType == "pibt":
+        args.useGPU = False
+        args.useActionHead = False
     if args.shieldType == "LaCAM" and args.lacamLookahead == 0:
         raise ValueError('LaCAM lookahead must be set when using LaCAM shield type.')
     if args.shieldType == "Real-Time-LaCAM":
