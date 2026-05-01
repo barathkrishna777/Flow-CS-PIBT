@@ -193,8 +193,15 @@ def main():
     parser.add_argument("--m", type=int, default=5, help="Nearest neighbors")
     parser.add_argument("--exclude-maps", nargs="*", default=None,
                         help="Map names to exclude from preprocessing (e.g. den312d empty-48-48)")
+    parser.add_argument("--include-maps", nargs="*", default=None,
+                        help="If set, only preprocess these map names. Useful for curriculum/staged datasets.")
     args = parser.parse_args()
     exclude_set = set(args.exclude_maps) if args.exclude_maps else set()
+    include_set = set(args.include_maps) if args.include_maps else None
+    if include_set and exclude_set:
+        overlap = include_set & exclude_set
+        if overlap:
+            raise ValueError(f"Maps cannot be both included and excluded: {sorted(overlap)}")
 
     k, m = args.k, args.m
     num_workers = args.workers if args.workers > 0 else cpu_count()
@@ -221,6 +228,11 @@ def main():
     # 2) Build flat index of (file, timestep, global_idx)
     print("Building sample index...")
     npz_files = sorted(glob.glob(os.path.join(args.data_dir, "*.npz")))
+    if include_set:
+        before = len(npz_files)
+        npz_files = [f for f in npz_files
+                     if os.path.basename(f).split("-random-")[0] in include_set]
+        print(f"  Included {len(npz_files)} of {before} files from maps: {include_set}")
     if exclude_set:
         before = len(npz_files)
         npz_files = [f for f in npz_files
