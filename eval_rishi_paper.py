@@ -94,6 +94,8 @@ def main():
                    help="Explicit map names. Overrides --map-set.")
     p.add_argument("--max-scenario", type=int, default=25,
                    help="Use random-1.scen .. random-N.scen per map (default 25)")
+    p.add_argument("--scenario-start", type=int, default=1,
+                   help="First 1-based random scenario index to include (default 1)")
     p.add_argument("--agents", nargs="*", type=int, default=DEFAULT_AGENT_COUNTS,
                    help="Agent counts (default: 100 200 ... 1000)")
     p.add_argument("--quick", action="store_true",
@@ -139,13 +141,17 @@ def main():
             print(f"WARNING: {m} is not in the standard 8 held-out maps; continuing anyway.")
 
     agent_counts = [100, 400, 800] if args.quick else list(args.agents)
+    if args.scenario_start < 1:
+        print("ERROR: --scenario-start must be >= 1", file=sys.stderr)
+        sys.exit(1)
     max_scen = 1 if args.quick else args.max_scenario
+    scenario_start = 1 if args.quick else args.scenario_start
 
     runs = []
     preflight = []
     for map_name in maps:
         pattern = os.path.join(SCEN_DIR, f"{map_name}-random-*.scen")
-        scens = sorted(glob.glob(pattern))[:max_scen]
+        scens = sorted(glob.glob(pattern))[scenario_start - 1: scenario_start - 1 + max_scen]
         if not scens:
             print(f"WARNING: no scenarios for {map_name}, skip")
             preflight.append((map_name, 0, 0, 0))
