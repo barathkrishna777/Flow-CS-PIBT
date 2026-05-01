@@ -122,6 +122,13 @@ for WT in 0.00 0.10 0.25 0.40 0.60; do
   mkdir -p "$OUT_ROOT/$TAG/shards"
   echo "== $TAG =="
 
+  combined="$OUT_ROOT/$TAG/${TAG}_combined.csv"
+  combined_rows=$(csv_rows "$combined")
+  if [[ "$combined_rows" -eq "$EXPECT_TOTAL" ]]; then
+    echo "skip $TAG: combined CSV already has $combined_rows/$EXPECT_TOTAL rows"
+    continue
+  fi
+
   common=(-m "$CKPT" --policy-type flow --wait-thresh "$WT" --agents "${AGENTS[@]}")
 
   if [[ "$MODE" == "mini" ]]; then
