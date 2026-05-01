@@ -6,13 +6,30 @@ set -euo pipefail
 #   conda activate 3dposehsx_env
 #   bash analysis_scripts/run_wait_threshold_sweep_lambda.sh
 
-CKPT=${CKPT:-large_scale_flow_wave9_compact_best.pt}
-if [[ ! -f "$CKPT" ]]; then
-  echo "Checkpoint not found: $CKPT" >&2
-  echo "Matching candidates:" >&2
-  ls -lh *wave9*compact*best*.pt >&2 || true
-  exit 1
-fi
+resolve_ckpt() {
+  local name="$1"
+  local candidate
+  for candidate in "$name" "checkpoints/$name" "checkpoints_and_evaluations/$name"; do
+    if [[ -f "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  local found
+  found="$(find . -path './.git' -prune -o -type f -name "$name" -print -quit)"
+  if [[ -n "$found" ]]; then
+    printf '%s\n' "${found#./}"
+    return 0
+  fi
+
+  echo "ERROR: checkpoint not found: $name" >&2
+  echo "Looked in repo root, checkpoints/, checkpoints_and_evaluations/, and find ." >&2
+  return 1
+}
+
+CKPT=${CKPT:-$(resolve_ckpt large_scale_flow_wave9_compact_best.pt)}
+echo "Using checkpoint: $CKPT"
 
 OUT_ROOT=${OUT_ROOT:-evals/wait_threshold_sweep_$(date +%Y%m%d_%H%M%S)}
 mkdir -p "$OUT_ROOT/logs"
