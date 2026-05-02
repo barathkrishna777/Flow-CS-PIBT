@@ -70,6 +70,20 @@ def main() -> int:
             return_action_logits=True,
             return_wait_logit=True,
         )
+        (
+            flow_with_hybrid,
+            wait_for_hybrid,
+            calibrated_wait,
+            forward_hybrid_logits,
+        ) = model(
+            v_t,
+            t,
+            data,
+            return_wait_logit=True,
+            return_calibrated_wait_logit=True,
+            return_hybrid_logits=True,
+            hybrid_velocity_for_logits=flow,
+        )
         hybrid_logits = hybrid_action_logits_from_velocity(flow, wait_logit)
         model_hybrid_logits = model.hybrid_action_logits(flow, wait_logit)
         gate_probs = binary_gate_action_probs_from_velocity(flow, wait_logit, tau=0.3)
@@ -80,11 +94,14 @@ def main() -> int:
     report("action head shape", tuple(action_logits.shape) == (n_agents, 5), str(tuple(action_logits.shape)))
     report("wait logit shape", tuple(wait_logit.shape) == (n_agents,), str(tuple(wait_logit.shape)))
     report("hybrid logits shape", tuple(hybrid_logits.shape) == (n_agents, 5), str(tuple(hybrid_logits.shape)))
+    report("forward hybrid logits shape", tuple(forward_hybrid_logits.shape) == (n_agents, 5), str(tuple(forward_hybrid_logits.shape)))
     report("binary gate probs shape", tuple(gate_probs.shape) == (n_agents, 5), str(tuple(gate_probs.shape)))
     report("model calibration default scale", torch.allclose(model.wait_logit_scale.detach(), torch.tensor(1.0)))
     report("model calibration default bias", torch.allclose(model.wait_logit_bias.detach(), torch.tensor(0.0)))
     report("model movement default scale", torch.allclose(model.movement_logit_scale.detach(), torch.tensor(1.0)))
     report("model calibrated logits default to identity", torch.allclose(model_hybrid_logits, hybrid_logits))
+    report("forward calibrated wait default to raw wait", torch.allclose(calibrated_wait, wait_for_hybrid))
+    report("forward hybrid logits match helper", torch.allclose(forward_hybrid_logits, model_hybrid_logits))
     report("model gate probs default to identity helper", torch.allclose(model_gate_probs, gate_probs))
 
     expected_moves = flow @ torch.tensor([[0, 1], [1, 0], [-1, 0], [0, -1]], dtype=flow.dtype).T

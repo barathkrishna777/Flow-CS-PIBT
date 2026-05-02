@@ -172,7 +172,17 @@ class FlowGNNModel(nn.Module):
             tau=tau,
         )
 
-    def forward(self, v_t, t, data, return_action_logits=False, return_wait_logit=False):
+    def forward(
+        self,
+        v_t,
+        t,
+        data,
+        return_action_logits=False,
+        return_wait_logit=False,
+        return_calibrated_wait_logit=False,
+        return_hybrid_logits=False,
+        hybrid_velocity_for_logits=None,
+    ):
         x, edge_index = data.x, data.edge_index
         aux_features = getattr(data, "aux_features", None)
         if aux_features is None:
@@ -199,25 +209,25 @@ class FlowGNNModel(nn.Module):
 
         # 4. Predict velocity (flow output)
         flow_output = self.post_mp(node_features)
-        # Keep scalar calibration params visible to DDP's forward graph.
-        calibration_anchor = (
-            0.0 * self.wait_logit_scale
-            + 0.0 * self.wait_logit_bias
-        )
-        flow_output = flow_output + calibration_anchor
 
-        if return_action_logits and return_wait_logit:
-            action_logits = self.action_head(node_features)
-            wait_logit = self.wait_head(node_features).squeeze(-1) + calibration_anchor
-            return flow_output, action_logits, wait_logit
-
+        outputs = [flow_output]
         if return_action_logits:
             # Auxiliary action logits from shared GNN features (detached from flow head)
-            action_logits = self.action_head(node_features)
-            return flow_output, action_logits
+            outputs.append(self.action_head(node_features))
 
+        need_wait_logit = return_wait_logit or return_calibrated_wait_logit or return_hybrid_logits
+        wait_logit = None
+        if need_wait_logit:
+            wait_logit = self.wait_head(node_features).squeeze(-1)
         if return_wait_logit:
-            wait_logit = self.wait_head(node_features).squeeze(-1) + calibration_anchor
-            return flow_output, wait_logit
+            outputs.append(wait_logit)
+        if return_calibrated_wait_logit:
+            outputs.append(self.calibrated_wait_logit(wait_logit))
+        if return_hybrid_logits:
+            if hybrid_velocity_for_logits is None:
+                hybrid_velocity_for_logits = v_t + (1 - t) * flow_output
+            outputs.append(self.hybrid_action_logits(hybrid_velocity_for_logits, wait_logit))
 
-        return flow_output
+        if len(outputs) == 1:
+            return flow_output
+        return tuple(outputs)

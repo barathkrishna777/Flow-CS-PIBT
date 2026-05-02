@@ -16,7 +16,7 @@ import math
 
 from main_pys.dataset import FlowMAPFDataset
 from main_pys.dataset_preprocessed import PreprocessedFlowMAPFDataset, build_weighted_sampler
-from main_pys.generative_model import FlowGNNModel, hybrid_action_logits_from_velocity
+from main_pys.generative_model import FlowGNNModel
 
 PREPROCESSED_DIRS = [
     "/media/anushree_mattlab/Seagate Por/preprocessed_data",  # external drive (primary)
@@ -189,45 +189,64 @@ def compute_flow_loss(
         need_wait_head_loss = wait_head_loss_weight > 0
         need_hybrid_loss = hybrid_action_loss_weight > 0
         need_wait_logit = need_wait_head_loss or need_hybrid_loss
-        raw_model = model.module if hasattr(model, "module") else model
+        need_discrete_loss = need_action_loss or need_wait_logit
+        use_shared_discrete = need_discrete_loss and discrete_forward_mode in ("shared", "both")
+
+        def hybrid_velocity_arg():
+            if not need_hybrid_loss:
+                return None
+            if hybrid_velocity_source == "teacher_x1":
+                return x_1
+            if hybrid_velocity_source == "predicted_x1":
+                return None
+            raise ValueError(f"Unknown hybrid_velocity_source: {hybrid_velocity_source}")
+
+        def unpack_discrete_forward(outputs):
+            if not isinstance(outputs, tuple):
+                outputs = (outputs,)
+            idx = 0
+            flow = outputs[idx]
+            idx += 1
+            logits = None
+            wait = None
+            calibrated_wait = None
+            hybrid_logits = None
+            if need_action_loss:
+                logits = outputs[idx]
+                idx += 1
+            if need_wait_logit:
+                wait = outputs[idx]
+                idx += 1
+            if need_wait_head_loss:
+                calibrated_wait = outputs[idx]
+                idx += 1
+            if need_hybrid_loss:
+                hybrid_logits = outputs[idx]
+            return flow, logits, wait, calibrated_wait, hybrid_logits
 
         def forward_discrete_heads(v, t_in):
-            if need_action_loss and need_wait_logit:
-                flow, logits, wait = model(
-                    v,
-                    t_in,
-                    batch,
-                    return_action_logits=True,
-                    return_wait_logit=True,
-                )
-                return flow, logits, wait
-            if need_action_loss:
-                flow, logits = model(v, t_in, batch, return_action_logits=True)
-                return flow, logits, None
-            if need_wait_logit:
-                flow, wait = model(v, t_in, batch, return_wait_logit=True)
-                return flow, None, wait
-            flow = model(v, t_in, batch)
-            return flow, None, None
-
-        if need_action_loss and need_wait_logit:
-            predicted_flow, action_logits, wait_logit = model(
-                x_t,
-                t,
+            outputs = model(
+                v,
+                t_in,
                 batch,
-                return_action_logits=True,
-                return_wait_logit=True,
+                return_action_logits=need_action_loss,
+                return_wait_logit=need_wait_logit,
+                return_calibrated_wait_logit=need_wait_head_loss,
+                return_hybrid_logits=need_hybrid_loss,
+                hybrid_velocity_for_logits=hybrid_velocity_arg(),
             )
-        elif need_action_loss:
-            predicted_flow, action_logits = model(x_t, t, batch, return_action_logits=True)
-            wait_logit = None
-        elif need_wait_logit:
-            predicted_flow, wait_logit = model(x_t, t, batch, return_wait_logit=True)
-            action_logits = None
+            return unpack_discrete_forward(outputs)
+
+        if use_shared_discrete:
+            predicted_flow, action_logits, wait_logit, calibrated_wait_logit, hybrid_logits = (
+                forward_discrete_heads(x_t, t)
+            )
         else:
             predicted_flow = model(x_t, t, batch)
             action_logits = None
             wait_logit = None
+            calibrated_wait_logit = None
+            hybrid_logits = None
 
         target_flow = x_1 - x_0
         base_loss = F.mse_loss(predicted_flow, target_flow, reduction='none')
@@ -241,7 +260,7 @@ def compute_flow_loss(
         wait_head_loss = zero
         hybrid_action_loss = zero
 
-        if need_action_loss or need_wait_logit:
+        if need_discrete_loss:
             # Auxiliary labels: 0=wait, 1=right, 2=down, 3=up, 4=left.
             if hasattr(batch, "action_y") and batch.action_y is not None:
                 expert_actions = batch.action_y.view(-1).long().to(device)
@@ -249,16 +268,7 @@ def compute_flow_loss(
                 expert_actions = velocity_to_action_labels(x_1, device)
             target_wait = (expert_actions == 0).to(dtype=x_1.dtype)
 
-            def velocity_for_hybrid(v_in, t_in, flow):
-                if hybrid_velocity_source == "teacher_x1":
-                    return x_1
-                if hybrid_velocity_source == "predicted_x1":
-                    if len(t_in.shape) == 1:
-                        t_in = t_in.unsqueeze(1)
-                    return v_in + (1 - t_in) * flow
-                raise ValueError(f"Unknown hybrid_velocity_source: {hybrid_velocity_source}")
-
-            def compute_discrete_losses(flow, logits, wait, v_in, t_in):
+            def compute_discrete_losses(logits, calibrated_wait, hybrid):
                 cur_action_loss = zero
                 cur_wait_loss = zero
                 cur_hybrid_loss = zero
@@ -266,22 +276,14 @@ def compute_flow_loss(
                     ce = F.cross_entropy(logits, expert_actions, reduction='none')
                     cur_action_loss = _reduce_node_loss(ce, node_weights, unweighted_action_loss)
                 if need_wait_head_loss:
-                    wait_for_bce = raw_model.calibrated_wait_logit(wait.view(-1))
                     bce = F.binary_cross_entropy_with_logits(
-                        wait_for_bce,
-                        target_wait.to(dtype=wait_for_bce.dtype),
+                        calibrated_wait.view(-1),
+                        target_wait.to(dtype=calibrated_wait.dtype),
                         reduction='none',
                     )
                     cur_wait_loss = _reduce_node_loss(bce, node_weights, unweighted_action_loss)
                 if need_hybrid_loss:
-                    hybrid_logits = hybrid_action_logits_from_velocity(
-                        velocity_for_hybrid(v_in, t_in, flow),
-                        wait,
-                        wait_logit_scale=raw_model.wait_logit_scale,
-                        wait_logit_bias=raw_model.wait_logit_bias,
-                        movement_logit_scale=raw_model.movement_logit_scale,
-                    )
-                    hybrid_ce = F.cross_entropy(hybrid_logits, expert_actions, reduction='none')
+                    hybrid_ce = F.cross_entropy(hybrid, expert_actions, reduction='none')
                     cur_hybrid_loss = _reduce_node_loss(
                         hybrid_ce,
                         node_weights,
@@ -290,25 +292,28 @@ def compute_flow_loss(
                 return cur_action_loss, cur_wait_loss, cur_hybrid_loss
 
             # shared: use logits from the noisy forward (original behaviour)
-            action_loss, wait_head_loss, hybrid_action_loss = compute_discrete_losses(
-                predicted_flow,
-                action_logits,
-                wait_logit,
-                x_t,
-                t,
-            )
+            if use_shared_discrete:
+                action_loss, wait_head_loss, hybrid_action_loss = compute_discrete_losses(
+                    action_logits,
+                    calibrated_wait_logit,
+                    hybrid_logits,
+                )
 
             # zero_v: second forward with v=0, t=0 so heads can't read answer from v_t
             if discrete_forward_mode in ("zero_v", "both"):
                 zero_v = torch.zeros_like(x_1)
                 zero_t = torch.zeros(x_1.shape[0], 1, device=device)
-                flow_zero, action_logits_zero, wait_logit_zero = forward_discrete_heads(zero_v, zero_t)
-                action_loss_zero, wait_loss_zero, hybrid_loss_zero = compute_discrete_losses(
+                (
                     flow_zero,
                     action_logits_zero,
                     wait_logit_zero,
-                    zero_v,
-                    zero_t,
+                    calibrated_wait_logit_zero,
+                    hybrid_logits_zero,
+                ) = forward_discrete_heads(zero_v, zero_t)
+                action_loss_zero, wait_loss_zero, hybrid_loss_zero = compute_discrete_losses(
+                    action_logits_zero,
+                    calibrated_wait_logit_zero,
+                    hybrid_logits_zero,
                 )
 
             # x1_t1: forward with (x_1, t=0.99) — matches integrated inference distribution.
@@ -316,13 +321,17 @@ def compute_flow_loss(
             # t=0.99 teaches the discrete heads on the same conditioning.
             if discrete_forward_mode in ("x1_t1",):
                 t_high = torch.full((x_1.shape[0], 1), 0.99, device=device)
-                flow_x1, action_logits_x1, wait_logit_x1 = forward_discrete_heads(x_1, t_high)
-                action_loss_x1, wait_loss_x1, hybrid_loss_x1 = compute_discrete_losses(
+                (
                     flow_x1,
                     action_logits_x1,
                     wait_logit_x1,
-                    x_1,
-                    t_high,
+                    calibrated_wait_logit_x1,
+                    hybrid_logits_x1,
+                ) = forward_discrete_heads(x_1, t_high)
+                action_loss_x1, wait_loss_x1, hybrid_loss_x1 = compute_discrete_losses(
+                    action_logits_x1,
+                    calibrated_wait_logit_x1,
+                    hybrid_logits_x1,
                 )
 
             if discrete_forward_mode == "zero_v":
