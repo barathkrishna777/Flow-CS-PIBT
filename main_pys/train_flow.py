@@ -1,13 +1,18 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.distributed as dist
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from torch.utils.data import random_split
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import Sampler, Subset, random_split
+from torch.utils.data.distributed import DistributedSampler
 from torch_geometric.loader import DataLoader
 from tqdm import tqdm
 import os
 import argparse
+import contextlib
+import math
 
 from main_pys.dataset import FlowMAPFDataset
 from main_pys.dataset_preprocessed import PreprocessedFlowMAPFDataset, build_weighted_sampler
@@ -21,6 +26,112 @@ PREPROCESSED_DIRS = [
 
 WAIT_SPEED_THRESHOLD = 0.1  # velocities below this magnitude → wait action
 ACTION_VECTORS = torch.tensor([[0,1],[1,0],[-1,0],[0,-1]], dtype=torch.float32)  # right, down, up, left
+
+
+def _env_int(name, default):
+    value = os.environ.get(name)
+    return default if value is None else int(value)
+
+
+def setup_distributed(distributed=False, local_rank=None):
+    """Initialize torch.distributed when launched by torchrun.
+
+    Normal `python -m main_pys.train_flow ...` runs are intentionally left alone.
+    """
+    world_size = _env_int("WORLD_SIZE", 1)
+    rank = _env_int("RANK", 0)
+    inferred = world_size > 1
+    enabled = distributed or inferred
+
+    if local_rank is None:
+        local_rank = _env_int("LOCAL_RANK", 0)
+
+    if enabled:
+        if world_size <= 1:
+            raise ValueError("--distributed requires torchrun with WORLD_SIZE > 1")
+        if not torch.cuda.is_available():
+            raise RuntimeError("Distributed training currently requires CUDA GPUs")
+        torch.cuda.set_device(local_rank)
+        if not dist.is_initialized():
+            dist.init_process_group(backend="nccl", init_method="env://")
+
+    return {
+        "enabled": enabled,
+        "rank": rank,
+        "local_rank": local_rank,
+        "world_size": world_size,
+        "is_main": rank == 0,
+    }
+
+
+def cleanup_distributed(ddp_info):
+    if ddp_info["enabled"] and dist.is_initialized():
+        dist.destroy_process_group()
+
+
+def reduce_average(value, device, ddp_info):
+    if not ddp_info["enabled"]:
+        return value
+    tensor = torch.tensor(float(value), device=device)
+    dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+    return (tensor / ddp_info["world_size"]).item()
+
+
+@contextlib.contextmanager
+def suppress_stdout(enabled):
+    if not enabled:
+        yield
+        return
+    with open(os.devnull, "w") as sink, contextlib.redirect_stdout(sink):
+        yield
+
+
+class DistributedWeightedSampler(Sampler):
+    """WeightedRandomSampler-style sampling sharded across DDP ranks."""
+
+    def __init__(self, weights, num_samples, num_replicas=None, rank=None, replacement=True, seed=0):
+        if num_replicas is None:
+            num_replicas = dist.get_world_size()
+        if rank is None:
+            rank = dist.get_rank()
+        self.weights = torch.as_tensor(weights, dtype=torch.double)
+        self.num_samples_global = int(num_samples)
+        self.num_replicas = int(num_replicas)
+        self.rank = int(rank)
+        self.replacement = replacement
+        self.seed = int(seed)
+        self.epoch = 0
+        self.num_samples = int(math.ceil(self.num_samples_global / self.num_replicas))
+        self.total_size = self.num_samples * self.num_replicas
+
+    def __iter__(self):
+        generator = torch.Generator()
+        generator.manual_seed(self.seed + self.epoch)
+        indices = torch.multinomial(
+            self.weights,
+            self.total_size,
+            self.replacement,
+            generator=generator,
+        ).tolist()
+        indices = indices[self.rank:self.total_size:self.num_replicas]
+        return iter(indices)
+
+    def __len__(self):
+        return self.num_samples
+
+    def set_epoch(self, epoch):
+        self.epoch = int(epoch)
+
+
+def dataset_indices_in_full(dataset, full_dataset):
+    """Resolve indices for nested Subset/random_split datasets."""
+    if dataset is full_dataset:
+        return torch.arange(len(full_dataset), dtype=torch.long)
+    if isinstance(dataset, Subset):
+        parent_indices = dataset_indices_in_full(dataset.dataset, full_dataset)
+        subset_indices = torch.as_tensor(dataset.indices, dtype=torch.long)
+        return parent_indices[subset_indices]
+    raise TypeError("Weighted sampling only supports the full dataset or torch.utils.data.Subset")
 
 
 def velocity_to_action_labels(expert_velocities, device):
@@ -196,6 +307,7 @@ def validate(
     unweighted_action_loss,
     unweighted_flow_loss,
     discrete_forward_mode="both",
+    ddp_info=None,
 ):
     """Run validation and return average loss."""
     model.eval()
@@ -216,19 +328,32 @@ def validate(
             )
             total_loss += loss.item()
             num_batches += 1
+    if ddp_info and ddp_info["enabled"]:
+        stats = torch.tensor([total_loss, num_batches], dtype=torch.float64, device=device)
+        dist.all_reduce(stats, op=dist.ReduceOp.SUM)
+        total_loss = stats[0].item()
+        num_batches = int(stats[1].item())
     return total_loss / max(num_batches, 1)
 
 
 def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", wandb_entity=None,
           preprocessed_dir=None, no_weighted_sampling=False, val_split=0.05, patience=0,
+          max_train_samples=None, max_val_samples=None,
           resume=None, start_epoch=0, hidden_dim=1024, num_layers=6,
           action_loss_weight=0.3, wait_head_loss_weight=0.0, unweighted_action_loss=False,
           unweighted_flow_loss=False, epochs=10, discrete_forward_mode="both",
           reset_best_val_loss=False, action_head_only=False, action_head_lr=5e-4,
-          wait_head_only=False, wait_head_lr=5e-4):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+          wait_head_only=False, wait_head_lr=5e-4, distributed=False, local_rank=None):
+    ddp_info = setup_distributed(distributed=distributed, local_rank=local_rank)
+    is_main = ddp_info["is_main"]
+    log = print if is_main else (lambda *args, **kwargs: None)
+
+    device = torch.device(f"cuda:{ddp_info['local_rank']}" if ddp_info["enabled"] else ("cuda" if torch.cuda.is_available() else "cpu"))
     use_amp = device.type == "cuda"
-    print(f"Device: {device} | AMP: {use_amp}")
+    log(
+        f"Device: {device} | AMP: {use_amp}"
+        + (f" | DDP world_size={ddp_info['world_size']}" if ddp_info["enabled"] else "")
+    )
 
     if wait_head_only and wait_head_loss_weight <= 0:
         raise ValueError("--wait-head-only requires --wait-head-loss-weight > 0")
@@ -241,16 +366,17 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
                 pp_dir = candidate
                 break
 
-    if pp_dir:
-        dirs = [d.strip() for d in pp_dir.split(",")] if "," in pp_dir else [pp_dir]
-        print(f"Using PREPROCESSED dataset from {' + '.join(dirs)}")
-        full_dataset = PreprocessedFlowMAPFDataset(pp_dir)
-    else:
-        print(f"No preprocessed data found — using on-the-fly dataset (slow)")
-        full_dataset = FlowMAPFDataset(data_dir="data/flow_training_data_multi",
-                                  map_dir="data/mapf-map",
-                                  bd_dir="data/bd_npzs",
-                                  k=4, m=5)
+    with suppress_stdout(not is_main):
+        if pp_dir:
+            dirs = [d.strip() for d in pp_dir.split(",")] if "," in pp_dir else [pp_dir]
+            log(f"Using PREPROCESSED dataset from {' + '.join(dirs)}")
+            full_dataset = PreprocessedFlowMAPFDataset(pp_dir)
+        else:
+            log(f"No preprocessed data found — using on-the-fly dataset (slow)")
+            full_dataset = FlowMAPFDataset(data_dir="data/flow_training_data_multi",
+                                      map_dir="data/mapf-map",
+                                      bd_dir="data/bd_npzs",
+                                      k=4, m=5)
 
     # ── Validation split ──
     val_size = int(len(full_dataset) * val_split) if val_split > 0 else 0
@@ -260,10 +386,24 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
             full_dataset, [train_size, val_size],
             generator=torch.Generator().manual_seed(42)
         )
-        print(f"Train/Val split: {train_size:,} / {val_size:,} ({val_split*100:.0f}%)")
+        log(f"Train/Val split: {train_size:,} / {val_size:,} ({val_split*100:.0f}%)")
     else:
         train_dataset = full_dataset
         val_dataset = None
+
+    if max_train_samples is not None and max_train_samples > 0 and max_train_samples < len(train_dataset):
+        train_dataset = Subset(train_dataset, range(max_train_samples))
+        train_size = len(train_dataset)
+        log(f"Smoke subset: train limited to {train_size:,} samples")
+    if (
+        val_dataset is not None
+        and max_val_samples is not None
+        and max_val_samples > 0
+        and max_val_samples < len(val_dataset)
+    ):
+        val_dataset = Subset(val_dataset, range(max_val_samples))
+        val_size = len(val_dataset)
+        log(f"Smoke subset: val limited to {val_size:,} samples")
 
     # GPU: more workers + bigger batches to keep GPU saturated; CPU: stay conservative
     cpu_cores = min(12, os.cpu_count() or 2) if device.type == "cuda" else min(4, os.cpu_count() or 2)
@@ -271,19 +411,36 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
 
     # ── Weighted sampling (upsamples high-agent-count scenarios) ──
     sampler = None
+    train_sampler = None
     if not no_weighted_sampling and pp_dir and isinstance(full_dataset, PreprocessedFlowMAPFDataset):
-        sampler = build_weighted_sampler(full_dataset)
-        # If using val split with weighted sampler, we need to remap indices
-        if val_size > 0:
-            # Build sampler on full dataset, but only sample from train indices
-            train_indices = train_dataset.indices
-            full_weights = sampler.weights
-            train_weights = full_weights[train_indices]
+        with suppress_stdout(not is_main):
+            sampler = build_weighted_sampler(full_dataset)
+            train_indices = dataset_indices_in_full(train_dataset, full_dataset)
+            train_weights = sampler.weights[train_indices]
+        if ddp_info["enabled"]:
+            train_sampler = DistributedWeightedSampler(
+                weights=train_weights,
+                num_samples=len(train_dataset),
+                num_replicas=ddp_info["world_size"],
+                rank=ddp_info["rank"],
+                replacement=True,
+                seed=42,
+            )
+            sampler = train_sampler
+        else:
             sampler = torch.utils.data.WeightedRandomSampler(
                 weights=train_weights,
                 num_samples=len(train_dataset),
                 replacement=True
             )
+    elif ddp_info["enabled"]:
+        train_sampler = DistributedSampler(
+            train_dataset,
+            num_replicas=ddp_info["world_size"],
+            rank=ddp_info["rank"],
+            shuffle=True,
+        )
+        sampler = train_sampler
 
     train_loader = DataLoader(
         train_dataset,
@@ -297,11 +454,20 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
     )
 
     val_loader = None
+    val_sampler = None
     if val_dataset is not None:
+        if ddp_info["enabled"]:
+            val_sampler = DistributedSampler(
+                val_dataset,
+                num_replicas=ddp_info["world_size"],
+                rank=ddp_info["rank"],
+                shuffle=False,
+            )
         val_loader = DataLoader(
             val_dataset,
             batch_size=batch_size,
             shuffle=False,
+            sampler=val_sampler,
             num_workers=min(4, cpu_cores),
             pin_memory=(device.type == "cuda"),
             prefetch_factor=2,
@@ -325,7 +491,7 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
             if wait_params:
                 trainable_groups.append({"params": wait_params, "lr": wait_head_lr})
         trainable = [p for group in trainable_groups for p in group["params"]]
-        print(
+        log(
             "head_only: freezing trunk, training "
             f"{sum(p.numel() for p in trainable):,} params "
             f"(action_head={action_head_only}, wait_head={wait_head_only})"
@@ -344,35 +510,35 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
 
     # Resume from checkpoint
     if resume and os.path.exists(resume):
-        print(f"Resuming from checkpoint: {resume}")
+        log(f"Resuming from checkpoint: {resume}")
         ckpt = torch.load(resume, map_location=device)
         if isinstance(ckpt, dict) and 'model_state_dict' in ckpt:
             # Full checkpoint (model + optimizer + scheduler + metadata)
             incompatible = model.load_state_dict(ckpt['model_state_dict'], strict=False)
             if incompatible.missing_keys:
-                print(f"  Missing checkpoint keys initialized from scratch: {incompatible.missing_keys}")
+                log(f"  Missing checkpoint keys initialized from scratch: {incompatible.missing_keys}")
             if incompatible.unexpected_keys:
-                print(f"  Unexpected checkpoint keys ignored: {incompatible.unexpected_keys}")
+                log(f"  Unexpected checkpoint keys ignored: {incompatible.unexpected_keys}")
             if action_head_only or wait_head_only:
                 # Optimizer only covers selected head params — skip incompatible full-model state
                 start_epoch = ckpt['epoch']
                 epochs = start_epoch + epochs
                 scheduler = CosineAnnealingLR(optimizer, T_max=max(epochs - start_epoch, 1), eta_min=1e-6)
                 best_val_loss = float('inf')
-                print(f"  Loaded model weights (head_only: skipping optimizer/scheduler state). "
-                      f"Resuming from epoch {start_epoch + 1}, running until epoch {epochs}")
+                log(f"  Loaded model weights (head_only: skipping optimizer/scheduler state). "
+                    f"Resuming from epoch {start_epoch + 1}, running until epoch {epochs}")
             else:
                 loaded_optimizer = False
                 try:
                     optimizer.load_state_dict(ckpt['optimizer_state_dict'])
                     loaded_optimizer = True
                 except (KeyError, ValueError) as exc:
-                    print(f"  Skipping optimizer state (architecture changed): {exc}")
+                    log(f"  Skipping optimizer state (architecture changed): {exc}")
                 if loaded_optimizer:
                     try:
                         scheduler.load_state_dict(ckpt['scheduler_state_dict'])
                     except (KeyError, ValueError) as exc:
-                        print(f"  Skipping scheduler state: {exc}")
+                        log(f"  Skipping scheduler state: {exc}")
                     if ckpt.get('scaler_state_dict'):
                         scaler.load_state_dict(ckpt['scaler_state_dict'])
                 start_epoch = ckpt['epoch']  # epoch is already 1-indexed, use as start
@@ -381,20 +547,29 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
                 scheduler = CosineAnnealingLR(optimizer, T_max=max(epochs - start_epoch, 1), eta_min=1e-6)
                 best_val_loss = float('inf') if reset_best_val_loss else ckpt.get('best_val_loss', float('inf'))
                 state_msg = "full state" if loaded_optimizer else "model weights"
-                print(f"  Restored {state_msg}: resuming from epoch {start_epoch + 1}, running until epoch {epochs}, best_val={'reset' if reset_best_val_loss else f'{best_val_loss:.4f}'}")
+                log(f"  Restored {state_msg}: resuming from epoch {start_epoch + 1}, running until epoch {epochs}, best_val={'reset' if reset_best_val_loss else f'{best_val_loss:.4f}'}")
         else:
             # Legacy checkpoint (model weights only)
             incompatible = model.load_state_dict(ckpt, strict=False)
             if incompatible.missing_keys:
-                print(f"  Missing checkpoint keys initialized from scratch: {incompatible.missing_keys}")
+                log(f"  Missing checkpoint keys initialized from scratch: {incompatible.missing_keys}")
             if incompatible.unexpected_keys:
-                print(f"  Unexpected checkpoint keys ignored: {incompatible.unexpected_keys}")
-            print(f"  Loaded model weights only (legacy checkpoint). Fast-forwarding scheduler {start_epoch} steps.")
+                log(f"  Unexpected checkpoint keys ignored: {incompatible.unexpected_keys}")
+            log(f"  Loaded model weights only (legacy checkpoint). Fast-forwarding scheduler {start_epoch} steps.")
             for _ in range(start_epoch):
                 scheduler.step()
 
+    if ddp_info["enabled"]:
+        find_unused = action_loss_weight <= 0 or wait_head_loss_weight <= 0 or action_head_only or wait_head_only
+        model = DDP(
+            model,
+            device_ids=[ddp_info["local_rank"]],
+            output_device=ddp_info["local_rank"],
+            find_unused_parameters=find_unused,
+        )
+
     # WandB setup
-    if use_wandb:
+    if use_wandb and is_main:
         import wandb
         wandb_kwargs = {"project": wandb_project, "config": {}}
         if wandb_entity:
@@ -418,6 +593,8 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
             "weighted_sampling": sampler is not None,
             "val_split": val_split,
             "patience": patience,
+            "max_train_samples": max_train_samples,
+            "max_val_samples": max_val_samples,
             "action_loss_weight": action_loss_weight,
             "wait_head_loss_weight": wait_head_loss_weight,
             "unweighted_action_loss": unweighted_action_loss,
@@ -428,9 +605,9 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
         })
 
     log_batch_every = 10
-    print(f"Batch size: {batch_size} | Workers: {cpu_cores} | Epochs: {epochs}")
-    print(f"Weighted sampling: {'ON' if sampler else 'OFF'}")
-    print(
+    log(f"Batch size: {batch_size} | Workers: {cpu_cores} | Epochs: {epochs}")
+    log(f"Weighted sampling: {'ON' if sampler else 'OFF'}")
+    log(
         "Loss weighting: "
         f"flow={'unweighted' if unweighted_flow_loss else 'weighted'}, "
         f"action={'unweighted' if unweighted_action_loss else 'weighted'}, "
@@ -448,13 +625,18 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
     prefix = f"large_scale_flow_{run_name}_" if run_name else "large_scale_flow_"
 
     for epoch in range(start_epoch, epochs):
+        if train_sampler is not None and hasattr(train_sampler, "set_epoch"):
+            train_sampler.set_epoch(epoch)
+        if val_sampler is not None and hasattr(val_sampler, "set_epoch"):
+            val_sampler.set_epoch(epoch)
+
         # ── Training ──
         model.train()
         total_loss = 0.0
         num_batches = 0
         epoch_grad_norms = []
 
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}")
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}", disable=not is_main)
 
         for batch_idx, batch in enumerate(pbar):
             loss = compute_flow_loss(
@@ -489,18 +671,21 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
 
             total_loss += loss.item()
             num_batches += 1
-            pbar.set_postfix({"Loss": f"{loss.item():.4f}"})
+            if is_main:
+                pbar.set_postfix({"Loss": f"{loss.item():.4f}"})
 
             # Per-batch wandb logging
-            if use_wandb and (batch_idx + 1) % log_batch_every == 0:
+            if use_wandb and is_main and (batch_idx + 1) % log_batch_every == 0:
                 import wandb
                 global_step = epoch * len(train_loader) + batch_idx + 1
                 wandb.log({"train/batch_loss": loss.item()}, step=global_step)
 
         scheduler.step()
         avg_train_loss = total_loss / max(num_batches, 1)
+        avg_train_loss = reduce_average(avg_train_loss, device, ddp_info)
         current_lr = optimizer.param_groups[0]['lr']
         avg_grad_norm = sum(epoch_grad_norms) / len(epoch_grad_norms) if epoch_grad_norms else 0.0
+        avg_grad_norm = reduce_average(avg_grad_norm, device, ddp_info)
 
         # ── Validation ──
         val_loss = None
@@ -515,6 +700,7 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
                 unweighted_action_loss=unweighted_action_loss,
                 unweighted_flow_loss=unweighted_flow_loss,
                 discrete_forward_mode=discrete_forward_mode,
+                ddp_info=ddp_info,
             )
             val_str = f" | Val Loss: {val_loss:.4f}"
 
@@ -523,25 +709,27 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
                 best_val_loss = val_loss
                 epochs_without_improvement = 0
                 best_path = f"{prefix}best.pt"
-                torch.save({
-                    'epoch': epoch + 1,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'scheduler_state_dict': scheduler.state_dict(),
-                    'scaler_state_dict': scaler.state_dict(),
-                    'model_config': {
-                        'hidden_dim': hidden_dim,
-                        'num_layers': num_layers,
-                    },
-                    'loss_config': {
-                        'action_loss_weight': action_loss_weight,
-                        'wait_head_loss_weight': wait_head_loss_weight,
-                        'discrete_forward_mode': discrete_forward_mode,
-                    },
-                    'train_loss': avg_train_loss,
-                    'val_loss': val_loss,
-                    'best_val_loss': best_val_loss,
-                }, best_path)
+                if is_main:
+                    raw_model = model.module if hasattr(model, "module") else model
+                    torch.save({
+                        'epoch': epoch + 1,
+                        'model_state_dict': raw_model.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'scheduler_state_dict': scheduler.state_dict(),
+                        'scaler_state_dict': scaler.state_dict(),
+                        'model_config': {
+                            'hidden_dim': hidden_dim,
+                            'num_layers': num_layers,
+                        },
+                        'loss_config': {
+                            'action_loss_weight': action_loss_weight,
+                            'wait_head_loss_weight': wait_head_loss_weight,
+                            'discrete_forward_mode': discrete_forward_mode,
+                        },
+                        'train_loss': avg_train_loss,
+                        'val_loss': val_loss,
+                        'best_val_loss': best_val_loss,
+                    }, best_path)
                 val_str += " (best)"
             else:
                 epochs_without_improvement += 1
@@ -549,32 +737,34 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
         else:
             val_str = ""
 
-        print(f"Epoch {epoch+1}/{epochs} | Train Loss: {avg_train_loss:.4f}{val_str} | LR: {current_lr:.2e}")
+        log(f"Epoch {epoch+1}/{epochs} | Train Loss: {avg_train_loss:.4f}{val_str} | LR: {current_lr:.2e}")
 
         # Save epoch checkpoint (full state for resumability)
         ckpt_path = f"{prefix}epoch_{epoch+1}.pt"
-        torch.save({
-            'epoch': epoch + 1,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'scheduler_state_dict': scheduler.state_dict(),
-            'scaler_state_dict': scaler.state_dict(),
-            'model_config': {
-                'hidden_dim': hidden_dim,
-                'num_layers': num_layers,
-            },
-            'loss_config': {
-                'action_loss_weight': action_loss_weight,
-                'wait_head_loss_weight': wait_head_loss_weight,
-                'discrete_forward_mode': discrete_forward_mode,
-            },
-            'train_loss': avg_train_loss,
-            'val_loss': val_loss,
-            'best_val_loss': best_val_loss,
-        }, ckpt_path)
+        if is_main:
+            raw_model = model.module if hasattr(model, "module") else model
+            torch.save({
+                'epoch': epoch + 1,
+                'model_state_dict': raw_model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+                'scaler_state_dict': scaler.state_dict(),
+                'model_config': {
+                    'hidden_dim': hidden_dim,
+                    'num_layers': num_layers,
+                },
+                'loss_config': {
+                    'action_loss_weight': action_loss_weight,
+                    'wait_head_loss_weight': wait_head_loss_weight,
+                    'discrete_forward_mode': discrete_forward_mode,
+                },
+                'train_loss': avg_train_loss,
+                'val_loss': val_loss,
+                'best_val_loss': best_val_loss,
+            }, ckpt_path)
 
         # Per-epoch wandb logging
-        if use_wandb:
+        if use_wandb and is_main:
             import wandb
             epoch_step = (epoch + 1) * len(train_loader)
             log_dict = {
@@ -591,11 +781,11 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
 
         # Early stopping
         if patience > 0 and epochs_without_improvement >= patience:
-            print(f"Early stopping: val loss hasn't improved for {patience} epochs.")
+            log(f"Early stopping: val loss hasn't improved for {patience} epochs.")
             break
 
     # Final summary
-    if use_wandb:
+    if use_wandb and is_main:
         import wandb
         wandb.run.summary["final_train_loss"] = avg_train_loss
         if val_loss is not None:
@@ -605,7 +795,9 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
         wandb.run.summary["final_checkpoint"] = ckpt_path
 
     if val_loader is not None:
-        print(f"\nBest val loss: {best_val_loss:.4f} (saved to {prefix}best.pt)")
+        log(f"\nBest val loss: {best_val_loss:.4f} (saved to {prefix}best.pt)")
+
+    cleanup_distributed(ddp_info)
 
 
 if __name__ == "__main__":
@@ -629,6 +821,10 @@ if __name__ == "__main__":
                         help="Fraction of data for validation (0 to disable)")
     parser.add_argument("--patience", type=int, default=3,
                         help="Early stopping patience (0 to disable)")
+    parser.add_argument("--max-train-samples", type=int, default=None,
+                        help="Limit train samples for smoke tests only (default: use all)")
+    parser.add_argument("--max-val-samples", type=int, default=None,
+                        help="Limit val samples for smoke tests only (default: use all)")
     parser.add_argument("--resume", type=str, default=None,
                         help="Path to checkpoint to resume from (e.g. large_scale_flow_wave4_epoch_1.pt)")
     parser.add_argument("--start-epoch", type=int, default=0,
@@ -662,12 +858,18 @@ if __name__ == "__main__":
                         help="Freeze all trunk params, train only wait_head (for learned wait-logit finetuning)")
     parser.add_argument("--wait-head-lr", type=float, default=5e-4,
                         help="LR for wait_head_only mode (default: 5e-4)")
+    parser.add_argument("--distributed", action="store_true",
+                        help="Enable DistributedDataParallel; also auto-enabled under torchrun WORLD_SIZE>1")
+    parser.add_argument("--local-rank", "--local_rank", dest="local_rank", type=int, default=None,
+                        help="Local GPU rank for DDP (torchrun usually provides LOCAL_RANK env var)")
     args = parser.parse_args()
     train(run_name=args.run_name, quick=args.quick, use_wandb=not args.no_wandb,
           wandb_project=args.wandb_project, wandb_entity=args.wandb_entity,
           preprocessed_dir=args.preprocessed_dir,
           no_weighted_sampling=args.no_weighted_sampling,
           val_split=args.val_split, patience=args.patience,
+          max_train_samples=args.max_train_samples,
+          max_val_samples=args.max_val_samples,
           resume=args.resume, start_epoch=args.start_epoch,
           hidden_dim=args.hidden_dim, num_layers=args.num_layers,
           action_loss_weight=args.action_loss_weight,
@@ -680,4 +882,6 @@ if __name__ == "__main__":
           action_head_only=args.action_head_only,
           action_head_lr=args.action_head_lr,
           wait_head_only=args.wait_head_only,
-          wait_head_lr=args.wait_head_lr)
+          wait_head_lr=args.wait_head_lr,
+          distributed=args.distributed,
+          local_rank=args.local_rank)
