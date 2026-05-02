@@ -61,7 +61,21 @@ def getCosts(solution_path, goal_locs):
     assert(total_cost_true <= (solution_path.shape[0]-1)*solution_path.shape[1])
     return total_cost_true, total_cost_not_resting_at_goal, num_agents_at_goal
 
+
+def normalize_probability_rows(probs, floor=1e-8):
+    probs = np.nan_to_num(probs, nan=0.0, posinf=0.0, neginf=0.0)
+    probs = np.maximum(probs, 0.0)
+    probs = np.maximum(probs, floor)
+    row_sums = probs.sum(axis=1, keepdims=True)
+    bad_rows = row_sums.squeeze(1) <= 0
+    if np.any(bad_rows):
+        probs[bad_rows] = 1.0
+        row_sums = probs.sum(axis=1, keepdims=True)
+    return probs / row_sums
+
+
 def convertProbsToPreferences(probs, conversion_type):
+    probs = normalize_probability_rows(probs)
     if conversion_type == "sorted":
         preferences = np.argsort(-probs, axis=1)
     elif conversion_type == "sampled":
@@ -379,6 +393,7 @@ def runNNOnState(cur_locs, bd, grid_map, k, m, model, device, goal_locations, ti
                 # For agents that should wait: set wait prob high, suppress others
                 probs[should_wait] = 0.01
                 probs[should_wait, 0] = 0.96  # action 0 = wait
+            probs = normalize_probability_rows(probs)
 
     return probs
 
@@ -487,7 +502,7 @@ def simulate(device, model, k, m, grid_map, bd, start_locations, goal_locations,
         probs[at_goal, 0] = 1.0  # action 0 = wait (dominant)
 
         probs[action_mask] = 1e-8
-        probs = probs / probs.sum(axis=1, keepdims=True)
+        probs = normalize_probability_rows(probs)
         return convertProbsToPreferences(probs, "sampled")
     
     cur_locs = start_locations 
