@@ -78,7 +78,25 @@ def parse_args():
                    help="Concurrent simulator subprocesses per GPU (default: 1)")
     p.add_argument("--shard-dir", default=None,
                    help="Directory for per-task CSV/log shards (default: <output stem>_shards)")
+    p.add_argument("--resume-shards", action="store_true",
+                   help="Skip tasks whose shard CSV already exists with at least one result row")
+    p.add_argument("--merge-only", action="store_true",
+                   help="Only merge existing shard CSVs into --output, then exit")
+    p.add_argument("--torch-cpu-threads", type=int, default=None,
+                   help="Set OMP/MKL/TORCH thread env vars for simulator subprocesses")
     return p.parse_args()
+
+
+def shard_has_result(path: str) -> bool:
+    if not os.path.isfile(path):
+        return False
+    try:
+        with open(path, newline="") as f:
+            reader = csv.reader(f)
+            next(reader)
+            return next(reader, None) is not None
+    except OSError:
+        return False
 
 
 def build_tasks(args) -> tuple[list[EvalTask], list[tuple[str, int, int, int]], str, list[int]]:
@@ -186,6 +204,13 @@ def worker_loop(worker_name, gpu_id, tasks, results, args, model_path, shard_dir
 
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+        if args.torch_cpu_threads is not None:
+            threads = str(args.torch_cpu_threads)
+            env["OMP_NUM_THREADS"] = threads
+            env["MKL_NUM_THREADS"] = threads
+            env["OPENBLAS_NUM_THREADS"] = threads
+            env["NUMEXPR_NUM_THREADS"] = threads
+            env["TORCH_NUM_THREADS"] = threads
         cmd = simulator_cmd(args, task, model_path, shard_csv)
         with open(shard_log, "w") as log_file:
             try:
@@ -248,6 +273,26 @@ def main():
     if os.path.isfile(output_abs):
         os.remove(output_abs)
 
+    completed_results = []
+    pending_tasks = []
+    for task in tasks:
+        shard_csv = os.path.join(shard_dir, f"task_{task.index:05d}.csv")
+        shard_log = os.path.join(shard_dir, f"task_{task.index:05d}_resume.log")
+        if args.resume_shards and shard_has_result(shard_csv):
+            completed_results.append((task.index, 0, shard_csv, shard_log, "resume"))
+        else:
+            pending_tasks.append(task)
+
+    if args.merge_only:
+        merge_results = []
+        for task in tasks:
+            shard_csv = os.path.join(shard_dir, f"task_{task.index:05d}.csv")
+            if shard_has_result(shard_csv):
+                merge_results.append((task.index, 0, shard_csv, "", "merge"))
+        rows_written = merge_shards(output_abs, merge_results)
+        print(f"Done. Merged {rows_written} existing shard rows to {output_abs}")
+        return
+
     print("=" * 60)
     print("Parallel Rishi-style grid benchmark")
     print(f"Model: {model_path}")
@@ -256,6 +301,10 @@ def main():
     print(f"waitMode={args.wait_mode} waitLogitScale={args.wait_logit_scale} "
           f"waitLogitBias={args.wait_logit_bias}")
     print(f"GPUs: {args.gpus} | jobs/gpu={args.jobs_per_gpu}")
+    if args.resume_shards:
+        print(f"Resume shards: skipped={len(completed_results)} pending={len(pending_tasks)}")
+    if args.torch_cpu_threads is not None:
+        print(f"Simulator CPU threads/process: {args.torch_cpu_threads}")
     _print_preflight(preflight)
     print(f"Total runs: {len(tasks)}")
     print(f"Output: {output_abs}")
@@ -263,10 +312,10 @@ def main():
     print("=" * 60)
 
     task_queue = queue.Queue()
-    for task in tasks:
+    for task in pending_tasks:
         task_queue.put(task)
 
-    results = []
+    results = completed_results[:]
     threads = []
     for gpu_id in args.gpus:
         for slot in range(args.jobs_per_gpu):
