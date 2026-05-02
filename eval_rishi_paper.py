@@ -107,12 +107,13 @@ def main():
     p.add_argument("--consensus", type=int, default=3)
     p.add_argument("--tau", type=float, default=0.3)
     p.add_argument("--wait-thresh", type=float, default=0.25)
-    p.add_argument("--wait-mode", choices=["threshold", "learned"], default="threshold",
-                   help="Flow wait action mode: threshold uses --wait-thresh; learned uses FlowGNNModel.wait_head")
+    p.add_argument("--wait-mode", choices=["threshold", "learned", "learned_gate"], default="threshold",
+                   help="Flow wait action mode: threshold uses --wait-thresh; learned uses wait as a fifth "
+                        "competing logit; learned_gate uses binary P(wait) gating over move directions")
     p.add_argument("--wait-logit-bias", type=float, default=None,
-                   help="Override learned wait-logit bias before tau softmax; omitted uses checkpoint calibration")
+                   help="Override learned wait-logit bias; omitted uses checkpoint calibration")
     p.add_argument("--wait-logit-scale", type=float, default=None,
-                   help="Override learned wait-logit scale before tau softmax; omitted uses checkpoint calibration")
+                   help="Override learned wait-logit scale; omitted uses checkpoint calibration")
     p.add_argument("--policy-type", choices=["flow", "classifier", "flow_action_head", "local_classifier", "pibt"], default="flow",
                    help="Policy/model family to evaluate. pibt is the non-learned BD-guided PIBT baseline and does not load a checkpoint.")
     p.add_argument("--hidden-dim", type=int, default=1024)

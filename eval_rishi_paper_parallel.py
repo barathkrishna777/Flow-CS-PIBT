@@ -62,7 +62,7 @@ def parse_args():
     p.add_argument("--consensus", type=int, default=3)
     p.add_argument("--tau", type=float, default=0.3)
     p.add_argument("--wait-thresh", type=float, default=0.25)
-    p.add_argument("--wait-mode", choices=["threshold", "learned"], default="threshold")
+    p.add_argument("--wait-mode", choices=["threshold", "learned", "learned_gate"], default="threshold")
     p.add_argument("--wait-logit-bias", type=float, default=None,
                    help="Override learned wait-logit bias; omitted uses checkpoint calibration")
     p.add_argument("--wait-logit-scale", type=float, default=None,

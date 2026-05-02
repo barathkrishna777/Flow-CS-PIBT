@@ -32,6 +32,33 @@ def hybrid_action_logits_from_velocity(
     return torch.cat([calibrated_wait, movement_logits], dim=1)
 
 
+def binary_gate_action_probs_from_velocity(
+    predicted_velocity,
+    wait_logit,
+    wait_logit_scale=1.0,
+    wait_logit_bias=0.0,
+    movement_logit_scale=1.0,
+    tau=1.0,
+    eps=1e-8,
+):
+    """Compose P(wait) with P(direction | move).
+
+    The wait head owns only the binary wait-vs-move decision. The velocity
+    geometry owns the direction distribution when the agent moves.
+    """
+    action_vectors = CARDINAL_ACTION_VECTORS.to(
+        device=predicted_velocity.device,
+        dtype=predicted_velocity.dtype,
+    )
+    calibrated_wait = wait_logit_scale * wait_logit.view(-1, 1) + wait_logit_bias
+    wait_prob = torch.sigmoid(calibrated_wait)
+    movement_logits = movement_logit_scale * (predicted_velocity @ action_vectors.T)
+    move_probs = torch.softmax(movement_logits / tau, dim=1)
+    probs = torch.cat([wait_prob, (1.0 - wait_prob) * move_probs], dim=1)
+    probs = probs.clamp_min(eps)
+    return probs / probs.sum(dim=1, keepdim=True)
+
+
 class FlowGNNModel(nn.Module):
     def __init__(
         self,
@@ -124,6 +151,9 @@ class FlowGNNModel(nn.Module):
         self.wait_logit_bias = nn.Parameter(torch.tensor(0.0))
         self.movement_logit_scale = nn.Parameter(torch.tensor(1.0))
 
+    def calibrated_wait_logit(self, wait_logit):
+        return self.wait_logit_scale * wait_logit + self.wait_logit_bias
+
     def hybrid_action_logits(self, velocity_for_logits, wait_logit):
         return hybrid_action_logits_from_velocity(
             velocity_for_logits,
@@ -131,6 +161,16 @@ class FlowGNNModel(nn.Module):
             wait_logit_scale=self.wait_logit_scale,
             wait_logit_bias=self.wait_logit_bias,
             movement_logit_scale=self.movement_logit_scale,
+        )
+
+    def binary_gate_action_probs(self, velocity_for_logits, wait_logit, tau=1.0):
+        return binary_gate_action_probs_from_velocity(
+            velocity_for_logits,
+            wait_logit,
+            wait_logit_scale=self.wait_logit_scale,
+            wait_logit_bias=self.wait_logit_bias,
+            movement_logit_scale=self.movement_logit_scale,
+            tau=tau,
         )
 
     def forward(self, v_t, t, data, return_action_logits=False, return_wait_logit=False):
@@ -160,10 +200,17 @@ class FlowGNNModel(nn.Module):
 
         # 4. Predict velocity (flow output)
         flow_output = self.post_mp(node_features)
+        # Keep scalar calibration params visible to DDP's forward graph.
+        calibration_anchor = (
+            0.0 * self.wait_logit_scale
+            + 0.0 * self.wait_logit_bias
+            + 0.0 * self.movement_logit_scale
+        )
+        flow_output = flow_output + calibration_anchor
 
         if return_action_logits and return_wait_logit:
             action_logits = self.action_head(node_features)
-            wait_logit = self.wait_head(node_features).squeeze(-1)
+            wait_logit = self.wait_head(node_features).squeeze(-1) + calibration_anchor
             return flow_output, action_logits, wait_logit
 
         if return_action_logits:
@@ -172,7 +219,7 @@ class FlowGNNModel(nn.Module):
             return flow_output, action_logits
 
         if return_wait_logit:
-            wait_logit = self.wait_head(node_features).squeeze(-1)
+            wait_logit = self.wait_head(node_features).squeeze(-1) + calibration_anchor
             return flow_output, wait_logit
 
         return flow_output

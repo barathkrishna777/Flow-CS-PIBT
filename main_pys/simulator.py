@@ -15,7 +15,11 @@ import time
 from main_pys.model import GNNStack, CustomConv 
 from main_pys.model_inputs import create_data_object, normalize_graph_data, get_bd_prefs
 from main_pys.custom_timer import CustomTimer
-from main_pys.generative_model import FlowGNNModel, hybrid_action_logits_from_velocity
+from main_pys.generative_model import (
+    FlowGNNModel,
+    binary_gate_action_probs_from_velocity,
+    hybrid_action_logits_from_velocity,
+)
 from main_pys.rishi_like_model import RishiLikeClassifier
 
 def str2bool(v: str) -> bool:
@@ -371,7 +375,7 @@ def runNNOnState(cur_locs, bd, grid_map, k, m, model, device, goal_locations, ti
             velocity_tensor = all_velocities / num_samples
             predicted_velocity = velocity_tensor.cpu().numpy()
 
-            if args.waitMode == "learned":
+            if args.waitMode in ("learned", "learned_gate"):
                 t_final = torch.full((n_agents, 1), 0.99, device=device)
                 timer.start("forward_pass")
                 _, wait_logit = model(velocity_tensor, t_final, data, return_wait_logit=True)
@@ -386,13 +390,23 @@ def runNNOnState(cur_locs, bd, grid_map, k, m, model, device, goal_locations, ti
                     if args.waitLogitBias is not None
                     else model.wait_logit_bias
                 )
-                scores = hybrid_action_logits_from_velocity(
-                    velocity_tensor,
-                    wait_logit,
-                    wait_logit_scale=wait_logit_scale,
-                    wait_logit_bias=wait_logit_bias,
-                    movement_logit_scale=model.movement_logit_scale,
-                ).cpu().numpy()
+                if args.waitMode == "learned_gate":
+                    probs = binary_gate_action_probs_from_velocity(
+                        velocity_tensor,
+                        wait_logit,
+                        wait_logit_scale=wait_logit_scale,
+                        wait_logit_bias=wait_logit_bias,
+                        movement_logit_scale=model.movement_logit_scale,
+                        tau=args.tau,
+                    ).cpu().numpy()
+                else:
+                    scores = hybrid_action_logits_from_velocity(
+                        velocity_tensor,
+                        wait_logit,
+                        wait_logit_scale=wait_logit_scale,
+                        wait_logit_bias=wait_logit_bias,
+                        movement_logit_scale=model.movement_logit_scale,
+                    ).cpu().numpy()
             else:
                 # --- WAIT FIX: magnitude threshold ---
                 magnitudes = np.linalg.norm(predicted_velocity, axis=1)
@@ -401,9 +415,10 @@ def runNNOnState(cur_locs, bd, grid_map, k, m, model, device, goal_locations, ti
                 action_vectors = np.array([[0,0], [0,1], [1,0], [-1,0], [0,-1]])
                 scores = predicted_velocity @ action_vectors.T
 
-            scores = scores / args.tau
-            scores = scores - np.max(scores, axis=1, keepdims=True)
-            probs = np.exp(scores) / np.sum(np.exp(scores), axis=1, keepdims=True)
+            if args.waitMode != "learned_gate":
+                scores = scores / args.tau
+                scores = scores - np.max(scores, axis=1, keepdims=True)
+                probs = np.exp(scores) / np.sum(np.exp(scores), axis=1, keepdims=True)
 
             if args.waitMode == "threshold":
                 # For agents that should wait: set wait prob high, suppress others
@@ -421,8 +436,8 @@ def load_flow_model(args, device, k):
         incompatible = model.load_state_dict(checkpoint['model_state_dict'], strict=False)
     else:
         incompatible = model.load_state_dict(checkpoint, strict=False)
-    if args.waitMode == "learned" and any(key.startswith("wait_head.") for key in incompatible.missing_keys):
-        print("WARNING: checkpoint has no learned wait_head weights; --waitMode learned will use a randomly initialized wait head.")
+    if args.waitMode in ("learned", "learned_gate") and any(key.startswith("wait_head.") for key in incompatible.missing_keys):
+        print(f"WARNING: checkpoint has no learned wait_head weights; --waitMode {args.waitMode} will use a randomly initialized wait head.")
     if incompatible.unexpected_keys:
         print(f"WARNING: ignored unexpected checkpoint keys: {incompatible.unexpected_keys}")
     return model
@@ -724,13 +739,14 @@ if __name__ == '__main__':
     parser.add_argument('--tau', type=float, help="Softmax temperature (default 0.3)", default=0.3)
     parser.add_argument('--waitThreshold', type=float, help="Wait magnitude threshold (default 0.25)", default=0.25)
     parser.add_argument('--waitMode', '--wait-mode', dest='waitMode', type=str,
-                        choices=['threshold', 'learned'], default='threshold',
+                        choices=['threshold', 'learned', 'learned_gate'], default='threshold',
                         help="Wait action scoring mode: threshold keeps the fixed velocity-magnitude wait rule; "
-                             "learned uses FlowGNNModel.wait_head for action-0 logit")
+                             "learned uses wait as a fifth competing logit; learned_gate uses binary "
+                             "P(wait) gating over velocity-derived move directions")
     parser.add_argument('--waitLogitBias', '--wait-logit-bias', dest='waitLogitBias', type=float, default=None,
-                        help="Override learned wait-logit bias before tau softmax; omitted uses checkpoint calibration")
+                        help="Override learned wait-logit bias; omitted uses checkpoint calibration")
     parser.add_argument('--waitLogitScale', '--wait-logit-scale', dest='waitLogitScale', type=float, default=None,
-                        help="Override learned wait-logit scale before tau softmax; omitted uses checkpoint calibration")
+                        help="Override learned wait-logit scale; omitted uses checkpoint calibration")
     parser.add_argument('--numConsensusSamples', type=int, help="Number of flow samples to average (default 3)", default=3)
     parser.add_argument('--useActionHead', type=lambda x: bool(str2bool(x)), help="Use auxiliary action head instead of flow (default False)", default=False)
     parser.add_argument('--actionHeadConditioning', type=str,

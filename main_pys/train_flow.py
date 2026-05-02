@@ -266,9 +266,10 @@ def compute_flow_loss(
                     ce = F.cross_entropy(logits, expert_actions, reduction='none')
                     cur_action_loss = _reduce_node_loss(ce, node_weights, unweighted_action_loss)
                 if need_wait_head_loss:
+                    wait_for_bce = raw_model.calibrated_wait_logit(wait.view(-1))
                     bce = F.binary_cross_entropy_with_logits(
-                        wait.view(-1),
-                        target_wait.to(dtype=wait.dtype),
+                        wait_for_bce,
+                        target_wait.to(dtype=wait_for_bce.dtype),
                         reduction='none',
                     )
                     cur_wait_loss = _reduce_node_loss(bce, node_weights, unweighted_action_loss)
@@ -416,8 +417,8 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
         raise ValueError("--wait-head-only requires --wait-head-loss-weight > 0 or --hybrid-action-loss-weight > 0")
     if calibration_only and (action_head_only or wait_head_only):
         raise ValueError("--calibration-only cannot be combined with --action-head-only or --wait-head-only")
-    if calibration_only and hybrid_action_loss_weight <= 0:
-        raise ValueError("--calibration-only requires --hybrid-action-loss-weight > 0")
+    if calibration_only and wait_head_loss_weight <= 0 and hybrid_action_loss_weight <= 0:
+        raise ValueError("--calibration-only requires --wait-head-loss-weight > 0 or --hybrid-action-loss-weight > 0")
 
     # Find preprocessed data: CLI override > external drive > local
     pp_dir = preprocessed_dir

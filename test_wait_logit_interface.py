@@ -43,6 +43,7 @@ def main() -> int:
 
     from main_pys.generative_model import (
         FlowGNNModel,
+        binary_gate_action_probs_from_velocity,
         hybrid_action_logits_from_velocity,
     )
 
@@ -71,15 +72,20 @@ def main() -> int:
         )
         hybrid_logits = hybrid_action_logits_from_velocity(flow, wait_logit)
         model_hybrid_logits = model.hybrid_action_logits(flow, wait_logit)
+        gate_probs = binary_gate_action_probs_from_velocity(flow, wait_logit, tau=0.3)
+        gate_probs_unclipped = binary_gate_action_probs_from_velocity(flow, wait_logit, tau=0.3, eps=0.0)
+        model_gate_probs = model.binary_gate_action_probs(flow, wait_logit, tau=0.3)
 
     report("flow output shape", tuple(flow.shape) == (n_agents, 2), str(tuple(flow.shape)))
     report("action head shape", tuple(action_logits.shape) == (n_agents, 5), str(tuple(action_logits.shape)))
     report("wait logit shape", tuple(wait_logit.shape) == (n_agents,), str(tuple(wait_logit.shape)))
     report("hybrid logits shape", tuple(hybrid_logits.shape) == (n_agents, 5), str(tuple(hybrid_logits.shape)))
+    report("binary gate probs shape", tuple(gate_probs.shape) == (n_agents, 5), str(tuple(gate_probs.shape)))
     report("model calibration default scale", torch.allclose(model.wait_logit_scale.detach(), torch.tensor(1.0)))
     report("model calibration default bias", torch.allclose(model.wait_logit_bias.detach(), torch.tensor(0.0)))
     report("model movement default scale", torch.allclose(model.movement_logit_scale.detach(), torch.tensor(1.0)))
     report("model calibrated logits default to identity", torch.allclose(model_hybrid_logits, hybrid_logits))
+    report("model gate probs default to identity helper", torch.allclose(model_gate_probs, gate_probs))
 
     expected_moves = flow @ torch.tensor([[0, 1], [1, 0], [-1, 0], [0, -1]], dtype=flow.dtype).T
     report(
@@ -101,6 +107,16 @@ def main() -> int:
     report(
         "hybrid movement calibration applies scale",
         torch.allclose(calibrated[:, 1:], 0.5 * expected_moves),
+    )
+
+    report("binary gate probs sum to one", torch.allclose(gate_probs.sum(dim=1), torch.ones(n_agents)))
+    report(
+        "binary gate wait prob is sigmoid wait logit",
+        torch.allclose(gate_probs_unclipped[:, 0], torch.sigmoid(wait_logit), atol=1e-6),
+    )
+    report(
+        "binary gate move mass is one minus wait",
+        torch.allclose(gate_probs_unclipped[:, 1:].sum(dim=1), 1.0 - gate_probs_unclipped[:, 0], atol=1e-6),
     )
 
     targets = torch.tensor([0, 1, 4], dtype=torch.long)
