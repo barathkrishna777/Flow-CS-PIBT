@@ -376,8 +376,23 @@ def runNNOnState(cur_locs, bd, grid_map, k, m, model, device, goal_locations, ti
                 timer.start("forward_pass")
                 _, wait_logit = model(velocity_tensor, t_final, data, return_wait_logit=True)
                 timer.stop("forward_pass")
-                wait_logit = args.waitLogitScale * wait_logit + args.waitLogitBias
-                scores = hybrid_action_logits_from_velocity(velocity_tensor, wait_logit).cpu().numpy()
+                wait_logit_scale = (
+                    args.waitLogitScale
+                    if args.waitLogitScale is not None
+                    else model.wait_logit_scale
+                )
+                wait_logit_bias = (
+                    args.waitLogitBias
+                    if args.waitLogitBias is not None
+                    else model.wait_logit_bias
+                )
+                scores = hybrid_action_logits_from_velocity(
+                    velocity_tensor,
+                    wait_logit,
+                    wait_logit_scale=wait_logit_scale,
+                    wait_logit_bias=wait_logit_bias,
+                    movement_logit_scale=model.movement_logit_scale,
+                ).cpu().numpy()
             else:
                 # --- WAIT FIX: magnitude threshold ---
                 magnitudes = np.linalg.norm(predicted_velocity, axis=1)
@@ -712,10 +727,10 @@ if __name__ == '__main__':
                         choices=['threshold', 'learned'], default='threshold',
                         help="Wait action scoring mode: threshold keeps the fixed velocity-magnitude wait rule; "
                              "learned uses FlowGNNModel.wait_head for action-0 logit")
-    parser.add_argument('--waitLogitBias', '--wait-logit-bias', dest='waitLogitBias', type=float, default=0.0,
-                        help="Additive calibration bias for learned wait logits before tau softmax (default 0.0)")
-    parser.add_argument('--waitLogitScale', '--wait-logit-scale', dest='waitLogitScale', type=float, default=1.0,
-                        help="Multiplicative calibration scale for learned wait logits before tau softmax (default 1.0)")
+    parser.add_argument('--waitLogitBias', '--wait-logit-bias', dest='waitLogitBias', type=float, default=None,
+                        help="Override learned wait-logit bias before tau softmax; omitted uses checkpoint calibration")
+    parser.add_argument('--waitLogitScale', '--wait-logit-scale', dest='waitLogitScale', type=float, default=None,
+                        help="Override learned wait-logit scale before tau softmax; omitted uses checkpoint calibration")
     parser.add_argument('--numConsensusSamples', type=int, help="Number of flow samples to average (default 3)", default=3)
     parser.add_argument('--useActionHead', type=lambda x: bool(str2bool(x)), help="Use auxiliary action head instead of flow (default False)", default=False)
     parser.add_argument('--actionHeadConditioning', type=str,

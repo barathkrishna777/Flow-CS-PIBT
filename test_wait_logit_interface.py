@@ -70,17 +70,59 @@ def main() -> int:
             return_wait_logit=True,
         )
         hybrid_logits = hybrid_action_logits_from_velocity(flow, wait_logit)
+        model_hybrid_logits = model.hybrid_action_logits(flow, wait_logit)
 
     report("flow output shape", tuple(flow.shape) == (n_agents, 2), str(tuple(flow.shape)))
     report("action head shape", tuple(action_logits.shape) == (n_agents, 5), str(tuple(action_logits.shape)))
     report("wait logit shape", tuple(wait_logit.shape) == (n_agents,), str(tuple(wait_logit.shape)))
     report("hybrid logits shape", tuple(hybrid_logits.shape) == (n_agents, 5), str(tuple(hybrid_logits.shape)))
+    report("model calibration default scale", torch.allclose(model.wait_logit_scale.detach(), torch.tensor(1.0)))
+    report("model calibration default bias", torch.allclose(model.wait_logit_bias.detach(), torch.tensor(0.0)))
+    report("model movement default scale", torch.allclose(model.movement_logit_scale.detach(), torch.tensor(1.0)))
+    report("model calibrated logits default to identity", torch.allclose(model_hybrid_logits, hybrid_logits))
 
     expected_moves = flow @ torch.tensor([[0, 1], [1, 0], [-1, 0], [0, -1]], dtype=flow.dtype).T
     report(
         "hybrid movement logits preserve dot products",
         torch.allclose(hybrid_logits[:, 1:], expected_moves),
     )
+
+    calibrated = hybrid_action_logits_from_velocity(
+        flow,
+        wait_logit,
+        wait_logit_scale=torch.tensor(2.0),
+        wait_logit_bias=torch.tensor(-3.0),
+        movement_logit_scale=torch.tensor(0.5),
+    )
+    report(
+        "hybrid wait calibration applies scale and bias",
+        torch.allclose(calibrated[:, 0], 2.0 * wait_logit - 3.0),
+    )
+    report(
+        "hybrid movement calibration applies scale",
+        torch.allclose(calibrated[:, 1:], 0.5 * expected_moves),
+    )
+
+    targets = torch.tensor([0, 1, 4], dtype=torch.long)
+    ce = torch.nn.functional.cross_entropy(model_hybrid_logits, targets)
+    report("hybrid logits support action CE", torch.isfinite(ce).item(), str(float(ce)))
+
+    legacy_state = {
+        key: value
+        for key, value in model.state_dict().items()
+        if key not in {"wait_logit_scale", "wait_logit_bias", "movement_logit_scale"}
+    }
+    fresh = FlowGNNModel(k=k, hidden_dim=32, num_layers=1)
+    incompatible = fresh.load_state_dict(legacy_state, strict=False)
+    expected_missing = {"wait_logit_scale", "wait_logit_bias", "movement_logit_scale"}
+    report(
+        "legacy checkpoints miss only calibration params",
+        set(incompatible.missing_keys) == expected_missing,
+        str(incompatible.missing_keys),
+    )
+    report("legacy load keeps wait scale default", torch.allclose(fresh.wait_logit_scale.detach(), torch.tensor(1.0)))
+    report("legacy load keeps wait bias default", torch.allclose(fresh.wait_logit_bias.detach(), torch.tensor(0.0)))
+    report("legacy load keeps movement scale default", torch.allclose(fresh.movement_logit_scale.detach(), torch.tensor(1.0)))
 
     print(f"\nSummary: {PASS} passed, {FAIL} failed, {SKIP} skipped")
     return 1 if FAIL else 0

@@ -63,8 +63,10 @@ def parse_args():
     p.add_argument("--tau", type=float, default=0.3)
     p.add_argument("--wait-thresh", type=float, default=0.25)
     p.add_argument("--wait-mode", choices=["threshold", "learned"], default="threshold")
-    p.add_argument("--wait-logit-bias", type=float, default=0.0)
-    p.add_argument("--wait-logit-scale", type=float, default=1.0)
+    p.add_argument("--wait-logit-bias", type=float, default=None,
+                   help="Override learned wait-logit bias; omitted uses checkpoint calibration")
+    p.add_argument("--wait-logit-scale", type=float, default=None,
+                   help="Override learned wait-logit scale; omitted uses checkpoint calibration")
     p.add_argument("--policy-type",
                    choices=["flow", "classifier", "flow_action_head", "local_classifier", "pibt"],
                    default="flow")
@@ -157,7 +159,7 @@ def build_tasks(args) -> tuple[list[EvalTask], list[tuple[str, int, int, int]], 
 def simulator_cmd(args, task: EvalTask, model_path: str, shard_csv: str) -> list[str]:
     simulator_policy_type = "flow" if args.policy_type == "flow_action_head" else args.policy_type
     use_action_head = args.policy_type == "flow_action_head"
-    return [
+    cmd = [
         sys.executable, "-m", "main_pys.simulator",
         f"--mapNpzFile={MAP_NPZ}",
         f"--mapName={task.map_name}",
@@ -175,8 +177,6 @@ def simulator_cmd(args, task: EvalTask, model_path: str, shard_csv: str) -> list
         f"--tau={args.tau}",
         f"--waitThreshold={args.wait_thresh}",
         f"--waitMode={args.wait_mode}",
-        f"--waitLogitBias={args.wait_logit_bias}",
-        f"--waitLogitScale={args.wait_logit_scale}",
         f"--numConsensusSamples={args.consensus}",
         f"--policyType={simulator_policy_type}",
         f"--useActionHead={'True' if use_action_head else 'False'}",
@@ -184,6 +184,11 @@ def simulator_cmd(args, task: EvalTask, model_path: str, shard_csv: str) -> list
         f"--hiddenDim={args.hidden_dim}",
         f"--numLayers={args.num_layers}",
     ]
+    if args.wait_logit_bias is not None:
+        cmd.append(f"--waitLogitBias={args.wait_logit_bias}")
+    if args.wait_logit_scale is not None:
+        cmd.append(f"--waitLogitScale={args.wait_logit_scale}")
+    return cmd
 
 
 def worker_loop(worker_name, gpu_id, tasks, results, args, model_path, shard_dir, total):
@@ -298,8 +303,10 @@ def main():
     print(f"Model: {model_path}")
     print(f"Maps: {len(args.maps) if args.maps else args.map_set}")
     print(f"Agents: {agent_counts}")
-    print(f"waitMode={args.wait_mode} waitLogitScale={args.wait_logit_scale} "
-          f"waitLogitBias={args.wait_logit_bias}")
+    wait_scale_label = "model" if args.wait_logit_scale is None else args.wait_logit_scale
+    wait_bias_label = "model" if args.wait_logit_bias is None else args.wait_logit_bias
+    print(f"waitMode={args.wait_mode} waitLogitScale={wait_scale_label} "
+          f"waitLogitBias={wait_bias_label}")
     print(f"GPUs: {args.gpus} | jobs/gpu={args.jobs_per_gpu}")
     if args.resume_shards:
         print(f"Resume shards: skipped={len(completed_results)} pending={len(pending_tasks)}")

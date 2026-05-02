@@ -16,7 +16,7 @@ import math
 
 from main_pys.dataset import FlowMAPFDataset
 from main_pys.dataset_preprocessed import PreprocessedFlowMAPFDataset, build_weighted_sampler
-from main_pys.generative_model import FlowGNNModel
+from main_pys.generative_model import FlowGNNModel, hybrid_action_logits_from_velocity
 
 PREPROCESSED_DIRS = [
     "/media/anushree_mattlab/Seagate Por/preprocessed_data",  # external drive (primary)
@@ -163,6 +163,8 @@ def compute_flow_loss(
     use_amp,
     action_loss_weight=0.3,
     wait_head_loss_weight=0.0,
+    hybrid_action_loss_weight=0.0,
+    hybrid_velocity_source="teacher_x1",
     unweighted_action_loss=False,
     unweighted_flow_loss=False,
     discrete_forward_mode="both",
@@ -185,26 +187,30 @@ def compute_flow_loss(
     with torch.cuda.amp.autocast(enabled=use_amp):
         need_action_loss = action_loss_weight > 0
         need_wait_head_loss = wait_head_loss_weight > 0
+        need_hybrid_loss = hybrid_action_loss_weight > 0
+        need_wait_logit = need_wait_head_loss or need_hybrid_loss
+        raw_model = model.module if hasattr(model, "module") else model
 
         def forward_discrete_heads(v, t_in):
-            if need_action_loss and need_wait_head_loss:
-                _, logits, wait = model(
+            if need_action_loss and need_wait_logit:
+                flow, logits, wait = model(
                     v,
                     t_in,
                     batch,
                     return_action_logits=True,
                     return_wait_logit=True,
                 )
-                return logits, wait
+                return flow, logits, wait
             if need_action_loss:
-                _, logits = model(v, t_in, batch, return_action_logits=True)
-                return logits, None
-            if need_wait_head_loss:
-                _, wait = model(v, t_in, batch, return_wait_logit=True)
-                return None, wait
-            return None, None
+                flow, logits = model(v, t_in, batch, return_action_logits=True)
+                return flow, logits, None
+            if need_wait_logit:
+                flow, wait = model(v, t_in, batch, return_wait_logit=True)
+                return flow, None, wait
+            flow = model(v, t_in, batch)
+            return flow, None, None
 
-        if need_action_loss and need_wait_head_loss:
+        if need_action_loss and need_wait_logit:
             predicted_flow, action_logits, wait_logit = model(
                 x_t,
                 t,
@@ -215,7 +221,7 @@ def compute_flow_loss(
         elif need_action_loss:
             predicted_flow, action_logits = model(x_t, t, batch, return_action_logits=True)
             wait_logit = None
-        elif need_wait_head_loss:
+        elif need_wait_logit:
             predicted_flow, wait_logit = model(x_t, t, batch, return_wait_logit=True)
             action_logits = None
         else:
@@ -233,8 +239,9 @@ def compute_flow_loss(
         zero = torch.tensor(0.0, device=device)
         action_loss = zero
         wait_head_loss = zero
+        hybrid_action_loss = zero
 
-        if need_action_loss or need_wait_head_loss:
+        if need_action_loss or need_wait_logit:
             # Auxiliary labels: 0=wait, 1=right, 2=down, 3=up, 4=left.
             if hasattr(batch, "action_y") and batch.action_y is not None:
                 expert_actions = batch.action_y.view(-1).long().to(device)
@@ -242,9 +249,19 @@ def compute_flow_loss(
                 expert_actions = velocity_to_action_labels(x_1, device)
             target_wait = (expert_actions == 0).to(dtype=x_1.dtype)
 
-            def compute_discrete_losses(logits, wait):
+            def velocity_for_hybrid(v_in, t_in, flow):
+                if hybrid_velocity_source == "teacher_x1":
+                    return x_1
+                if hybrid_velocity_source == "predicted_x1":
+                    if len(t_in.shape) == 1:
+                        t_in = t_in.unsqueeze(1)
+                    return v_in + (1 - t_in) * flow
+                raise ValueError(f"Unknown hybrid_velocity_source: {hybrid_velocity_source}")
+
+            def compute_discrete_losses(flow, logits, wait, v_in, t_in):
                 cur_action_loss = zero
                 cur_wait_loss = zero
+                cur_hybrid_loss = zero
                 if need_action_loss:
                     ce = F.cross_entropy(logits, expert_actions, reduction='none')
                     cur_action_loss = _reduce_node_loss(ce, node_weights, unweighted_action_loss)
@@ -255,19 +272,42 @@ def compute_flow_loss(
                         reduction='none',
                     )
                     cur_wait_loss = _reduce_node_loss(bce, node_weights, unweighted_action_loss)
-                return cur_action_loss, cur_wait_loss
+                if need_hybrid_loss:
+                    hybrid_logits = hybrid_action_logits_from_velocity(
+                        velocity_for_hybrid(v_in, t_in, flow),
+                        wait,
+                        wait_logit_scale=raw_model.wait_logit_scale,
+                        wait_logit_bias=raw_model.wait_logit_bias,
+                        movement_logit_scale=raw_model.movement_logit_scale,
+                    )
+                    hybrid_ce = F.cross_entropy(hybrid_logits, expert_actions, reduction='none')
+                    cur_hybrid_loss = _reduce_node_loss(
+                        hybrid_ce,
+                        node_weights,
+                        unweighted_action_loss,
+                    )
+                return cur_action_loss, cur_wait_loss, cur_hybrid_loss
 
             # shared: use logits from the noisy forward (original behaviour)
-            action_loss, wait_head_loss = compute_discrete_losses(action_logits, wait_logit)
+            action_loss, wait_head_loss, hybrid_action_loss = compute_discrete_losses(
+                predicted_flow,
+                action_logits,
+                wait_logit,
+                x_t,
+                t,
+            )
 
             # zero_v: second forward with v=0, t=0 so heads can't read answer from v_t
             if discrete_forward_mode in ("zero_v", "both"):
                 zero_v = torch.zeros_like(x_1)
                 zero_t = torch.zeros(x_1.shape[0], 1, device=device)
-                action_logits_zero, wait_logit_zero = forward_discrete_heads(zero_v, zero_t)
-                action_loss_zero, wait_loss_zero = compute_discrete_losses(
+                flow_zero, action_logits_zero, wait_logit_zero = forward_discrete_heads(zero_v, zero_t)
+                action_loss_zero, wait_loss_zero, hybrid_loss_zero = compute_discrete_losses(
+                    flow_zero,
                     action_logits_zero,
                     wait_logit_zero,
+                    zero_v,
+                    zero_t,
                 )
 
             # x1_t1: forward with (x_1, t=0.99) — matches integrated inference distribution.
@@ -275,24 +315,35 @@ def compute_flow_loss(
             # t=0.99 teaches the discrete heads on the same conditioning.
             if discrete_forward_mode in ("x1_t1",):
                 t_high = torch.full((x_1.shape[0], 1), 0.99, device=device)
-                action_logits_x1, wait_logit_x1 = forward_discrete_heads(x_1, t_high)
-                action_loss_x1, wait_loss_x1 = compute_discrete_losses(
+                flow_x1, action_logits_x1, wait_logit_x1 = forward_discrete_heads(x_1, t_high)
+                action_loss_x1, wait_loss_x1, hybrid_loss_x1 = compute_discrete_losses(
+                    flow_x1,
                     action_logits_x1,
                     wait_logit_x1,
+                    x_1,
+                    t_high,
                 )
 
             if discrete_forward_mode == "zero_v":
                 action_loss = action_loss_zero
                 wait_head_loss = wait_loss_zero
+                hybrid_action_loss = hybrid_loss_zero
             elif discrete_forward_mode == "both":
                 action_loss = 0.5 * action_loss + 0.5 * action_loss_zero
                 wait_head_loss = 0.5 * wait_head_loss + 0.5 * wait_loss_zero
+                hybrid_action_loss = 0.5 * hybrid_action_loss + 0.5 * hybrid_loss_zero
             elif discrete_forward_mode == "x1_t1":
                 action_loss = action_loss_x1
                 wait_head_loss = wait_loss_x1
+                hybrid_action_loss = hybrid_loss_x1
             # else "shared": keep losses from the noisy forward
 
-        loss = flow_loss + action_loss_weight * action_loss + wait_head_loss_weight * wait_head_loss
+        loss = (
+            flow_loss
+            + action_loss_weight * action_loss
+            + wait_head_loss_weight * wait_head_loss
+            + hybrid_action_loss_weight * hybrid_action_loss
+        )
 
     return loss
 
@@ -304,6 +355,8 @@ def validate(
     use_amp,
     action_loss_weight,
     wait_head_loss_weight,
+    hybrid_action_loss_weight,
+    hybrid_velocity_source,
     unweighted_action_loss,
     unweighted_flow_loss,
     discrete_forward_mode="both",
@@ -322,6 +375,8 @@ def validate(
                 use_amp,
                 action_loss_weight=action_loss_weight,
                 wait_head_loss_weight=wait_head_loss_weight,
+                hybrid_action_loss_weight=hybrid_action_loss_weight,
+                hybrid_velocity_source=hybrid_velocity_source,
                 unweighted_action_loss=unweighted_action_loss,
                 unweighted_flow_loss=unweighted_flow_loss,
                 discrete_forward_mode=discrete_forward_mode,
@@ -340,10 +395,12 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
           preprocessed_dir=None, no_weighted_sampling=False, val_split=0.05, patience=0,
           max_train_samples=None, max_val_samples=None,
           resume=None, start_epoch=0, hidden_dim=1024, num_layers=6,
-          action_loss_weight=0.3, wait_head_loss_weight=0.0, unweighted_action_loss=False,
+          action_loss_weight=0.3, wait_head_loss_weight=0.0, hybrid_action_loss_weight=0.0,
+          hybrid_velocity_source="teacher_x1", unweighted_action_loss=False,
           unweighted_flow_loss=False, epochs=10, discrete_forward_mode="both",
           reset_best_val_loss=False, action_head_only=False, action_head_lr=5e-4,
-          wait_head_only=False, wait_head_lr=5e-4, distributed=False, local_rank=None):
+          wait_head_only=False, wait_head_lr=5e-4, calibration_only=False,
+          distributed=False, local_rank=None):
     ddp_info = setup_distributed(distributed=distributed, local_rank=local_rank)
     is_main = ddp_info["is_main"]
     log = print if is_main else (lambda *args, **kwargs: None)
@@ -355,8 +412,12 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
         + (f" | DDP world_size={ddp_info['world_size']}" if ddp_info["enabled"] else "")
     )
 
-    if wait_head_only and wait_head_loss_weight <= 0:
-        raise ValueError("--wait-head-only requires --wait-head-loss-weight > 0")
+    if wait_head_only and wait_head_loss_weight <= 0 and hybrid_action_loss_weight <= 0:
+        raise ValueError("--wait-head-only requires --wait-head-loss-weight > 0 or --hybrid-action-loss-weight > 0")
+    if calibration_only and (action_head_only or wait_head_only):
+        raise ValueError("--calibration-only cannot be combined with --action-head-only or --wait-head-only")
+    if calibration_only and hybrid_action_loss_weight <= 0:
+        raise ValueError("--calibration-only requires --hybrid-action-loss-weight > 0")
 
     # Find preprocessed data: CLI override > external drive > local
     pp_dir = preprocessed_dir
@@ -476,12 +537,14 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
 
     model = FlowGNNModel(hidden_dim=hidden_dim, num_layers=num_layers).to(device)
 
-    if action_head_only or wait_head_only:
+    if action_head_only or wait_head_only or calibration_only:
         trainable_groups = []
+        calibration_names = {"wait_logit_scale", "wait_logit_bias", "movement_logit_scale"}
         for name, param in model.named_parameters():
             train_action = action_head_only and name.startswith("action_head.")
             train_wait = wait_head_only and name.startswith("wait_head.")
-            param.requires_grad = train_action or train_wait
+            train_calibration = (wait_head_only or calibration_only) and name in calibration_names
+            param.requires_grad = train_action or train_wait or train_calibration
         if action_head_only:
             action_params = [p for n, p in model.named_parameters() if n.startswith("action_head.") and p.requires_grad]
             if action_params:
@@ -490,11 +553,18 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
             wait_params = [p for n, p in model.named_parameters() if n.startswith("wait_head.") and p.requires_grad]
             if wait_params:
                 trainable_groups.append({"params": wait_params, "lr": wait_head_lr})
+        if wait_head_only or calibration_only:
+            calibration_params = [p for n, p in model.named_parameters() if n in calibration_names and p.requires_grad]
+            if calibration_params:
+                trainable_groups.append({"params": calibration_params, "lr": wait_head_lr})
         trainable = [p for group in trainable_groups for p in group["params"]]
+        if not trainable:
+            raise RuntimeError("No trainable parameters selected")
         log(
             "head_only: freezing trunk, training "
             f"{sum(p.numel() for p in trainable):,} params "
-            f"(action_head={action_head_only}, wait_head={wait_head_only})"
+            f"(action_head={action_head_only}, wait_head={wait_head_only}, "
+            f"calibration_only={calibration_only})"
         )
         optimizer = AdamW(trainable_groups, weight_decay=1e-4)
     else:
@@ -519,7 +589,7 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
                 log(f"  Missing checkpoint keys initialized from scratch: {incompatible.missing_keys}")
             if incompatible.unexpected_keys:
                 log(f"  Unexpected checkpoint keys ignored: {incompatible.unexpected_keys}")
-            if action_head_only or wait_head_only:
+            if action_head_only or wait_head_only or calibration_only:
                 # Optimizer only covers selected head params — skip incompatible full-model state
                 start_epoch = ckpt['epoch']
                 epochs = start_epoch + epochs
@@ -560,7 +630,14 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
                 scheduler.step()
 
     if ddp_info["enabled"]:
-        find_unused = action_loss_weight <= 0 or wait_head_loss_weight <= 0 or action_head_only or wait_head_only
+        find_unused = (
+            action_loss_weight <= 0
+            or wait_head_loss_weight <= 0
+            or hybrid_action_loss_weight <= 0
+            or action_head_only
+            or wait_head_only
+            or calibration_only
+        )
         model = DDP(
             model,
             device_ids=[ddp_info["local_rank"]],
@@ -597,11 +674,14 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
             "max_val_samples": max_val_samples,
             "action_loss_weight": action_loss_weight,
             "wait_head_loss_weight": wait_head_loss_weight,
+            "hybrid_action_loss_weight": hybrid_action_loss_weight,
+            "hybrid_velocity_source": hybrid_velocity_source,
             "unweighted_action_loss": unweighted_action_loss,
             "unweighted_flow_loss": unweighted_flow_loss,
             "discrete_forward_mode": discrete_forward_mode,
             "action_head_only": action_head_only,
             "wait_head_only": wait_head_only,
+            "calibration_only": calibration_only,
         })
 
     log_batch_every = 10
@@ -613,6 +693,8 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
         f"action={'unweighted' if unweighted_action_loss else 'weighted'}, "
         f"action_loss_weight={action_loss_weight}, "
         f"wait_head_loss_weight={wait_head_loss_weight}, "
+        f"hybrid_action_loss_weight={hybrid_action_loss_weight}, "
+        f"hybrid_velocity_source={hybrid_velocity_source}, "
         f"discrete_forward_mode={discrete_forward_mode}"
     )
 
@@ -646,6 +728,8 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
                 use_amp,
                 action_loss_weight=action_loss_weight,
                 wait_head_loss_weight=wait_head_loss_weight,
+                hybrid_action_loss_weight=hybrid_action_loss_weight,
+                hybrid_velocity_source=hybrid_velocity_source,
                 unweighted_action_loss=unweighted_action_loss,
                 unweighted_flow_loss=unweighted_flow_loss,
                 discrete_forward_mode=discrete_forward_mode,
@@ -697,6 +781,8 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
                 use_amp,
                 action_loss_weight=action_loss_weight,
                 wait_head_loss_weight=wait_head_loss_weight,
+                hybrid_action_loss_weight=hybrid_action_loss_weight,
+                hybrid_velocity_source=hybrid_velocity_source,
                 unweighted_action_loss=unweighted_action_loss,
                 unweighted_flow_loss=unweighted_flow_loss,
                 discrete_forward_mode=discrete_forward_mode,
@@ -724,6 +810,8 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
                         'loss_config': {
                             'action_loss_weight': action_loss_weight,
                             'wait_head_loss_weight': wait_head_loss_weight,
+                            'hybrid_action_loss_weight': hybrid_action_loss_weight,
+                            'hybrid_velocity_source': hybrid_velocity_source,
                             'discrete_forward_mode': discrete_forward_mode,
                         },
                         'train_loss': avg_train_loss,
@@ -756,6 +844,8 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
                 'loss_config': {
                     'action_loss_weight': action_loss_weight,
                     'wait_head_loss_weight': wait_head_loss_weight,
+                    'hybrid_action_loss_weight': hybrid_action_loss_weight,
+                    'hybrid_velocity_source': hybrid_velocity_source,
                     'discrete_forward_mode': discrete_forward_mode,
                 },
                 'train_loss': avg_train_loss,
@@ -837,6 +927,12 @@ if __name__ == "__main__":
                         help="Weight for auxiliary/exact discrete action cross entropy")
     parser.add_argument("--wait-head-loss-weight", type=float, default=0.0,
                         help="Weight for learned wait-head BCE loss. Default 0 keeps legacy training unchanged")
+    parser.add_argument("--hybrid-action-loss-weight", type=float, default=0.0,
+                        help="Weight for CE over inference logits [calibrated wait, calibrated movement]")
+    parser.add_argument("--hybrid-velocity-source", type=str,
+                        choices=["teacher_x1", "predicted_x1"], default="teacher_x1",
+                        help="Velocity used for hybrid movement logits: teacher_x1 uses expert x_1; "
+                             "predicted_x1 uses x_t + (1-t)*predicted_flow")
     parser.add_argument("--unweighted-action-loss", action="store_true",
                         help="Do not apply node_weights to the action/wait-head losses")
     parser.add_argument("--unweighted-flow-loss", action="store_true",
@@ -858,6 +954,8 @@ if __name__ == "__main__":
                         help="Freeze all trunk params, train only wait_head (for learned wait-logit finetuning)")
     parser.add_argument("--wait-head-lr", type=float, default=5e-4,
                         help="LR for wait_head_only mode (default: 5e-4)")
+    parser.add_argument("--calibration-only", action="store_true",
+                        help="Freeze all model params except wait/movement calibration scalars")
     parser.add_argument("--distributed", action="store_true",
                         help="Enable DistributedDataParallel; also auto-enabled under torchrun WORLD_SIZE>1")
     parser.add_argument("--local-rank", "--local_rank", dest="local_rank", type=int, default=None,
@@ -874,6 +972,8 @@ if __name__ == "__main__":
           hidden_dim=args.hidden_dim, num_layers=args.num_layers,
           action_loss_weight=args.action_loss_weight,
           wait_head_loss_weight=args.wait_head_loss_weight,
+          hybrid_action_loss_weight=args.hybrid_action_loss_weight,
+          hybrid_velocity_source=args.hybrid_velocity_source,
           unweighted_action_loss=args.unweighted_action_loss,
           unweighted_flow_loss=args.unweighted_flow_loss,
           epochs=args.epochs,
@@ -883,5 +983,6 @@ if __name__ == "__main__":
           action_head_lr=args.action_head_lr,
           wait_head_only=args.wait_head_only,
           wait_head_lr=args.wait_head_lr,
+          calibration_only=args.calibration_only,
           distributed=args.distributed,
           local_rank=args.local_rank)

@@ -10,18 +10,26 @@ CARDINAL_ACTION_VECTORS = torch.tensor(
 )
 
 
-def hybrid_action_logits_from_velocity(predicted_velocity, wait_logit):
+def hybrid_action_logits_from_velocity(
+    predicted_velocity,
+    wait_logit,
+    wait_logit_scale=1.0,
+    wait_logit_bias=0.0,
+    movement_logit_scale=1.0,
+):
     """Build logits as [wait, right, down, up, left].
 
     Movement logits preserve the flow geometry via velocity dot products; the
-    wait logit is supplied by the learned wait head.
+    wait logit is supplied by the learned wait head. Optional scalar
+    calibration mirrors learned inference.
     """
     action_vectors = CARDINAL_ACTION_VECTORS.to(
         device=predicted_velocity.device,
         dtype=predicted_velocity.dtype,
     )
-    movement_logits = predicted_velocity @ action_vectors.T
-    return torch.cat([wait_logit.view(-1, 1), movement_logits], dim=1)
+    calibrated_wait = wait_logit_scale * wait_logit.view(-1, 1) + wait_logit_bias
+    movement_logits = movement_logit_scale * (predicted_velocity @ action_vectors.T)
+    return torch.cat([calibrated_wait, movement_logits], dim=1)
 
 
 class FlowGNNModel(nn.Module):
@@ -108,6 +116,21 @@ class FlowGNNModel(nn.Module):
             nn.SiLU(),
             nn.Dropout(0.15),
             nn.Linear(action_head_dim, 1)
+        )
+
+        # Scalar calibration for the learned wait-logit inference interface.
+        # Old checkpoints load with strict=False and keep these identity values.
+        self.wait_logit_scale = nn.Parameter(torch.tensor(1.0))
+        self.wait_logit_bias = nn.Parameter(torch.tensor(0.0))
+        self.movement_logit_scale = nn.Parameter(torch.tensor(1.0))
+
+    def hybrid_action_logits(self, velocity_for_logits, wait_logit):
+        return hybrid_action_logits_from_velocity(
+            velocity_for_logits,
+            wait_logit,
+            wait_logit_scale=self.wait_logit_scale,
+            wait_logit_bias=self.wait_logit_bias,
+            movement_logit_scale=self.movement_logit_scale,
         )
 
     def forward(self, v_t, t, data, return_action_logits=False, return_wait_logit=False):

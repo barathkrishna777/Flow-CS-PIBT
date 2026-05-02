@@ -109,10 +109,10 @@ def main():
     p.add_argument("--wait-thresh", type=float, default=0.25)
     p.add_argument("--wait-mode", choices=["threshold", "learned"], default="threshold",
                    help="Flow wait action mode: threshold uses --wait-thresh; learned uses FlowGNNModel.wait_head")
-    p.add_argument("--wait-logit-bias", type=float, default=0.0,
-                   help="Additive calibration bias for learned wait logits before tau softmax")
-    p.add_argument("--wait-logit-scale", type=float, default=1.0,
-                   help="Multiplicative calibration scale for learned wait logits before tau softmax")
+    p.add_argument("--wait-logit-bias", type=float, default=None,
+                   help="Override learned wait-logit bias before tau softmax; omitted uses checkpoint calibration")
+    p.add_argument("--wait-logit-scale", type=float, default=None,
+                   help="Override learned wait-logit scale before tau softmax; omitted uses checkpoint calibration")
     p.add_argument("--policy-type", choices=["flow", "classifier", "flow_action_head", "local_classifier", "pibt"], default="flow",
                    help="Policy/model family to evaluate. pibt is the non-learned BD-guided PIBT baseline and does not load a checkpoint.")
     p.add_argument("--hidden-dim", type=int, default=1024)
@@ -198,8 +198,10 @@ def main():
     print(f"Scenarios/map: <= {max_scen} | Agents: {agent_counts[0]}..{agent_counts[-1]}")
     print(f"Policy: {args.policy_type}")
     print(f"steps={args.num_integration_steps} consensus={args.consensus} tau={args.tau}")
+    wait_scale_label = "model" if args.wait_logit_scale is None else args.wait_logit_scale
+    wait_bias_label = "model" if args.wait_logit_bias is None else args.wait_logit_bias
     print(f"waitMode={args.wait_mode} waitThresh={args.wait_thresh} "
-          f"waitLogitScale={args.wait_logit_scale} waitLogitBias={args.wait_logit_bias}")
+          f"waitLogitScale={wait_scale_label} waitLogitBias={wait_bias_label}")
     print(f"timeLimit={args.time_limit}s maxSteps={args.max_steps_multiplier} | GPU: {use_gpu}")
     _print_preflight(preflight)
     print(f"Total runs: {total}")
@@ -230,8 +232,6 @@ def main():
             f"--tau={args.tau}",
             f"--waitThreshold={args.wait_thresh}",
             f"--waitMode={args.wait_mode}",
-            f"--waitLogitBias={args.wait_logit_bias}",
-            f"--waitLogitScale={args.wait_logit_scale}",
             f"--numConsensusSamples={args.consensus}",
             f"--policyType={simulator_policy_type}",
             f"--useActionHead={'True' if use_action_head else 'False'}",
@@ -239,6 +239,10 @@ def main():
             f"--hiddenDim={args.hidden_dim}",
             f"--numLayers={args.num_layers}",
         ]
+        if args.wait_logit_bias is not None:
+            cmd.append(f"--waitLogitBias={args.wait_logit_bias}")
+        if args.wait_logit_scale is not None:
+            cmd.append(f"--waitLogitScale={args.wait_logit_scale}")
         try:
             subprocess.run(cmd, check=False, timeout=args.time_limit + 120)
         except subprocess.TimeoutExpired:
