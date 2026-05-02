@@ -118,6 +118,13 @@ def main() -> int:
         "binary gate move mass is one minus wait",
         torch.allclose(gate_probs_unclipped[:, 1:].sum(dim=1), 1.0 - gate_probs_unclipped[:, 0], atol=1e-6),
     )
+    with torch.no_grad():
+        model.movement_logit_scale.fill_(9.0)
+        gate_probs_after_move_scale = model.binary_gate_action_probs(flow, wait_logit, tau=0.3)
+    report(
+        "binary gate ignores five-logit movement calibration",
+        torch.allclose(gate_probs_after_move_scale, gate_probs),
+    )
 
     targets = torch.tensor([0, 1, 4], dtype=torch.long)
     ce = torch.nn.functional.cross_entropy(model_hybrid_logits, targets)

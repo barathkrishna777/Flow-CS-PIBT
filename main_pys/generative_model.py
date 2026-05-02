@@ -169,7 +169,6 @@ class FlowGNNModel(nn.Module):
             wait_logit,
             wait_logit_scale=self.wait_logit_scale,
             wait_logit_bias=self.wait_logit_bias,
-            movement_logit_scale=self.movement_logit_scale,
             tau=tau,
         )
 
@@ -204,7 +203,6 @@ class FlowGNNModel(nn.Module):
         calibration_anchor = (
             0.0 * self.wait_logit_scale
             + 0.0 * self.wait_logit_bias
-            + 0.0 * self.movement_logit_scale
         )
         flow_output = flow_output + calibration_anchor
 

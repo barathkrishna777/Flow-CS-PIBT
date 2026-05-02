@@ -396,7 +396,6 @@ def runNNOnState(cur_locs, bd, grid_map, k, m, model, device, goal_locations, ti
                         wait_logit,
                         wait_logit_scale=wait_logit_scale,
                         wait_logit_bias=wait_logit_bias,
-                        movement_logit_scale=model.movement_logit_scale,
                         tau=args.tau,
                     ).cpu().numpy()
                 else:
