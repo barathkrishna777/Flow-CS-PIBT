@@ -65,7 +65,10 @@ def main():
 
     # Load model
     model = FlowGNNModel(k=4).to(device)
-    model.load_state_dict(torch.load("direct_overfit_best.pt", map_location=device, weights_only=True))
+    model.load_state_dict(
+        torch.load("direct_overfit_best.pt", map_location=device, weights_only=True),
+        strict=False,
+    )
     model.eval()
 
     # Load training data (the same file we overfit on)

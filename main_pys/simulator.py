@@ -15,7 +15,7 @@ import time
 from main_pys.model import GNNStack, CustomConv 
 from main_pys.model_inputs import create_data_object, normalize_graph_data, get_bd_prefs
 from main_pys.custom_timer import CustomTimer
-from main_pys.generative_model import FlowGNNModel
+from main_pys.generative_model import FlowGNNModel, hybrid_action_logits_from_velocity
 from main_pys.rishi_like_model import RishiLikeClassifier
 
 def str2bool(v: str) -> bool:
@@ -354,22 +354,31 @@ def runNNOnState(cur_locs, bd, grid_map, k, m, model, device, goal_locations, ti
                     timer.stop("forward_pass")
                     v = v + flow * dt
                 all_velocities += v
-            predicted_velocity = (all_velocities / num_samples).cpu().numpy()
+            velocity_tensor = all_velocities / num_samples
+            predicted_velocity = velocity_tensor.cpu().numpy()
 
-            # --- WAIT FIX: magnitude threshold ---
-            magnitudes = np.linalg.norm(predicted_velocity, axis=1)
-            should_wait = magnitudes < args.waitThreshold
+            if args.waitMode == "learned":
+                t_final = torch.full((n_agents, 1), 0.99, device=device)
+                timer.start("forward_pass")
+                _, wait_logit = model(velocity_tensor, t_final, data, return_wait_logit=True)
+                timer.stop("forward_pass")
+                scores = hybrid_action_logits_from_velocity(velocity_tensor, wait_logit).cpu().numpy()
+            else:
+                # --- WAIT FIX: magnitude threshold ---
+                magnitudes = np.linalg.norm(predicted_velocity, axis=1)
+                should_wait = magnitudes < args.waitThreshold
 
-            action_vectors = np.array([[0,0], [0,1], [1,0], [-1,0], [0,-1]])
-            scores = predicted_velocity @ action_vectors.T
+                action_vectors = np.array([[0,0], [0,1], [1,0], [-1,0], [0,-1]])
+                scores = predicted_velocity @ action_vectors.T
 
             scores = scores / args.tau
             scores = scores - np.max(scores, axis=1, keepdims=True)
             probs = np.exp(scores) / np.sum(np.exp(scores), axis=1, keepdims=True)
 
-            # For agents that should wait: set wait prob high, suppress others
-            probs[should_wait] = 0.01
-            probs[should_wait, 0] = 0.96  # action 0 = wait
+            if args.waitMode == "threshold":
+                # For agents that should wait: set wait prob high, suppress others
+                probs[should_wait] = 0.01
+                probs[should_wait, 0] = 0.96  # action 0 = wait
 
     return probs
 
@@ -378,9 +387,13 @@ def load_flow_model(args, device, k):
 
     checkpoint = torch.load(args.modelPath, map_location=device, weights_only=False)
     if 'model_state_dict' in checkpoint:
-        model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+        incompatible = model.load_state_dict(checkpoint['model_state_dict'], strict=False)
     else:
-        model.load_state_dict(checkpoint, strict=False)
+        incompatible = model.load_state_dict(checkpoint, strict=False)
+    if args.waitMode == "learned" and any(key.startswith("wait_head.") for key in incompatible.missing_keys):
+        print("WARNING: checkpoint has no learned wait_head weights; --waitMode learned will use a randomly initialized wait head.")
+    if incompatible.unexpected_keys:
+        print(f"WARNING: ignored unexpected checkpoint keys: {incompatible.unexpected_keys}")
     return model
 
 def load_classifier_model(args, device, k):
@@ -679,6 +692,10 @@ if __name__ == '__main__':
     parser.add_argument('--numIntegrationSteps', type=int, help="Euler integration steps (default 5)", default=5)
     parser.add_argument('--tau', type=float, help="Softmax temperature (default 0.3)", default=0.3)
     parser.add_argument('--waitThreshold', type=float, help="Wait magnitude threshold (default 0.25)", default=0.25)
+    parser.add_argument('--waitMode', '--wait-mode', dest='waitMode', type=str,
+                        choices=['threshold', 'learned'], default='threshold',
+                        help="Wait action scoring mode: threshold keeps the fixed velocity-magnitude wait rule; "
+                             "learned uses FlowGNNModel.wait_head for action-0 logit")
     parser.add_argument('--numConsensusSamples', type=int, help="Number of flow samples to average (default 3)", default=3)
     parser.add_argument('--useActionHead', type=lambda x: bool(str2bool(x)), help="Use auxiliary action head instead of flow (default False)", default=False)
     parser.add_argument('--actionHeadConditioning', type=str,

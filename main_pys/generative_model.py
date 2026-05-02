@@ -3,6 +3,27 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch_geometric.nn as pyg_nn
 
+
+CARDINAL_ACTION_VECTORS = torch.tensor(
+    [[0, 1], [1, 0], [-1, 0], [0, -1]],
+    dtype=torch.float32,
+)
+
+
+def hybrid_action_logits_from_velocity(predicted_velocity, wait_logit):
+    """Build logits as [wait, right, down, up, left].
+
+    Movement logits preserve the flow geometry via velocity dot products; the
+    wait logit is supplied by the learned wait head.
+    """
+    action_vectors = CARDINAL_ACTION_VECTORS.to(
+        device=predicted_velocity.device,
+        dtype=predicted_velocity.dtype,
+    )
+    movement_logits = predicted_velocity @ action_vectors.T
+    return torch.cat([wait_logit.view(-1, 1), movement_logits], dim=1)
+
+
 class FlowGNNModel(nn.Module):
     def __init__(
         self,
@@ -81,7 +102,15 @@ class FlowGNNModel(nn.Module):
             nn.Linear(action_head_dim, action_dim)
         )
 
-    def forward(self, v_t, t, data, return_action_logits=False):
+        # --- 5. Learned Wait Head (1-logit binary wait classifier) ---
+        self.wait_head = nn.Sequential(
+            nn.Linear(hidden_dim, action_head_dim),
+            nn.SiLU(),
+            nn.Dropout(0.15),
+            nn.Linear(action_head_dim, 1)
+        )
+
+    def forward(self, v_t, t, data, return_action_logits=False, return_wait_logit=False):
         x, edge_index = data.x, data.edge_index
         aux_features = getattr(data, "aux_features", None)
         if aux_features is None:
@@ -109,9 +138,18 @@ class FlowGNNModel(nn.Module):
         # 4. Predict velocity (flow output)
         flow_output = self.post_mp(node_features)
 
+        if return_action_logits and return_wait_logit:
+            action_logits = self.action_head(node_features)
+            wait_logit = self.wait_head(node_features).squeeze(-1)
+            return flow_output, action_logits, wait_logit
+
         if return_action_logits:
             # Auxiliary action logits from shared GNN features (detached from flow head)
             action_logits = self.action_head(node_features)
             return flow_output, action_logits
+
+        if return_wait_logit:
+            wait_logit = self.wait_head(node_features).squeeze(-1)
+            return flow_output, wait_logit
 
         return flow_output

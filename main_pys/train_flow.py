@@ -39,17 +39,24 @@ def velocity_to_action_labels(expert_velocities, device):
     return labels
 
 
+def _reduce_node_loss(loss, node_weights, unweighted):
+    if unweighted:
+        return loss.mean()
+    return (loss * node_weights.squeeze(1)).mean()
+
+
 def compute_flow_loss(
     model,
     batch,
     device,
     use_amp,
     action_loss_weight=0.3,
+    wait_head_loss_weight=0.0,
     unweighted_action_loss=False,
     unweighted_flow_loss=False,
     discrete_forward_mode="both",
 ):
-    """Shared flow matching loss computation for train and val, with optional auxiliary action loss."""
+    """Shared flow matching loss computation for train and val."""
     batch = batch.to(device)
     x_1 = batch.y.view(-1, 2)
     if hasattr(batch, "node_weights") and batch.node_weights is not None:
@@ -65,7 +72,46 @@ def compute_flow_loss(
     x_t = t * x_1 + (1 - t) * x_0
 
     with torch.cuda.amp.autocast(enabled=use_amp):
-        predicted_flow, action_logits = model(x_t, t, batch, return_action_logits=True)
+        need_action_loss = action_loss_weight > 0
+        need_wait_head_loss = wait_head_loss_weight > 0
+
+        def forward_discrete_heads(v, t_in):
+            if need_action_loss and need_wait_head_loss:
+                _, logits, wait = model(
+                    v,
+                    t_in,
+                    batch,
+                    return_action_logits=True,
+                    return_wait_logit=True,
+                )
+                return logits, wait
+            if need_action_loss:
+                _, logits = model(v, t_in, batch, return_action_logits=True)
+                return logits, None
+            if need_wait_head_loss:
+                _, wait = model(v, t_in, batch, return_wait_logit=True)
+                return None, wait
+            return None, None
+
+        if need_action_loss and need_wait_head_loss:
+            predicted_flow, action_logits, wait_logit = model(
+                x_t,
+                t,
+                batch,
+                return_action_logits=True,
+                return_wait_logit=True,
+            )
+        elif need_action_loss:
+            predicted_flow, action_logits = model(x_t, t, batch, return_action_logits=True)
+            wait_logit = None
+        elif need_wait_head_loss:
+            predicted_flow, wait_logit = model(x_t, t, batch, return_wait_logit=True)
+            action_logits = None
+        else:
+            predicted_flow = model(x_t, t, batch)
+            action_logits = None
+            wait_logit = None
+
         target_flow = x_1 - x_0
         base_loss = F.mse_loss(predicted_flow, target_flow, reduction='none')
         if unweighted_flow_loss:
@@ -73,51 +119,69 @@ def compute_flow_loss(
         else:
             flow_loss = (base_loss * node_weights).mean()
 
-        # Auxiliary action classification loss
-        if hasattr(batch, "action_y") and batch.action_y is not None:
-            expert_actions = batch.action_y.view(-1).long().to(device)
-        else:
-            expert_actions = velocity_to_action_labels(x_1, device)
+        zero = torch.tensor(0.0, device=device)
+        action_loss = zero
+        wait_head_loss = zero
 
-        # shared: use logits from the noisy forward (original behaviour)
-        action_loss = F.cross_entropy(action_logits, expert_actions, reduction='none')
-        if unweighted_action_loss:
-            action_loss = action_loss.mean()
-        else:
-            action_loss = (action_loss * node_weights.squeeze(1)).mean()
-
-        # zero_v: second forward with v=0, t=0 so head can't read answer from v_t
-        if discrete_forward_mode in ("zero_v", "both"):
-            zero_v = torch.zeros_like(x_1)
-            zero_t = torch.zeros(x_1.shape[0], 1, device=device)
-            _, action_logits_zero = model(zero_v, zero_t, batch, return_action_logits=True)
-            ce_zero = F.cross_entropy(action_logits_zero, expert_actions, reduction='none')
-            if unweighted_action_loss:
-                ce_zero = ce_zero.mean()
+        if need_action_loss or need_wait_head_loss:
+            # Auxiliary labels: 0=wait, 1=right, 2=down, 3=up, 4=left.
+            if hasattr(batch, "action_y") and batch.action_y is not None:
+                expert_actions = batch.action_y.view(-1).long().to(device)
             else:
-                ce_zero = (ce_zero * node_weights.squeeze(1)).mean()
+                expert_actions = velocity_to_action_labels(x_1, device)
+            target_wait = (expert_actions == 0).to(dtype=x_1.dtype)
 
-        # x1_t1: forward with (x_1, t=0.99) — matches integrated inference distribution exactly.
-        # The trunk sees (v≈x_1, t≈1) at inference; training on the ground-truth x_1 at t=0.99
-        # is the cleanest way to teach the action head without the shortcut.
-        if discrete_forward_mode in ("x1_t1",):
-            t_high = torch.full((x_1.shape[0], 1), 0.99, device=device)
-            _, action_logits_x1 = model(x_1, t_high, batch, return_action_logits=True)
-            ce_x1 = F.cross_entropy(action_logits_x1, expert_actions, reduction='none')
-            if unweighted_action_loss:
-                ce_x1 = ce_x1.mean()
-            else:
-                ce_x1 = (ce_x1 * node_weights.squeeze(1)).mean()
+            def compute_discrete_losses(logits, wait):
+                cur_action_loss = zero
+                cur_wait_loss = zero
+                if need_action_loss:
+                    ce = F.cross_entropy(logits, expert_actions, reduction='none')
+                    cur_action_loss = _reduce_node_loss(ce, node_weights, unweighted_action_loss)
+                if need_wait_head_loss:
+                    bce = F.binary_cross_entropy_with_logits(
+                        wait.view(-1),
+                        target_wait.to(dtype=wait.dtype),
+                        reduction='none',
+                    )
+                    cur_wait_loss = _reduce_node_loss(bce, node_weights, unweighted_action_loss)
+                return cur_action_loss, cur_wait_loss
 
-        if discrete_forward_mode == "zero_v":
-            action_loss = ce_zero
-        elif discrete_forward_mode == "both":
-            action_loss = 0.5 * action_loss + 0.5 * ce_zero
-        elif discrete_forward_mode == "x1_t1":
-            action_loss = ce_x1
-        # else "shared": keep action_loss as computed above
+            # shared: use logits from the noisy forward (original behaviour)
+            action_loss, wait_head_loss = compute_discrete_losses(action_logits, wait_logit)
 
-        loss = flow_loss + action_loss_weight * action_loss
+            # zero_v: second forward with v=0, t=0 so heads can't read answer from v_t
+            if discrete_forward_mode in ("zero_v", "both"):
+                zero_v = torch.zeros_like(x_1)
+                zero_t = torch.zeros(x_1.shape[0], 1, device=device)
+                action_logits_zero, wait_logit_zero = forward_discrete_heads(zero_v, zero_t)
+                action_loss_zero, wait_loss_zero = compute_discrete_losses(
+                    action_logits_zero,
+                    wait_logit_zero,
+                )
+
+            # x1_t1: forward with (x_1, t=0.99) — matches integrated inference distribution.
+            # The trunk sees (v≈x_1, t≈1) at inference; training on ground-truth x_1 at
+            # t=0.99 teaches the discrete heads on the same conditioning.
+            if discrete_forward_mode in ("x1_t1",):
+                t_high = torch.full((x_1.shape[0], 1), 0.99, device=device)
+                action_logits_x1, wait_logit_x1 = forward_discrete_heads(x_1, t_high)
+                action_loss_x1, wait_loss_x1 = compute_discrete_losses(
+                    action_logits_x1,
+                    wait_logit_x1,
+                )
+
+            if discrete_forward_mode == "zero_v":
+                action_loss = action_loss_zero
+                wait_head_loss = wait_loss_zero
+            elif discrete_forward_mode == "both":
+                action_loss = 0.5 * action_loss + 0.5 * action_loss_zero
+                wait_head_loss = 0.5 * wait_head_loss + 0.5 * wait_loss_zero
+            elif discrete_forward_mode == "x1_t1":
+                action_loss = action_loss_x1
+                wait_head_loss = wait_loss_x1
+            # else "shared": keep losses from the noisy forward
+
+        loss = flow_loss + action_loss_weight * action_loss + wait_head_loss_weight * wait_head_loss
 
     return loss
 
@@ -128,6 +192,7 @@ def validate(
     device,
     use_amp,
     action_loss_weight,
+    wait_head_loss_weight,
     unweighted_action_loss,
     unweighted_flow_loss,
     discrete_forward_mode="both",
@@ -144,6 +209,7 @@ def validate(
                 device,
                 use_amp,
                 action_loss_weight=action_loss_weight,
+                wait_head_loss_weight=wait_head_loss_weight,
                 unweighted_action_loss=unweighted_action_loss,
                 unweighted_flow_loss=unweighted_flow_loss,
                 discrete_forward_mode=discrete_forward_mode,
@@ -156,12 +222,16 @@ def validate(
 def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", wandb_entity=None,
           preprocessed_dir=None, no_weighted_sampling=False, val_split=0.05, patience=0,
           resume=None, start_epoch=0, hidden_dim=1024, num_layers=6,
-          action_loss_weight=0.3, unweighted_action_loss=False,
+          action_loss_weight=0.3, wait_head_loss_weight=0.0, unweighted_action_loss=False,
           unweighted_flow_loss=False, epochs=10, discrete_forward_mode="both",
-          reset_best_val_loss=False, action_head_only=False, action_head_lr=5e-4):
+          reset_best_val_loss=False, action_head_only=False, action_head_lr=5e-4,
+          wait_head_only=False, wait_head_lr=5e-4):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_amp = device.type == "cuda"
     print(f"Device: {device} | AMP: {use_amp}")
+
+    if wait_head_only and wait_head_loss_weight <= 0:
+        raise ValueError("--wait-head-only requires --wait-head-loss-weight > 0")
 
     # Find preprocessed data: CLI override > external drive > local
     pp_dir = preprocessed_dir
@@ -240,12 +310,27 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
 
     model = FlowGNNModel(hidden_dim=hidden_dim, num_layers=num_layers).to(device)
 
-    if action_head_only:
+    if action_head_only or wait_head_only:
+        trainable_groups = []
         for name, param in model.named_parameters():
-            param.requires_grad = name.startswith("action_head.")
-        trainable = [p for p in model.parameters() if p.requires_grad]
-        print(f"action_head_only: freezing trunk, training {sum(p.numel() for p in trainable):,} action_head params at lr={action_head_lr}")
-        optimizer = AdamW(trainable, lr=action_head_lr, weight_decay=1e-4)
+            train_action = action_head_only and name.startswith("action_head.")
+            train_wait = wait_head_only and name.startswith("wait_head.")
+            param.requires_grad = train_action or train_wait
+        if action_head_only:
+            action_params = [p for n, p in model.named_parameters() if n.startswith("action_head.") and p.requires_grad]
+            if action_params:
+                trainable_groups.append({"params": action_params, "lr": action_head_lr})
+        if wait_head_only:
+            wait_params = [p for n, p in model.named_parameters() if n.startswith("wait_head.") and p.requires_grad]
+            if wait_params:
+                trainable_groups.append({"params": wait_params, "lr": wait_head_lr})
+        trainable = [p for group in trainable_groups for p in group["params"]]
+        print(
+            "head_only: freezing trunk, training "
+            f"{sum(p.numel() for p in trainable):,} params "
+            f"(action_head={action_head_only}, wait_head={wait_head_only})"
+        )
+        optimizer = AdamW(trainable_groups, weight_decay=1e-4)
     else:
         optimizer = AdamW(model.parameters(), lr=1e-4, weight_decay=1e-4)
 
@@ -263,29 +348,47 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
         ckpt = torch.load(resume, map_location=device)
         if isinstance(ckpt, dict) and 'model_state_dict' in ckpt:
             # Full checkpoint (model + optimizer + scheduler + metadata)
-            model.load_state_dict(ckpt['model_state_dict'])
-            if action_head_only:
-                # Optimizer only covers action_head params — skip incompatible full-model state
+            incompatible = model.load_state_dict(ckpt['model_state_dict'], strict=False)
+            if incompatible.missing_keys:
+                print(f"  Missing checkpoint keys initialized from scratch: {incompatible.missing_keys}")
+            if incompatible.unexpected_keys:
+                print(f"  Unexpected checkpoint keys ignored: {incompatible.unexpected_keys}")
+            if action_head_only or wait_head_only:
+                # Optimizer only covers selected head params — skip incompatible full-model state
                 start_epoch = ckpt['epoch']
                 epochs = start_epoch + epochs
                 scheduler = CosineAnnealingLR(optimizer, T_max=max(epochs - start_epoch, 1), eta_min=1e-6)
                 best_val_loss = float('inf')
-                print(f"  Loaded model weights (action_head_only: skipping optimizer/scheduler state). "
+                print(f"  Loaded model weights (head_only: skipping optimizer/scheduler state). "
                       f"Resuming from epoch {start_epoch + 1}, running until epoch {epochs}")
             else:
-                optimizer.load_state_dict(ckpt['optimizer_state_dict'])
-                scheduler.load_state_dict(ckpt['scheduler_state_dict'])
-                if ckpt.get('scaler_state_dict'):
-                    scaler.load_state_dict(ckpt['scaler_state_dict'])
+                loaded_optimizer = False
+                try:
+                    optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+                    loaded_optimizer = True
+                except (KeyError, ValueError) as exc:
+                    print(f"  Skipping optimizer state (architecture changed): {exc}")
+                if loaded_optimizer:
+                    try:
+                        scheduler.load_state_dict(ckpt['scheduler_state_dict'])
+                    except (KeyError, ValueError) as exc:
+                        print(f"  Skipping scheduler state: {exc}")
+                    if ckpt.get('scaler_state_dict'):
+                        scaler.load_state_dict(ckpt['scaler_state_dict'])
                 start_epoch = ckpt['epoch']  # epoch is already 1-indexed, use as start
                 epochs = start_epoch + epochs  # --epochs means additional epochs when resuming
                 # Rebuild scheduler so T_max matches the actual number of epochs to run
                 scheduler = CosineAnnealingLR(optimizer, T_max=max(epochs - start_epoch, 1), eta_min=1e-6)
                 best_val_loss = float('inf') if reset_best_val_loss else ckpt.get('best_val_loss', float('inf'))
-                print(f"  Restored full state: resuming from epoch {start_epoch + 1}, running until epoch {epochs}, best_val={'reset' if reset_best_val_loss else f'{best_val_loss:.4f}'}")
+                state_msg = "full state" if loaded_optimizer else "model weights"
+                print(f"  Restored {state_msg}: resuming from epoch {start_epoch + 1}, running until epoch {epochs}, best_val={'reset' if reset_best_val_loss else f'{best_val_loss:.4f}'}")
         else:
             # Legacy checkpoint (model weights only)
-            model.load_state_dict(ckpt)
+            incompatible = model.load_state_dict(ckpt, strict=False)
+            if incompatible.missing_keys:
+                print(f"  Missing checkpoint keys initialized from scratch: {incompatible.missing_keys}")
+            if incompatible.unexpected_keys:
+                print(f"  Unexpected checkpoint keys ignored: {incompatible.unexpected_keys}")
             print(f"  Loaded model weights only (legacy checkpoint). Fast-forwarding scheduler {start_epoch} steps.")
             for _ in range(start_epoch):
                 scheduler.step()
@@ -316,9 +419,12 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
             "val_split": val_split,
             "patience": patience,
             "action_loss_weight": action_loss_weight,
+            "wait_head_loss_weight": wait_head_loss_weight,
             "unweighted_action_loss": unweighted_action_loss,
             "unweighted_flow_loss": unweighted_flow_loss,
             "discrete_forward_mode": discrete_forward_mode,
+            "action_head_only": action_head_only,
+            "wait_head_only": wait_head_only,
         })
 
     log_batch_every = 10
@@ -329,6 +435,7 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
         f"flow={'unweighted' if unweighted_flow_loss else 'weighted'}, "
         f"action={'unweighted' if unweighted_action_loss else 'weighted'}, "
         f"action_loss_weight={action_loss_weight}, "
+        f"wait_head_loss_weight={wait_head_loss_weight}, "
         f"discrete_forward_mode={discrete_forward_mode}"
     )
 
@@ -356,6 +463,7 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
                 device,
                 use_amp,
                 action_loss_weight=action_loss_weight,
+                wait_head_loss_weight=wait_head_loss_weight,
                 unweighted_action_loss=unweighted_action_loss,
                 unweighted_flow_loss=unweighted_flow_loss,
                 discrete_forward_mode=discrete_forward_mode,
@@ -403,6 +511,7 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
                 device,
                 use_amp,
                 action_loss_weight=action_loss_weight,
+                wait_head_loss_weight=wait_head_loss_weight,
                 unweighted_action_loss=unweighted_action_loss,
                 unweighted_flow_loss=unweighted_flow_loss,
                 discrete_forward_mode=discrete_forward_mode,
@@ -420,6 +529,15 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
                     'optimizer_state_dict': optimizer.state_dict(),
                     'scheduler_state_dict': scheduler.state_dict(),
                     'scaler_state_dict': scaler.state_dict(),
+                    'model_config': {
+                        'hidden_dim': hidden_dim,
+                        'num_layers': num_layers,
+                    },
+                    'loss_config': {
+                        'action_loss_weight': action_loss_weight,
+                        'wait_head_loss_weight': wait_head_loss_weight,
+                        'discrete_forward_mode': discrete_forward_mode,
+                    },
                     'train_loss': avg_train_loss,
                     'val_loss': val_loss,
                     'best_val_loss': best_val_loss,
@@ -441,6 +559,15 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
             'optimizer_state_dict': optimizer.state_dict(),
             'scheduler_state_dict': scheduler.state_dict(),
             'scaler_state_dict': scaler.state_dict(),
+            'model_config': {
+                'hidden_dim': hidden_dim,
+                'num_layers': num_layers,
+            },
+            'loss_config': {
+                'action_loss_weight': action_loss_weight,
+                'wait_head_loss_weight': wait_head_loss_weight,
+                'discrete_forward_mode': discrete_forward_mode,
+            },
             'train_loss': avg_train_loss,
             'val_loss': val_loss,
             'best_val_loss': best_val_loss,
@@ -512,8 +639,10 @@ if __name__ == "__main__":
                         help="Number of GNN layers (default: 6)")
     parser.add_argument("--action-loss-weight", type=float, default=0.3,
                         help="Weight for auxiliary/exact discrete action cross entropy")
+    parser.add_argument("--wait-head-loss-weight", type=float, default=0.0,
+                        help="Weight for learned wait-head BCE loss. Default 0 keeps legacy training unchanged")
     parser.add_argument("--unweighted-action-loss", action="store_true",
-                        help="Do not apply node_weights to the action cross entropy loss")
+                        help="Do not apply node_weights to the action/wait-head losses")
     parser.add_argument("--unweighted-flow-loss", action="store_true",
                         help="Do not apply node_weights to the flow MSE loss")
     parser.add_argument("--epochs", type=int, default=10,
@@ -529,6 +658,10 @@ if __name__ == "__main__":
                         help="Freeze all trunk params, train only action_head (for isolated head repair)")
     parser.add_argument("--action-head-lr", type=float, default=5e-4,
                         help="LR for action_head_only mode (default: 5e-4)")
+    parser.add_argument("--wait-head-only", action="store_true",
+                        help="Freeze all trunk params, train only wait_head (for learned wait-logit finetuning)")
+    parser.add_argument("--wait-head-lr", type=float, default=5e-4,
+                        help="LR for wait_head_only mode (default: 5e-4)")
     args = parser.parse_args()
     train(run_name=args.run_name, quick=args.quick, use_wandb=not args.no_wandb,
           wandb_project=args.wandb_project, wandb_entity=args.wandb_entity,
@@ -538,10 +671,13 @@ if __name__ == "__main__":
           resume=args.resume, start_epoch=args.start_epoch,
           hidden_dim=args.hidden_dim, num_layers=args.num_layers,
           action_loss_weight=args.action_loss_weight,
+          wait_head_loss_weight=args.wait_head_loss_weight,
           unweighted_action_loss=args.unweighted_action_loss,
           unweighted_flow_loss=args.unweighted_flow_loss,
           epochs=args.epochs,
           discrete_forward_mode=args.discrete_forward_mode,
           reset_best_val_loss=args.reset_best_val_loss,
           action_head_only=args.action_head_only,
-          action_head_lr=args.action_head_lr)
+          action_head_lr=args.action_head_lr,
+          wait_head_only=args.wait_head_only,
+          wait_head_lr=args.wait_head_lr)

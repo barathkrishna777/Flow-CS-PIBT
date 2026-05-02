@@ -148,9 +148,9 @@ def main():
     model = FlowGNNModel(k=k).to(device)
     checkpoint = torch.load(args.modelPath, map_location=device, weights_only=True)
     if 'model_state_dict' in checkpoint:
-        model.load_state_dict(checkpoint['model_state_dict'])
+        model.load_state_dict(checkpoint['model_state_dict'], strict=False)
     else:
-        model.load_state_dict(checkpoint)
+        model.load_state_dict(checkpoint, strict=False)
     model.eval()
 
     np.random.seed(args.seed)

@@ -107,6 +107,8 @@ def main():
     p.add_argument("--consensus", type=int, default=3)
     p.add_argument("--tau", type=float, default=0.3)
     p.add_argument("--wait-thresh", type=float, default=0.25)
+    p.add_argument("--wait-mode", choices=["threshold", "learned"], default="threshold",
+                   help="Flow wait action mode: threshold uses --wait-thresh; learned uses FlowGNNModel.wait_head")
     p.add_argument("--policy-type", choices=["flow", "classifier", "flow_action_head", "local_classifier", "pibt"], default="flow",
                    help="Policy/model family to evaluate. pibt is the non-learned BD-guided PIBT baseline and does not load a checkpoint.")
     p.add_argument("--hidden-dim", type=int, default=1024)
@@ -192,6 +194,7 @@ def main():
     print(f"Scenarios/map: <= {max_scen} | Agents: {agent_counts[0]}..{agent_counts[-1]}")
     print(f"Policy: {args.policy_type}")
     print(f"steps={args.num_integration_steps} consensus={args.consensus} tau={args.tau}")
+    print(f"waitMode={args.wait_mode} waitThresh={args.wait_thresh}")
     print(f"timeLimit={args.time_limit}s maxSteps={args.max_steps_multiplier} | GPU: {use_gpu}")
     _print_preflight(preflight)
     print(f"Total runs: {total}")
@@ -221,6 +224,7 @@ def main():
             f"--numIntegrationSteps={args.num_integration_steps}",
             f"--tau={args.tau}",
             f"--waitThreshold={args.wait_thresh}",
+            f"--waitMode={args.wait_mode}",
             f"--numConsensusSamples={args.consensus}",
             f"--policyType={simulator_policy_type}",
             f"--useActionHead={'True' if use_action_head else 'False'}",

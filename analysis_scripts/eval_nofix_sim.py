@@ -95,8 +95,8 @@ def main():
     device = torch.device("cuda:0" if torch.cuda.is_available() and args.useGPU else "cpu")
     model = FlowGNNModel(k=k).to(device)
     checkpoint = torch.load(args.modelPath, map_location=device, weights_only=True)
-    if 'model_state_dict' in checkpoint: model.load_state_dict(checkpoint['model_state_dict'])
-    else: model.load_state_dict(checkpoint)
+    if 'model_state_dict' in checkpoint: model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+    else: model.load_state_dict(checkpoint, strict=False)
     model.eval()
     np.random.seed(args.seed); torch.manual_seed(args.seed)
     if args.maxSteps.endswith('x'):
