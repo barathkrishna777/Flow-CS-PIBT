@@ -32,6 +32,27 @@ def hybrid_action_logits_from_velocity(
     return torch.cat([calibrated_wait, movement_logits], dim=1)
 
 
+def wait_ranking_logits_from_velocity(
+    predicted_velocity,
+    wait_logit,
+    wait_logit_scale=1.0,
+    wait_logit_bias=0.0,
+):
+    """Build planner-aligned scores as [calibrated wait, right, down, up, left].
+
+    Unlike the five-logit hybrid interface, movement scores are raw velocity dot
+    products. The ranking loss compares the calibrated wait score directly
+    against the movement ordering that PIBT consumes.
+    """
+    action_vectors = CARDINAL_ACTION_VECTORS.to(
+        device=predicted_velocity.device,
+        dtype=predicted_velocity.dtype,
+    )
+    calibrated_wait = wait_logit_scale * wait_logit.view(-1, 1) + wait_logit_bias
+    movement_logits = predicted_velocity @ action_vectors.T
+    return torch.cat([calibrated_wait, movement_logits], dim=1)
+
+
 def binary_gate_action_probs_from_velocity(
     predicted_velocity,
     wait_logit,
@@ -163,6 +184,14 @@ class FlowGNNModel(nn.Module):
             movement_logit_scale=self.movement_logit_scale,
         )
 
+    def wait_ranking_logits(self, velocity_for_logits, wait_logit):
+        return wait_ranking_logits_from_velocity(
+            velocity_for_logits,
+            wait_logit,
+            wait_logit_scale=self.wait_logit_scale,
+            wait_logit_bias=self.wait_logit_bias,
+        )
+
     def binary_gate_action_probs(self, velocity_for_logits, wait_logit, tau=1.0):
         return binary_gate_action_probs_from_velocity(
             velocity_for_logits,
@@ -182,6 +211,8 @@ class FlowGNNModel(nn.Module):
         return_calibrated_wait_logit=False,
         return_hybrid_logits=False,
         hybrid_velocity_for_logits=None,
+        return_wait_ranking_logits=False,
+        wait_ranking_velocity_for_logits=None,
     ):
         x, edge_index = data.x, data.edge_index
         aux_features = getattr(data, "aux_features", None)
@@ -215,7 +246,12 @@ class FlowGNNModel(nn.Module):
             # Auxiliary action logits from shared GNN features (detached from flow head)
             outputs.append(self.action_head(node_features))
 
-        need_wait_logit = return_wait_logit or return_calibrated_wait_logit or return_hybrid_logits
+        need_wait_logit = (
+            return_wait_logit
+            or return_calibrated_wait_logit
+            or return_hybrid_logits
+            or return_wait_ranking_logits
+        )
         wait_logit = None
         if need_wait_logit:
             wait_logit = self.wait_head(node_features).squeeze(-1)
@@ -227,6 +263,10 @@ class FlowGNNModel(nn.Module):
             if hybrid_velocity_for_logits is None:
                 hybrid_velocity_for_logits = v_t + (1 - t) * flow_output
             outputs.append(self.hybrid_action_logits(hybrid_velocity_for_logits, wait_logit))
+        if return_wait_ranking_logits:
+            if wait_ranking_velocity_for_logits is None:
+                wait_ranking_velocity_for_logits = v_t + (1 - t) * flow_output
+            outputs.append(self.wait_ranking_logits(wait_ranking_velocity_for_logits, wait_logit))
 
         if len(outputs) == 1:
             return flow_output

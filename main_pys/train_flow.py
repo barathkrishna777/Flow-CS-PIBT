@@ -150,10 +150,43 @@ def velocity_to_action_labels(expert_velocities, device):
     return labels
 
 
-def _reduce_node_loss(loss, node_weights, unweighted):
-    if unweighted:
-        return loss.mean()
-    return (loss * node_weights.squeeze(1)).mean()
+def _reduce_node_loss(loss, node_weights, unweighted, extra_weights=None):
+    weights = torch.ones_like(node_weights) if unweighted else node_weights
+    if extra_weights is not None:
+        weights = weights * extra_weights
+    return (loss * weights.squeeze(1)).mean()
+
+
+def _stress_node_weights(batch, threshold, multiplier, device, dtype):
+    if multiplier == 1.0:
+        return None
+    if not hasattr(batch, "batch") or batch.batch is None:
+        return None
+    batch_index = batch.batch.to(device)
+    if batch_index.numel() == 0:
+        return None
+    num_graphs = int(batch_index.max().item()) + 1
+    graph_counts = torch.bincount(batch_index, minlength=num_graphs)
+    graph_multipliers = torch.ones(num_graphs, device=device, dtype=dtype)
+    graph_multipliers = torch.where(
+        graph_counts.to(device) >= threshold,
+        torch.full_like(graph_multipliers, float(multiplier)),
+        graph_multipliers,
+    )
+    return graph_multipliers[batch_index].view(-1, 1)
+
+
+def wait_ranking_loss_from_logits(ranking_logits, expert_actions, margin=0.5):
+    """Pairwise wait-vs-move ranking loss for scores [wait, right, down, up, left]."""
+    wait_score = ranking_logits[:, 0]
+    movement_scores = ranking_logits[:, 1:]
+    is_wait = expert_actions == 0
+
+    wait_target_loss = F.softplus(movement_scores.max(dim=1).values + margin - wait_score)
+    move_indices = (expert_actions - 1).clamp(min=0)
+    preferred_move_score = movement_scores.gather(1, move_indices.view(-1, 1)).squeeze(1)
+    move_target_loss = F.softplus(wait_score + margin - preferred_move_score)
+    return torch.where(is_wait, wait_target_loss, move_target_loss)
 
 
 def compute_flow_loss(
@@ -165,6 +198,11 @@ def compute_flow_loss(
     wait_head_loss_weight=0.0,
     hybrid_action_loss_weight=0.0,
     hybrid_velocity_source="teacher_x1",
+    wait_ranking_loss_weight=0.0,
+    wait_ranking_margin=0.5,
+    wait_ranking_velocity_source="teacher_x1",
+    stress_loss_multiplier=1.0,
+    stress_agent_threshold=300,
     unweighted_action_loss=False,
     unweighted_flow_loss=False,
     discrete_forward_mode="both",
@@ -188,18 +226,19 @@ def compute_flow_loss(
         need_action_loss = action_loss_weight > 0
         need_wait_head_loss = wait_head_loss_weight > 0
         need_hybrid_loss = hybrid_action_loss_weight > 0
-        need_wait_logit = need_wait_head_loss or need_hybrid_loss
+        need_wait_ranking_loss = wait_ranking_loss_weight > 0
+        need_wait_logit = need_wait_head_loss or need_hybrid_loss or need_wait_ranking_loss
         need_discrete_loss = need_action_loss or need_wait_logit
         use_shared_discrete = need_discrete_loss and discrete_forward_mode in ("shared", "both")
 
-        def hybrid_velocity_arg():
-            if not need_hybrid_loss:
+        def velocity_arg(active, source):
+            if not active:
                 return None
-            if hybrid_velocity_source == "teacher_x1":
+            if source == "teacher_x1":
                 return x_1
-            if hybrid_velocity_source == "predicted_x1":
+            if source == "predicted_x1":
                 return None
-            raise ValueError(f"Unknown hybrid_velocity_source: {hybrid_velocity_source}")
+            raise ValueError(f"Unknown velocity source: {source}")
 
         def unpack_discrete_forward(outputs):
             if not isinstance(outputs, tuple):
@@ -211,6 +250,7 @@ def compute_flow_loss(
             wait = None
             calibrated_wait = None
             hybrid_logits = None
+            ranking_logits = None
             if need_action_loss:
                 logits = outputs[idx]
                 idx += 1
@@ -222,7 +262,10 @@ def compute_flow_loss(
                 idx += 1
             if need_hybrid_loss:
                 hybrid_logits = outputs[idx]
-            return flow, logits, wait, calibrated_wait, hybrid_logits
+                idx += 1
+            if need_wait_ranking_loss:
+                ranking_logits = outputs[idx]
+            return flow, logits, wait, calibrated_wait, hybrid_logits, ranking_logits
 
         def forward_discrete_heads(v, t_in):
             outputs = model(
@@ -233,12 +276,24 @@ def compute_flow_loss(
                 return_wait_logit=need_wait_logit,
                 return_calibrated_wait_logit=need_wait_head_loss,
                 return_hybrid_logits=need_hybrid_loss,
-                hybrid_velocity_for_logits=hybrid_velocity_arg(),
+                hybrid_velocity_for_logits=velocity_arg(need_hybrid_loss, hybrid_velocity_source),
+                return_wait_ranking_logits=need_wait_ranking_loss,
+                wait_ranking_velocity_for_logits=velocity_arg(
+                    need_wait_ranking_loss,
+                    wait_ranking_velocity_source,
+                ),
             )
             return unpack_discrete_forward(outputs)
 
         if use_shared_discrete:
-            predicted_flow, action_logits, wait_logit, calibrated_wait_logit, hybrid_logits = (
+            (
+                predicted_flow,
+                action_logits,
+                wait_logit,
+                calibrated_wait_logit,
+                hybrid_logits,
+                ranking_logits,
+            ) = (
                 forward_discrete_heads(x_t, t)
             )
         else:
@@ -247,6 +302,7 @@ def compute_flow_loss(
             wait_logit = None
             calibrated_wait_logit = None
             hybrid_logits = None
+            ranking_logits = None
 
         target_flow = x_1 - x_0
         base_loss = F.mse_loss(predicted_flow, target_flow, reduction='none')
@@ -259,6 +315,7 @@ def compute_flow_loss(
         action_loss = zero
         wait_head_loss = zero
         hybrid_action_loss = zero
+        wait_ranking_loss = zero
 
         if need_discrete_loss:
             # Auxiliary labels: 0=wait, 1=right, 2=down, 3=up, 4=left.
@@ -267,11 +324,19 @@ def compute_flow_loss(
             else:
                 expert_actions = velocity_to_action_labels(x_1, device)
             target_wait = (expert_actions == 0).to(dtype=x_1.dtype)
+            stress_weights = _stress_node_weights(
+                batch,
+                stress_agent_threshold,
+                stress_loss_multiplier,
+                device,
+                node_weights.dtype,
+            )
 
-            def compute_discrete_losses(logits, calibrated_wait, hybrid):
+            def compute_discrete_losses(logits, calibrated_wait, hybrid, ranking):
                 cur_action_loss = zero
                 cur_wait_loss = zero
                 cur_hybrid_loss = zero
+                cur_ranking_loss = zero
                 if need_action_loss:
                     ce = F.cross_entropy(logits, expert_actions, reduction='none')
                     cur_action_loss = _reduce_node_loss(ce, node_weights, unweighted_action_loss)
@@ -289,14 +354,27 @@ def compute_flow_loss(
                         node_weights,
                         unweighted_action_loss,
                     )
-                return cur_action_loss, cur_wait_loss, cur_hybrid_loss
+                if need_wait_ranking_loss:
+                    ranking_node_loss = wait_ranking_loss_from_logits(
+                        ranking,
+                        expert_actions,
+                        margin=wait_ranking_margin,
+                    )
+                    cur_ranking_loss = _reduce_node_loss(
+                        ranking_node_loss,
+                        node_weights,
+                        unweighted_action_loss,
+                        extra_weights=stress_weights,
+                    )
+                return cur_action_loss, cur_wait_loss, cur_hybrid_loss, cur_ranking_loss
 
             # shared: use logits from the noisy forward (original behaviour)
             if use_shared_discrete:
-                action_loss, wait_head_loss, hybrid_action_loss = compute_discrete_losses(
+                action_loss, wait_head_loss, hybrid_action_loss, wait_ranking_loss = compute_discrete_losses(
                     action_logits,
                     calibrated_wait_logit,
                     hybrid_logits,
+                    ranking_logits,
                 )
 
             # zero_v: second forward with v=0, t=0 so heads can't read answer from v_t
@@ -309,11 +387,13 @@ def compute_flow_loss(
                     wait_logit_zero,
                     calibrated_wait_logit_zero,
                     hybrid_logits_zero,
+                    ranking_logits_zero,
                 ) = forward_discrete_heads(zero_v, zero_t)
-                action_loss_zero, wait_loss_zero, hybrid_loss_zero = compute_discrete_losses(
+                action_loss_zero, wait_loss_zero, hybrid_loss_zero, ranking_loss_zero = compute_discrete_losses(
                     action_logits_zero,
                     calibrated_wait_logit_zero,
                     hybrid_logits_zero,
+                    ranking_logits_zero,
                 )
 
             # x1_t1: forward with (x_1, t=0.99) — matches integrated inference distribution.
@@ -327,25 +407,30 @@ def compute_flow_loss(
                     wait_logit_x1,
                     calibrated_wait_logit_x1,
                     hybrid_logits_x1,
+                    ranking_logits_x1,
                 ) = forward_discrete_heads(x_1, t_high)
-                action_loss_x1, wait_loss_x1, hybrid_loss_x1 = compute_discrete_losses(
+                action_loss_x1, wait_loss_x1, hybrid_loss_x1, ranking_loss_x1 = compute_discrete_losses(
                     action_logits_x1,
                     calibrated_wait_logit_x1,
                     hybrid_logits_x1,
+                    ranking_logits_x1,
                 )
 
             if discrete_forward_mode == "zero_v":
                 action_loss = action_loss_zero
                 wait_head_loss = wait_loss_zero
                 hybrid_action_loss = hybrid_loss_zero
+                wait_ranking_loss = ranking_loss_zero
             elif discrete_forward_mode == "both":
                 action_loss = 0.5 * action_loss + 0.5 * action_loss_zero
                 wait_head_loss = 0.5 * wait_head_loss + 0.5 * wait_loss_zero
                 hybrid_action_loss = 0.5 * hybrid_action_loss + 0.5 * hybrid_loss_zero
+                wait_ranking_loss = 0.5 * wait_ranking_loss + 0.5 * ranking_loss_zero
             elif discrete_forward_mode == "x1_t1":
                 action_loss = action_loss_x1
                 wait_head_loss = wait_loss_x1
                 hybrid_action_loss = hybrid_loss_x1
+                wait_ranking_loss = ranking_loss_x1
             # else "shared": keep losses from the noisy forward
 
         loss = (
@@ -353,6 +438,7 @@ def compute_flow_loss(
             + action_loss_weight * action_loss
             + wait_head_loss_weight * wait_head_loss
             + hybrid_action_loss_weight * hybrid_action_loss
+            + wait_ranking_loss_weight * wait_ranking_loss
         )
 
     return loss
@@ -367,6 +453,11 @@ def validate(
     wait_head_loss_weight,
     hybrid_action_loss_weight,
     hybrid_velocity_source,
+    wait_ranking_loss_weight,
+    wait_ranking_margin,
+    wait_ranking_velocity_source,
+    stress_loss_multiplier,
+    stress_agent_threshold,
     unweighted_action_loss,
     unweighted_flow_loss,
     discrete_forward_mode="both",
@@ -387,6 +478,11 @@ def validate(
                 wait_head_loss_weight=wait_head_loss_weight,
                 hybrid_action_loss_weight=hybrid_action_loss_weight,
                 hybrid_velocity_source=hybrid_velocity_source,
+                wait_ranking_loss_weight=wait_ranking_loss_weight,
+                wait_ranking_margin=wait_ranking_margin,
+                wait_ranking_velocity_source=wait_ranking_velocity_source,
+                stress_loss_multiplier=stress_loss_multiplier,
+                stress_agent_threshold=stress_agent_threshold,
                 unweighted_action_loss=unweighted_action_loss,
                 unweighted_flow_loss=unweighted_flow_loss,
                 discrete_forward_mode=discrete_forward_mode,
@@ -406,7 +502,9 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
           max_train_samples=None, max_val_samples=None,
           resume=None, start_epoch=0, hidden_dim=1024, num_layers=6,
           action_loss_weight=0.3, wait_head_loss_weight=0.0, hybrid_action_loss_weight=0.0,
-          hybrid_velocity_source="teacher_x1", unweighted_action_loss=False,
+          hybrid_velocity_source="teacher_x1", wait_ranking_loss_weight=0.0,
+          wait_ranking_margin=0.5, wait_ranking_velocity_source="teacher_x1",
+          stress_loss_multiplier=1.0, stress_agent_threshold=300, unweighted_action_loss=False,
           unweighted_flow_loss=False, epochs=10, discrete_forward_mode="both",
           reset_best_val_loss=False, action_head_only=False, action_head_lr=5e-4,
           wait_head_only=False, wait_head_lr=5e-4, calibration_only=False,
@@ -423,12 +521,12 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
         + (f" | DDP world_size={ddp_info['world_size']}" if ddp_info["enabled"] else "")
     )
 
-    if wait_head_only and wait_head_loss_weight <= 0 and hybrid_action_loss_weight <= 0:
-        raise ValueError("--wait-head-only requires --wait-head-loss-weight > 0 or --hybrid-action-loss-weight > 0")
+    if wait_head_only and wait_head_loss_weight <= 0 and hybrid_action_loss_weight <= 0 and wait_ranking_loss_weight <= 0:
+        raise ValueError("--wait-head-only requires a positive wait, hybrid, or ranking loss weight")
     if calibration_only and (action_head_only or wait_head_only):
         raise ValueError("--calibration-only cannot be combined with --action-head-only or --wait-head-only")
-    if calibration_only and wait_head_loss_weight <= 0 and hybrid_action_loss_weight <= 0:
-        raise ValueError("--calibration-only requires --wait-head-loss-weight > 0 or --hybrid-action-loss-weight > 0")
+    if calibration_only and wait_head_loss_weight <= 0 and hybrid_action_loss_weight <= 0 and wait_ranking_loss_weight <= 0:
+        raise ValueError("--calibration-only requires a positive wait, hybrid, or ranking loss weight")
 
     # Find preprocessed data: CLI override > external drive > local
     pp_dir = preprocessed_dir
@@ -547,13 +645,16 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
         )
 
     model = FlowGNNModel(hidden_dim=hidden_dim, num_layers=num_layers).to(device)
-    if freeze_movement_logit_scale:
+    effective_freeze_movement_logit_scale = freeze_movement_logit_scale or (
+        wait_ranking_loss_weight > 0 and hybrid_action_loss_weight <= 0
+    )
+    if effective_freeze_movement_logit_scale:
         model.movement_logit_scale.requires_grad = False
 
     if action_head_only or wait_head_only or calibration_only:
         trainable_groups = []
         calibration_names = {"wait_logit_scale", "wait_logit_bias"}
-        if not freeze_movement_logit_scale:
+        if not effective_freeze_movement_logit_scale:
             calibration_names.add("movement_logit_scale")
         for name, param in model.named_parameters():
             train_action = action_head_only and name.startswith("action_head.")
@@ -649,6 +750,7 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
             action_loss_weight <= 0
             or wait_head_loss_weight <= 0
             or hybrid_action_loss_weight <= 0
+            or wait_ranking_loss_weight <= 0
             or action_head_only
             or wait_head_only
             or calibration_only
@@ -691,13 +793,18 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
             "wait_head_loss_weight": wait_head_loss_weight,
             "hybrid_action_loss_weight": hybrid_action_loss_weight,
             "hybrid_velocity_source": hybrid_velocity_source,
+            "wait_ranking_loss_weight": wait_ranking_loss_weight,
+            "wait_ranking_margin": wait_ranking_margin,
+            "wait_ranking_velocity_source": wait_ranking_velocity_source,
+            "stress_loss_multiplier": stress_loss_multiplier,
+            "stress_agent_threshold": stress_agent_threshold,
             "unweighted_action_loss": unweighted_action_loss,
             "unweighted_flow_loss": unweighted_flow_loss,
             "discrete_forward_mode": discrete_forward_mode,
             "action_head_only": action_head_only,
             "wait_head_only": wait_head_only,
             "calibration_only": calibration_only,
-            "freeze_movement_logit_scale": freeze_movement_logit_scale,
+            "freeze_movement_logit_scale": effective_freeze_movement_logit_scale,
         })
 
     log_batch_every = 10
@@ -711,7 +818,12 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
         f"wait_head_loss_weight={wait_head_loss_weight}, "
         f"hybrid_action_loss_weight={hybrid_action_loss_weight}, "
         f"hybrid_velocity_source={hybrid_velocity_source}, "
-        f"freeze_movement_logit_scale={freeze_movement_logit_scale}, "
+        f"wait_ranking_loss_weight={wait_ranking_loss_weight}, "
+        f"wait_ranking_margin={wait_ranking_margin}, "
+        f"wait_ranking_velocity_source={wait_ranking_velocity_source}, "
+        f"stress_loss_multiplier={stress_loss_multiplier}, "
+        f"stress_agent_threshold={stress_agent_threshold}, "
+        f"freeze_movement_logit_scale={effective_freeze_movement_logit_scale}, "
         f"discrete_forward_mode={discrete_forward_mode}"
     )
 
@@ -747,6 +859,11 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
                 wait_head_loss_weight=wait_head_loss_weight,
                 hybrid_action_loss_weight=hybrid_action_loss_weight,
                 hybrid_velocity_source=hybrid_velocity_source,
+                wait_ranking_loss_weight=wait_ranking_loss_weight,
+                wait_ranking_margin=wait_ranking_margin,
+                wait_ranking_velocity_source=wait_ranking_velocity_source,
+                stress_loss_multiplier=stress_loss_multiplier,
+                stress_agent_threshold=stress_agent_threshold,
                 unweighted_action_loss=unweighted_action_loss,
                 unweighted_flow_loss=unweighted_flow_loss,
                 discrete_forward_mode=discrete_forward_mode,
@@ -800,6 +917,11 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
                 wait_head_loss_weight=wait_head_loss_weight,
                 hybrid_action_loss_weight=hybrid_action_loss_weight,
                 hybrid_velocity_source=hybrid_velocity_source,
+                wait_ranking_loss_weight=wait_ranking_loss_weight,
+                wait_ranking_margin=wait_ranking_margin,
+                wait_ranking_velocity_source=wait_ranking_velocity_source,
+                stress_loss_multiplier=stress_loss_multiplier,
+                stress_agent_threshold=stress_agent_threshold,
                 unweighted_action_loss=unweighted_action_loss,
                 unweighted_flow_loss=unweighted_flow_loss,
                 discrete_forward_mode=discrete_forward_mode,
@@ -829,7 +951,12 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
                             'wait_head_loss_weight': wait_head_loss_weight,
                             'hybrid_action_loss_weight': hybrid_action_loss_weight,
                             'hybrid_velocity_source': hybrid_velocity_source,
-                            'freeze_movement_logit_scale': freeze_movement_logit_scale,
+                            'wait_ranking_loss_weight': wait_ranking_loss_weight,
+                            'wait_ranking_margin': wait_ranking_margin,
+                            'wait_ranking_velocity_source': wait_ranking_velocity_source,
+                            'stress_loss_multiplier': stress_loss_multiplier,
+                            'stress_agent_threshold': stress_agent_threshold,
+                            'freeze_movement_logit_scale': effective_freeze_movement_logit_scale,
                             'discrete_forward_mode': discrete_forward_mode,
                         },
                         'train_loss': avg_train_loss,
@@ -864,7 +991,12 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
                     'wait_head_loss_weight': wait_head_loss_weight,
                     'hybrid_action_loss_weight': hybrid_action_loss_weight,
                     'hybrid_velocity_source': hybrid_velocity_source,
-                    'freeze_movement_logit_scale': freeze_movement_logit_scale,
+                    'wait_ranking_loss_weight': wait_ranking_loss_weight,
+                    'wait_ranking_margin': wait_ranking_margin,
+                    'wait_ranking_velocity_source': wait_ranking_velocity_source,
+                    'stress_loss_multiplier': stress_loss_multiplier,
+                    'stress_agent_threshold': stress_agent_threshold,
+                    'freeze_movement_logit_scale': effective_freeze_movement_logit_scale,
                     'discrete_forward_mode': discrete_forward_mode,
                 },
                 'train_loss': avg_train_loss,
@@ -952,6 +1084,19 @@ if __name__ == "__main__":
                         choices=["teacher_x1", "predicted_x1"], default="teacher_x1",
                         help="Velocity used for hybrid movement logits: teacher_x1 uses expert x_1; "
                              "predicted_x1 uses x_t + (1-t)*predicted_flow")
+    parser.add_argument("--wait-ranking-loss-weight", type=float, default=0.0,
+                        help="Weight for planner-aligned wait-vs-move ranking loss. Default 0 disables it")
+    parser.add_argument("--wait-ranking-margin", type=float, default=0.5,
+                        help="Soft ranking margin between calibrated wait and preferred movement scores. "
+                             "Default 0.5 asks for a modest planner-facing gap; use 0 for pure ordering")
+    parser.add_argument("--wait-ranking-velocity-source", type=str,
+                        choices=["teacher_x1", "predicted_x1"], default="teacher_x1",
+                        help="Velocity used for ranking movement scores: teacher_x1 uses expert x_1 first; "
+                             "predicted_x1 uses x_t + (1-t)*predicted_flow")
+    parser.add_argument("--stress-loss-multiplier", type=float, default=1.0,
+                        help="Multiplier for ranking-loss nodes from graphs with agent count >= threshold")
+    parser.add_argument("--stress-agent-threshold", type=int, default=300,
+                        help="Agent-count threshold for --stress-loss-multiplier")
     parser.add_argument("--unweighted-action-loss", action="store_true",
                         help="Do not apply node_weights to the action/wait-head losses")
     parser.add_argument("--unweighted-flow-loss", action="store_true",
@@ -995,6 +1140,11 @@ if __name__ == "__main__":
           wait_head_loss_weight=args.wait_head_loss_weight,
           hybrid_action_loss_weight=args.hybrid_action_loss_weight,
           hybrid_velocity_source=args.hybrid_velocity_source,
+          wait_ranking_loss_weight=args.wait_ranking_loss_weight,
+          wait_ranking_margin=args.wait_ranking_margin,
+          wait_ranking_velocity_source=args.wait_ranking_velocity_source,
+          stress_loss_multiplier=args.stress_loss_multiplier,
+          stress_agent_threshold=args.stress_agent_threshold,
           unweighted_action_loss=args.unweighted_action_loss,
           unweighted_flow_loss=args.unweighted_flow_loss,
           epochs=args.epochs,

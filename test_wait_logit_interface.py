@@ -45,7 +45,9 @@ def main() -> int:
         FlowGNNModel,
         binary_gate_action_probs_from_velocity,
         hybrid_action_logits_from_velocity,
+        wait_ranking_logits_from_velocity,
     )
+    from main_pys.train_flow import wait_ranking_loss_from_logits
 
     torch.manual_seed(7)
     n_agents = 3
@@ -84,8 +86,22 @@ def main() -> int:
             return_hybrid_logits=True,
             hybrid_velocity_for_logits=flow,
         )
+        (
+            flow_with_ranking,
+            wait_for_ranking,
+            forward_ranking_logits,
+        ) = model(
+            v_t,
+            t,
+            data,
+            return_wait_logit=True,
+            return_wait_ranking_logits=True,
+            wait_ranking_velocity_for_logits=flow,
+        )
         hybrid_logits = hybrid_action_logits_from_velocity(flow, wait_logit)
+        ranking_logits = wait_ranking_logits_from_velocity(flow, wait_logit)
         model_hybrid_logits = model.hybrid_action_logits(flow, wait_logit)
+        model_ranking_logits = model.wait_ranking_logits(flow, wait_logit)
         gate_probs = binary_gate_action_probs_from_velocity(flow, wait_logit, tau=0.3)
         gate_probs_unclipped = binary_gate_action_probs_from_velocity(flow, wait_logit, tau=0.3, eps=0.0)
         model_gate_probs = model.binary_gate_action_probs(flow, wait_logit, tau=0.3)
@@ -95,6 +111,8 @@ def main() -> int:
     report("wait logit shape", tuple(wait_logit.shape) == (n_agents,), str(tuple(wait_logit.shape)))
     report("hybrid logits shape", tuple(hybrid_logits.shape) == (n_agents, 5), str(tuple(hybrid_logits.shape)))
     report("forward hybrid logits shape", tuple(forward_hybrid_logits.shape) == (n_agents, 5), str(tuple(forward_hybrid_logits.shape)))
+    report("ranking logits shape", tuple(ranking_logits.shape) == (n_agents, 5), str(tuple(ranking_logits.shape)))
+    report("forward ranking logits shape", tuple(forward_ranking_logits.shape) == (n_agents, 5), str(tuple(forward_ranking_logits.shape)))
     report("binary gate probs shape", tuple(gate_probs.shape) == (n_agents, 5), str(tuple(gate_probs.shape)))
     report("model calibration default scale", torch.allclose(model.wait_logit_scale.detach(), torch.tensor(1.0)))
     report("model calibration default bias", torch.allclose(model.wait_logit_bias.detach(), torch.tensor(0.0)))
@@ -102,12 +120,18 @@ def main() -> int:
     report("model calibrated logits default to identity", torch.allclose(model_hybrid_logits, hybrid_logits))
     report("forward calibrated wait default to raw wait", torch.allclose(calibrated_wait, wait_for_hybrid))
     report("forward hybrid logits match helper", torch.allclose(forward_hybrid_logits, model_hybrid_logits))
+    report("forward ranking wait default to raw wait", torch.allclose(wait_for_ranking, wait_logit))
+    report("forward ranking logits match helper", torch.allclose(forward_ranking_logits, model_ranking_logits))
     report("model gate probs default to identity helper", torch.allclose(model_gate_probs, gate_probs))
 
     expected_moves = flow @ torch.tensor([[0, 1], [1, 0], [-1, 0], [0, -1]], dtype=flow.dtype).T
     report(
         "hybrid movement logits preserve dot products",
         torch.allclose(hybrid_logits[:, 1:], expected_moves),
+    )
+    report(
+        "ranking movement logits preserve raw dot products",
+        torch.allclose(ranking_logits[:, 1:], expected_moves),
     )
 
     calibrated = hybrid_action_logits_from_velocity(
@@ -125,6 +149,20 @@ def main() -> int:
         "hybrid movement calibration applies scale",
         torch.allclose(calibrated[:, 1:], 0.5 * expected_moves),
     )
+    ranking_calibrated = wait_ranking_logits_from_velocity(
+        flow,
+        wait_logit,
+        wait_logit_scale=torch.tensor(2.0),
+        wait_logit_bias=torch.tensor(-3.0),
+    )
+    report(
+        "ranking wait calibration applies scale and bias",
+        torch.allclose(ranking_calibrated[:, 0], 2.0 * wait_logit - 3.0),
+    )
+    report(
+        "ranking movement scores stay unscaled",
+        torch.allclose(ranking_calibrated[:, 1:], expected_moves),
+    )
 
     report("binary gate probs sum to one", torch.allclose(gate_probs.sum(dim=1), torch.ones(n_agents)))
     report(
@@ -138,14 +176,49 @@ def main() -> int:
     with torch.no_grad():
         model.movement_logit_scale.fill_(9.0)
         gate_probs_after_move_scale = model.binary_gate_action_probs(flow, wait_logit, tau=0.3)
+        ranking_after_move_scale = model.wait_ranking_logits(flow, wait_logit)
     report(
         "binary gate ignores five-logit movement calibration",
         torch.allclose(gate_probs_after_move_scale, gate_probs),
+    )
+    report(
+        "ranking logits ignore five-logit movement calibration",
+        torch.allclose(ranking_after_move_scale[:, 1:], expected_moves),
     )
 
     targets = torch.tensor([0, 1, 4], dtype=torch.long)
     ce = torch.nn.functional.cross_entropy(model_hybrid_logits, targets)
     report("hybrid logits support action CE", torch.isfinite(ce).item(), str(float(ce)))
+
+    good_ranking = torch.tensor(
+        [
+            [2.0, 0.0, 0.2, -0.1, 0.1],
+            [-1.0, 1.2, 0.0, 0.1, -0.2],
+            [-0.5, 0.1, 0.0, 1.3, -0.1],
+        ],
+        dtype=torch.float32,
+    )
+    bad_ranking = torch.tensor(
+        [
+            [-1.0, 1.0, 0.2, -0.1, 0.1],
+            [1.0, -0.2, 0.0, 0.1, -0.1],
+            [0.8, 0.1, 0.0, -0.2, -0.1],
+        ],
+        dtype=torch.float32,
+    )
+    ranking_targets = torch.tensor([0, 1, 3], dtype=torch.long)
+    ranking_good_loss = wait_ranking_loss_from_logits(good_ranking, ranking_targets, margin=0.5)
+    ranking_bad_loss = wait_ranking_loss_from_logits(bad_ranking, ranking_targets, margin=0.5)
+    report(
+        "ranking loss shape",
+        tuple(ranking_good_loss.shape) == (3,),
+        str(tuple(ranking_good_loss.shape)),
+    )
+    report(
+        "ranking loss rewards correct wait/move ordering",
+        ranking_good_loss.mean() < ranking_bad_loss.mean(),
+        f"good={float(ranking_good_loss.mean()):.4f}, bad={float(ranking_bad_loss.mean()):.4f}",
+    )
 
     legacy_state = {
         key: value
