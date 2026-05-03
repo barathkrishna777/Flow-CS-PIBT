@@ -128,6 +128,10 @@ def main():
                    help="Priority boost for stuck agents (default: 5)")
     p.add_argument("--stuck-fallback-bd", action="store_true", default=False,
                    help="Switch stuck agents to BD preferences")
+    p.add_argument("--near-goal-bd-thresh", type=float, default=0,
+                   help="BD distance threshold for near-goal priority boost (default: 0 = disabled)")
+    p.add_argument("--near-goal-boost", type=int, default=0,
+                   help="Per-step priority boost for near-goal agents (default: 0 = disabled)")
     p.add_argument("--hidden-dim", type=int, default=1024)
     p.add_argument("--num-layers", type=int, default=6)
     p.add_argument("--action-head-conditioning", choices=["integrated", "zero_t0", "zero_t05"],
@@ -266,6 +270,9 @@ def main():
             cmd.append(f"--movementLogitScale={args.movement_logit_scale}")
         if args.policy_type == "bd_flow_hybrid":
             cmd.append(f"--hybridOverrideThresh={args.hybrid_override_thresh}")
+        if args.near_goal_bd_thresh > 0:
+            cmd.append(f"--nearGoalBDThresh={args.near_goal_bd_thresh}")
+            cmd.append(f"--nearGoalBoost={args.near_goal_boost}")
         try:
             subprocess.run(cmd, check=False, timeout=args.time_limit + 120)
         except subprocess.TimeoutExpired:

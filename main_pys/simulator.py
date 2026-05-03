@@ -598,10 +598,17 @@ def simulate(device, model, k, m, grid_map, bd, start_locations, goal_locations,
     num_agents = len(start_locations)
     range_num_agents = np.arange(num_agents)
     bd_dist_snapshot = bd[range_num_agents, cur_locs[:, 0], cur_locs[:, 1]].copy()
+    near_goal_bd_thresh = getattr(args, 'nearGoalBDThresh', 0)
+    near_goal_boost = getattr(args, 'nearGoalBoost', 0)
     stuck_agents_set = set()
     for step in tqdm(range(max_steps)):
         agents_at_goal = np.all(np.equal(cur_locs, goal_locations), axis=1)
         agent_priorities = updatePriorities(agent_priorities, agents_at_goal)
+
+        if near_goal_bd_thresh > 0 and near_goal_boost > 0:
+            cur_bd_dist = bd[range_num_agents, cur_locs[:, 0], cur_locs[:, 1]]
+            near_goal = (cur_bd_dist <= near_goal_bd_thresh) & (~agents_at_goal)
+            agent_priorities[near_goal] += near_goal_boost
 
         if step > 0 and step % deadlock_window == 0:
             current_bd_dist = bd[range_num_agents, cur_locs[:, 0], cur_locs[:, 1]]
@@ -814,6 +821,10 @@ if __name__ == '__main__':
                         help="Priority boost for stuck agents at each deadlock check (default: 5)")
     parser.add_argument('--stuckFallbackBD', '--stuck-fallback-bd', dest='stuckFallbackBD', type=lambda x: bool(str2bool(x)), default=False,
                         help="Switch stuck agents to BD preferences instead of just boosting priority (default: False)")
+    parser.add_argument('--nearGoalBDThresh', '--near-goal-bd-thresh', dest='nearGoalBDThresh', type=float, default=0,
+                        help="BD distance threshold: agents within this distance get a persistent priority boost (default: 0 = disabled)")
+    parser.add_argument('--nearGoalBoost', '--near-goal-boost', dest='nearGoalBoost', type=int, default=0,
+                        help="Per-step priority boost for near-goal agents (default: 0 = disabled)")
     parser.add_argument('--hiddenDim', type=int, help="Model hidden dimension (default 1024)", default=1024)
     parser.add_argument('--numLayers', type=int, help="Number of GNN layers (default 6)", default=6)
     parser.add_argument('--classifierLinearDim', type=int, default=-1,
