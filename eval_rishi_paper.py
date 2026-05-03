@@ -116,8 +116,18 @@ def main():
                    help="Override learned wait-logit scale; omitted uses checkpoint calibration")
     p.add_argument("--movement-logit-scale", type=float, default=None,
                    help="Override learned movement-logit scale for five-logit learned mode; omitted uses checkpoint calibration")
-    p.add_argument("--policy-type", choices=["flow", "classifier", "flow_action_head", "local_classifier", "pibt"], default="flow",
+    p.add_argument("--policy-type", choices=["flow", "classifier", "flow_action_head", "local_classifier", "pibt", "bd_flow_hybrid"], default="flow",
                    help="Policy/model family to evaluate. pibt is the non-learned BD-guided PIBT baseline and does not load a checkpoint.")
+    p.add_argument("--hybrid-override-thresh", type=float, default=0.5,
+                   help="NN prob threshold to override BD top-1 in bd_flow_hybrid (default: 0.5)")
+    p.add_argument("--pref-conversion", choices=["sampled", "sorted"], default="sampled",
+                   help="Preference ranking mode (default: sampled)")
+    p.add_argument("--deadlock-window", type=int, default=30,
+                   help="Steps between deadlock-detection checks (default: 30)")
+    p.add_argument("--deadlock-boost", type=int, default=5,
+                   help="Priority boost for stuck agents (default: 5)")
+    p.add_argument("--stuck-fallback-bd", action="store_true", default=False,
+                   help="Switch stuck agents to BD preferences")
     p.add_argument("--hidden-dim", type=int, default=1024)
     p.add_argument("--num-layers", type=int, default=6)
     p.add_argument("--action-head-conditioning", choices=["integrated", "zero_t0", "zero_t05"],
@@ -243,6 +253,10 @@ def main():
             f"--actionHeadConditioning={args.action_head_conditioning}",
             f"--hiddenDim={args.hidden_dim}",
             f"--numLayers={args.num_layers}",
+            f"--prefConversion={args.pref_conversion}",
+            f"--deadlockWindow={args.deadlock_window}",
+            f"--deadlockBoost={args.deadlock_boost}",
+            f"--stuckFallbackBD={'True' if args.stuck_fallback_bd else 'False'}",
         ]
         if args.wait_logit_bias is not None:
             cmd.append(f"--waitLogitBias={args.wait_logit_bias}")
@@ -250,6 +264,8 @@ def main():
             cmd.append(f"--waitLogitScale={args.wait_logit_scale}")
         if args.movement_logit_scale is not None:
             cmd.append(f"--movementLogitScale={args.movement_logit_scale}")
+        if args.policy_type == "bd_flow_hybrid":
+            cmd.append(f"--hybridOverrideThresh={args.hybrid_override_thresh}")
         try:
             subprocess.run(cmd, check=False, timeout=args.time_limit + 120)
         except subprocess.TimeoutExpired:

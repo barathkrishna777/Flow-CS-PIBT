@@ -506,7 +506,36 @@ class WrapperBDGetActionPrefs:
     def __call__(self, locs):
         return get_bd_prefs(locs, self.bd, self.range_num_agents, add_noise=True)
 
-def simulate(device, model, k, m, grid_map, bd, start_locations, goal_locations, 
+def _bd_flow_hybrid_merge(nn_probs, bd_prefs, at_goal, action_mask, override_thresh=0.5, stuck_agents=None):
+    """Merge BD base ranking with NN override.
+
+    Strategy: use BD preference ordering as default. For each agent, if the NN's
+    top-1 action differs from BD's top-1 and has probability >= override_thresh,
+    promote the NN's choice to top-1 and shift BD's order down. Stuck agents
+    always use BD (they need heuristic escape, not learned behavior).
+    """
+    n_agents = nn_probs.shape[0]
+    preferences = bd_prefs.copy()
+
+    nn_top1 = np.argmax(nn_probs, axis=1)
+
+    for i in range(n_agents):
+        if at_goal[i]:
+            preferences[i] = [0, *[a for a in preferences[i] if a != 0]]
+            continue
+        if stuck_agents is not None and i in stuck_agents:
+            continue
+
+        bd_top1 = preferences[i][0]
+        if nn_top1[i] != bd_top1 and nn_probs[i, nn_top1[i]] >= override_thresh:
+            nn_action = int(nn_top1[i])
+            if not action_mask[i, nn_action]:
+                new_order = [nn_action] + [int(a) for a in preferences[i] if a != nn_action]
+                preferences[i] = new_order
+    return preferences
+
+
+def simulate(device, model, k, m, grid_map, bd, start_locations, goal_locations,
              max_steps, shield_type, lacam_lookahead, args, timer: CustomTimer):
     if shield_type not in ["CS-PIBT", "CS-Freeze", "LaCAM", "Real-Time-LaCAM"]:
         raise KeyError('Invalid shield type: {}'.format(shield_type))
@@ -538,7 +567,17 @@ def simulate(device, model, k, m, grid_map, bd, start_locations, goal_locations,
 
         probs[action_mask] = 1e-8
         probs = normalize_probability_rows(probs)
-        return convertProbsToPreferences(probs, "sampled")
+
+        if args.policyType == "bd_flow_hybrid":
+            bd_prefs = wrapper_bd_prefs(locs)
+            preferences = _bd_flow_hybrid_merge(
+                probs, bd_prefs, at_goal, action_mask,
+                override_thresh=args.hybridOverrideThresh,
+                stuck_agents=stuck_agents_set,
+            )
+            return preferences
+
+        return convertProbsToPreferences(probs, args.prefConversion)
     
     cur_locs = start_locations 
     assert(grid_map[start_locations[:,0], start_locations[:,1]].sum() == 0)
@@ -553,20 +592,24 @@ def simulate(device, model, k, m, grid_map, bd, start_locations, goal_locations,
     solution_path = [cur_locs.copy()]
     success = False
     start_time = time.time()
-    # Deadlock detection: track BD distances for stuck-agent boosting
-    deadlock_window = 30
+    deadlock_window = getattr(args, 'deadlockWindow', 30)
+    deadlock_boost = getattr(args, 'deadlockBoost', 5)
+    stuck_fallback_bd = getattr(args, 'stuckFallbackBD', False)
     num_agents = len(start_locations)
     range_num_agents = np.arange(num_agents)
     bd_dist_snapshot = bd[range_num_agents, cur_locs[:, 0], cur_locs[:, 1]].copy()
+    stuck_agents_set = set()
     for step in tqdm(range(max_steps)):
         agents_at_goal = np.all(np.equal(cur_locs, goal_locations), axis=1)
         agent_priorities = updatePriorities(agent_priorities, agents_at_goal)
 
-        # Conservative deadlock detection: boost stuck agents every 30 steps
         if step > 0 and step % deadlock_window == 0:
             current_bd_dist = bd[range_num_agents, cur_locs[:, 0], cur_locs[:, 1]]
             stuck = (current_bd_dist >= bd_dist_snapshot) & (~agents_at_goal)
-            agent_priorities[stuck] += 5
+            agent_priorities[stuck] += deadlock_boost
+            stuck_agents_set.clear()
+            if stuck_fallback_bd:
+                stuck_agents_set.update(np.where(stuck)[0].tolist())
             bd_dist_snapshot = current_bd_dist.copy()
 
         if time.time()-start_time > args.timeLimit and args.timeLimit > 0:
@@ -653,10 +696,10 @@ def main(args: argparse.ArgumentParser):
     bd = np.pad(bd, ((0,0),(k,k),(k,k)), 'constant', constant_values=10000) 
 
     device = torch.device("cuda:0" if torch.cuda.is_available() and args.useGPU else "cpu") 
-    if args.policyType != "pibt" and not os.path.exists(args.modelPath):
+    if args.policyType not in ("pibt",) and not os.path.exists(args.modelPath):
         raise FileNotFoundError('Model file: {} not found.'.format(args.modelPath))
-    
-    if args.policyType in ("flow", "flow_action_head"):
+
+    if args.policyType in ("flow", "flow_action_head", "bd_flow_hybrid"):
         model = load_flow_model(args, device, k)
     elif args.policyType == "classifier":
         model = load_classifier_model(args, device, k)
@@ -758,8 +801,19 @@ if __name__ == '__main__':
     parser.add_argument('--actionHeadConditioning', type=str,
                         choices=['integrated', 'zero_t0', 'zero_t05'], default='integrated',
                         help="How to condition action head: integrated=run flow ODE first (default), zero_t0=v=0 t=0, zero_t05=v=0 t=0.5")
-    parser.add_argument('--policyType', '--policy-type', dest='policyType', type=str, choices=['flow', 'classifier', 'flow_action_head', 'local_classifier', 'pibt'], default='flow',
-                        help="Policy/model family to load: pibt uses BD-guided preferences without a learned model; flow for FlowGNNModel, classifier for Rishi/SSIL GNNStack, flow_action_head for FlowGNNModel action logits, local_classifier for RishiLikeClassifier")
+    parser.add_argument('--policyType', '--policy-type', dest='policyType', type=str, choices=['flow', 'classifier', 'flow_action_head', 'local_classifier', 'pibt', 'bd_flow_hybrid'], default='flow',
+                        help="Policy/model family to load: pibt uses BD-guided preferences without a learned model; flow for FlowGNNModel, classifier for Rishi/SSIL GNNStack, flow_action_head for FlowGNNModel action logits, local_classifier for RishiLikeClassifier, bd_flow_hybrid for BD-base with NN override")
+    parser.add_argument('--hybridOverrideThresh', '--hybrid-override-thresh', dest='hybridOverrideThresh', type=float, default=0.5,
+                        help="NN probability threshold to override BD top-1 action in bd_flow_hybrid mode (default: 0.5)")
+    parser.add_argument('--prefConversion', '--pref-conversion', dest='prefConversion', type=str,
+                        choices=['sampled', 'sorted'], default='sampled',
+                        help="Preference ranking mode: sampled (stochastic multinomial, default) or sorted (deterministic argsort)")
+    parser.add_argument('--deadlockWindow', '--deadlock-window', dest='deadlockWindow', type=int, default=30,
+                        help="Steps between deadlock-detection checks (default: 30)")
+    parser.add_argument('--deadlockBoost', '--deadlock-boost', dest='deadlockBoost', type=int, default=5,
+                        help="Priority boost for stuck agents at each deadlock check (default: 5)")
+    parser.add_argument('--stuckFallbackBD', '--stuck-fallback-bd', dest='stuckFallbackBD', type=lambda x: bool(str2bool(x)), default=False,
+                        help="Switch stuck agents to BD preferences instead of just boosting priority (default: False)")
     parser.add_argument('--hiddenDim', type=int, help="Model hidden dimension (default 1024)", default=1024)
     parser.add_argument('--numLayers', type=int, help="Number of GNN layers (default 6)", default=6)
     parser.add_argument('--classifierLinearDim', type=int, default=-1,
