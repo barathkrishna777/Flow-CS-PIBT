@@ -114,6 +114,8 @@ def main():
                    help="Override learned wait-logit bias; omitted uses checkpoint calibration")
     p.add_argument("--wait-logit-scale", type=float, default=None,
                    help="Override learned wait-logit scale; omitted uses checkpoint calibration")
+    p.add_argument("--movement-logit-scale", type=float, default=None,
+                   help="Override learned movement-logit scale for five-logit learned mode; omitted uses checkpoint calibration")
     p.add_argument("--policy-type", choices=["flow", "classifier", "flow_action_head", "local_classifier", "pibt"], default="flow",
                    help="Policy/model family to evaluate. pibt is the non-learned BD-guided PIBT baseline and does not load a checkpoint.")
     p.add_argument("--hidden-dim", type=int, default=1024)
@@ -201,8 +203,10 @@ def main():
     print(f"steps={args.num_integration_steps} consensus={args.consensus} tau={args.tau}")
     wait_scale_label = "model" if args.wait_logit_scale is None else args.wait_logit_scale
     wait_bias_label = "model" if args.wait_logit_bias is None else args.wait_logit_bias
+    movement_scale_label = "model" if args.movement_logit_scale is None else args.movement_logit_scale
     print(f"waitMode={args.wait_mode} waitThresh={args.wait_thresh} "
-          f"waitLogitScale={wait_scale_label} waitLogitBias={wait_bias_label}")
+          f"waitLogitScale={wait_scale_label} waitLogitBias={wait_bias_label} "
+          f"movementLogitScale={movement_scale_label}")
     print(f"timeLimit={args.time_limit}s maxSteps={args.max_steps_multiplier} | GPU: {use_gpu}")
     _print_preflight(preflight)
     print(f"Total runs: {total}")
@@ -244,6 +248,8 @@ def main():
             cmd.append(f"--waitLogitBias={args.wait_logit_bias}")
         if args.wait_logit_scale is not None:
             cmd.append(f"--waitLogitScale={args.wait_logit_scale}")
+        if args.movement_logit_scale is not None:
+            cmd.append(f"--movementLogitScale={args.movement_logit_scale}")
         try:
             subprocess.run(cmd, check=False, timeout=args.time_limit + 120)
         except subprocess.TimeoutExpired:

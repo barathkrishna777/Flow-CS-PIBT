@@ -410,6 +410,7 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
           unweighted_flow_loss=False, epochs=10, discrete_forward_mode="both",
           reset_best_val_loss=False, action_head_only=False, action_head_lr=5e-4,
           wait_head_only=False, wait_head_lr=5e-4, calibration_only=False,
+          freeze_movement_logit_scale=False,
           distributed=False, local_rank=None):
     ddp_info = setup_distributed(distributed=distributed, local_rank=local_rank)
     is_main = ddp_info["is_main"]
@@ -546,10 +547,14 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
         )
 
     model = FlowGNNModel(hidden_dim=hidden_dim, num_layers=num_layers).to(device)
+    if freeze_movement_logit_scale:
+        model.movement_logit_scale.requires_grad = False
 
     if action_head_only or wait_head_only or calibration_only:
         trainable_groups = []
-        calibration_names = {"wait_logit_scale", "wait_logit_bias", "movement_logit_scale"}
+        calibration_names = {"wait_logit_scale", "wait_logit_bias"}
+        if not freeze_movement_logit_scale:
+            calibration_names.add("movement_logit_scale")
         for name, param in model.named_parameters():
             train_action = action_head_only and name.startswith("action_head.")
             train_wait = wait_head_only and name.startswith("wait_head.")
@@ -692,6 +697,7 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
             "action_head_only": action_head_only,
             "wait_head_only": wait_head_only,
             "calibration_only": calibration_only,
+            "freeze_movement_logit_scale": freeze_movement_logit_scale,
         })
 
     log_batch_every = 10
@@ -705,6 +711,7 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
         f"wait_head_loss_weight={wait_head_loss_weight}, "
         f"hybrid_action_loss_weight={hybrid_action_loss_weight}, "
         f"hybrid_velocity_source={hybrid_velocity_source}, "
+        f"freeze_movement_logit_scale={freeze_movement_logit_scale}, "
         f"discrete_forward_mode={discrete_forward_mode}"
     )
 
@@ -822,6 +829,7 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
                             'wait_head_loss_weight': wait_head_loss_weight,
                             'hybrid_action_loss_weight': hybrid_action_loss_weight,
                             'hybrid_velocity_source': hybrid_velocity_source,
+                            'freeze_movement_logit_scale': freeze_movement_logit_scale,
                             'discrete_forward_mode': discrete_forward_mode,
                         },
                         'train_loss': avg_train_loss,
@@ -856,6 +864,7 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
                     'wait_head_loss_weight': wait_head_loss_weight,
                     'hybrid_action_loss_weight': hybrid_action_loss_weight,
                     'hybrid_velocity_source': hybrid_velocity_source,
+                    'freeze_movement_logit_scale': freeze_movement_logit_scale,
                     'discrete_forward_mode': discrete_forward_mode,
                 },
                 'train_loss': avg_train_loss,
@@ -966,6 +975,8 @@ if __name__ == "__main__":
                         help="LR for wait_head_only mode (default: 5e-4)")
     parser.add_argument("--calibration-only", action="store_true",
                         help="Freeze all model params except wait/movement calibration scalars")
+    parser.add_argument("--freeze-movement-logit-scale", action="store_true",
+                        help="Keep movement_logit_scale fixed at its checkpoint/default value during training")
     parser.add_argument("--distributed", action="store_true",
                         help="Enable DistributedDataParallel; also auto-enabled under torchrun WORLD_SIZE>1")
     parser.add_argument("--local-rank", "--local_rank", dest="local_rank", type=int, default=None,
@@ -994,5 +1005,6 @@ if __name__ == "__main__":
           wait_head_only=args.wait_head_only,
           wait_head_lr=args.wait_head_lr,
           calibration_only=args.calibration_only,
+          freeze_movement_logit_scale=args.freeze_movement_logit_scale,
           distributed=args.distributed,
           local_rank=args.local_rank)

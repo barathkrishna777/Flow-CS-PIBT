@@ -390,6 +390,11 @@ def runNNOnState(cur_locs, bd, grid_map, k, m, model, device, goal_locations, ti
                     if args.waitLogitBias is not None
                     else model.wait_logit_bias
                 )
+                movement_logit_scale = (
+                    args.movementLogitScale
+                    if args.movementLogitScale is not None
+                    else model.movement_logit_scale
+                )
                 if args.waitMode == "learned_gate":
                     probs = binary_gate_action_probs_from_velocity(
                         velocity_tensor,
@@ -404,7 +409,7 @@ def runNNOnState(cur_locs, bd, grid_map, k, m, model, device, goal_locations, ti
                         wait_logit,
                         wait_logit_scale=wait_logit_scale,
                         wait_logit_bias=wait_logit_bias,
-                        movement_logit_scale=model.movement_logit_scale,
+                        movement_logit_scale=movement_logit_scale,
                     ).cpu().numpy()
             else:
                 # --- WAIT FIX: magnitude threshold ---
@@ -746,6 +751,8 @@ if __name__ == '__main__':
                         help="Override learned wait-logit bias; omitted uses checkpoint calibration")
     parser.add_argument('--waitLogitScale', '--wait-logit-scale', dest='waitLogitScale', type=float, default=None,
                         help="Override learned wait-logit scale; omitted uses checkpoint calibration")
+    parser.add_argument('--movementLogitScale', '--movement-logit-scale', dest='movementLogitScale', type=float, default=None,
+                        help="Override learned movement-logit scale for five-logit learned mode; omitted uses checkpoint calibration")
     parser.add_argument('--numConsensusSamples', type=int, help="Number of flow samples to average (default 3)", default=3)
     parser.add_argument('--useActionHead', type=lambda x: bool(str2bool(x)), help="Use auxiliary action head instead of flow (default False)", default=False)
     parser.add_argument('--actionHeadConditioning', type=str,

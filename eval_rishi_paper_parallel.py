@@ -67,6 +67,8 @@ def parse_args():
                    help="Override learned wait-logit bias; omitted uses checkpoint calibration")
     p.add_argument("--wait-logit-scale", type=float, default=None,
                    help="Override learned wait-logit scale; omitted uses checkpoint calibration")
+    p.add_argument("--movement-logit-scale", type=float, default=None,
+                   help="Override learned movement-logit scale for five-logit learned mode; omitted uses checkpoint calibration")
     p.add_argument("--policy-type",
                    choices=["flow", "classifier", "flow_action_head", "local_classifier", "pibt"],
                    default="flow")
@@ -188,6 +190,8 @@ def simulator_cmd(args, task: EvalTask, model_path: str, shard_csv: str) -> list
         cmd.append(f"--waitLogitBias={args.wait_logit_bias}")
     if args.wait_logit_scale is not None:
         cmd.append(f"--waitLogitScale={args.wait_logit_scale}")
+    if args.movement_logit_scale is not None:
+        cmd.append(f"--movementLogitScale={args.movement_logit_scale}")
     return cmd
 
 
@@ -305,8 +309,9 @@ def main():
     print(f"Agents: {agent_counts}")
     wait_scale_label = "model" if args.wait_logit_scale is None else args.wait_logit_scale
     wait_bias_label = "model" if args.wait_logit_bias is None else args.wait_logit_bias
+    movement_scale_label = "model" if args.movement_logit_scale is None else args.movement_logit_scale
     print(f"waitMode={args.wait_mode} waitLogitScale={wait_scale_label} "
-          f"waitLogitBias={wait_bias_label}")
+          f"waitLogitBias={wait_bias_label} movementLogitScale={movement_scale_label}")
     print(f"GPUs: {args.gpus} | jobs/gpu={args.jobs_per_gpu}")
     if args.resume_shards:
         print(f"Resume shards: skipped={len(completed_results)} pending={len(pending_tasks)}")
