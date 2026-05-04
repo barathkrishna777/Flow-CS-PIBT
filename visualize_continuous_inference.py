@@ -423,24 +423,23 @@ def draw_map_frame(
             ax.add_patch(glow)
 
     # ── Agent circles (true radius) ──
+    green_rgb = _hex_to_rgb(GREEN_GLOW)
+    red_rgb = _hex_to_rgb(RED_GLOW)
     for i in range(n):
         fc = agent_colors[i]
         if at_goal[i]:
-            ec = GREEN_GLOW
-            ec_alpha = 0.8
+            ec_rgba = (*green_rgb, 0.8)
             lw = 1.0
         elif colliding[i]:
-            ec = RED_GLOW
-            ec_alpha = 0.9
+            ec_rgba = (*red_rgb, 0.9)
             lw = 1.2
         else:
-            ec = (1, 1, 1)
-            ec_alpha = 0.3
+            ec_rgba = (1.0, 1.0, 1.0, 0.3)
             lw = 0.4
 
         circle = Circle(
             (positions[i, 1], positions[i, 0]), agent_radius,
-            facecolor=(*fc[:3], 0.85), edgecolor=(*ec[:3], ec_alpha),
+            facecolor=(*fc[:3], 0.85), edgecolor=ec_rgba,
             linewidth=lw, zorder=7,
         )
         ax.add_patch(circle)
@@ -462,8 +461,12 @@ def draw_map_frame(
 # ── Agent color assignment ───────────────────────────────────────────────
 
 def assign_agent_colors(n_agents: int) -> np.ndarray:
-    from matplotlib.cm import get_cmap
-    cmap = get_cmap("twilight_shifted")
+    import matplotlib
+    try:
+        cmap = matplotlib.colormaps["twilight_shifted"]
+    except (AttributeError, KeyError):
+        from matplotlib.cm import get_cmap
+        cmap = get_cmap("twilight_shifted")
     hues = np.linspace(0.05, 0.95, n_agents, endpoint=False)
     np.random.shuffle(hues)
     return np.array([cmap(h)[:3] for h in hues])
