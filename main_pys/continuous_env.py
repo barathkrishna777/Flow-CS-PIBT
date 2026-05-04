@@ -944,9 +944,7 @@ class EPIBTShield:
             all_candidates,
             committed,
             committed_vel,
-            sdf,
-            grad_r,
-            grad_c,
+            obstacle_map,
             depth=0,
         )
 
@@ -970,9 +968,7 @@ class EPIBTShield:
         all_candidates,
         committed,
         committed_vel,
-        sdf,
-        grad_r,
-        grad_c,
+        obstacle_map,
         depth: int,
     ) -> bool:
         """Recursively assign actions to agents in priority order.
@@ -990,7 +986,7 @@ class EPIBTShield:
             placed = False
             for c_idx, cand in enumerate(candidates):
                 # Check obstacle collision
-                if self._hits_obstacle(positions[idx], cand, sdf):
+                if self._hits_obstacle(positions[idx], cand, obstacle_map):
                     continue
                 # Check collision with all already-committed agents
                 conflict = False
@@ -1089,13 +1085,40 @@ class EPIBTShield:
         self,
         position: np.ndarray,
         velocity: np.ndarray,
-        sdf: np.ndarray,
+        obstacle_map: np.ndarray,
     ) -> bool:
-        """Check if velocity would move agent into an obstacle."""
+        """Check if velocity would move agent into an obstacle.
+
+        Uses exact circle-vs-rectangle geometry (same as ContinuousMAPFEnv
+        ._position_hits_obstacle) so the shield and env always agree.
+
+        The SDF-based alternative overestimates clearance for diagonally
+        adjacent obstacles by up to sqrt(2)×, causing systematic false
+        negatives on obstacle maps.
+        """
         proposed = position + velocity * self.dt
-        proposed_2d = proposed.reshape(1, 2)
-        d = float(sample_sdf_bilinear(sdf, proposed_2d)[0])
-        return d < self.agent_radius
+        r, c = float(proposed[0]), float(proposed[1])
+        h, w = obstacle_map.shape
+        if (
+            r < self.agent_radius
+            or c < self.agent_radius
+            or r > h - self.agent_radius
+            or c > w - self.agent_radius
+        ):
+            return True
+        row_min = max(0, int(math.floor(r - self.agent_radius)))
+        row_max = min(h - 1, int(math.floor(r + self.agent_radius)))
+        col_min = max(0, int(math.floor(c - self.agent_radius)))
+        col_max = min(w - 1, int(math.floor(c + self.agent_radius)))
+        r2 = self.agent_radius ** 2
+        for row in range(row_min, row_max + 1):
+            for col in range(col_min, col_max + 1):
+                if obstacle_map[row, col] != 0:
+                    nr = max(float(row), min(float(row) + 1.0, r))
+                    nc = max(float(col), min(float(col) + 1.0, c))
+                    if (r - nr) ** 2 + (c - nc) ** 2 < r2:
+                        return True
+        return False
 
     def _clip(self, velocity: np.ndarray) -> np.ndarray:
         norm = np.linalg.norm(velocity)
