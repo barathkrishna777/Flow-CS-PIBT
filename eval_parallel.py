@@ -221,6 +221,7 @@ def main() -> None:
 
     # Launch one subprocess per GPU worker
     log_base = base
+    os.makedirs(os.path.dirname(args.output_csv) or ".", exist_ok=True)
     procs = []
     launch_start = time.time()
     for rank, (ids_chunk, shard_path) in enumerate(zip(chunks, shard_paths)):
