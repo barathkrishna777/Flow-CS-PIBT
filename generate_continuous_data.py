@@ -484,7 +484,8 @@ def generate_single_rollout(task, args, eecbs_binary: Optional[str], lacam3_bina
             positions, velocities = None, None
 
     if positions is None and args.expert_source in {"orca", "po-orca", "hybrid"}:
-        shield = "po-orca" if args.expert_source in {"po-orca", "hybrid"} else "orca"
+        default_shield = "po-orca" if args.expert_source in {"po-orca", "hybrid"} else "orca"
+        shield = getattr(args, "rollout_shield_type", None) or default_shield
         positions, velocities = rollout_orca_policy(
             obstacle_map,
             starts,
@@ -547,6 +548,11 @@ def main():
     parser.add_argument("--eecbs-binary", default=None)
     parser.add_argument("--lacam3-repo", default=DEFAULT_LACAM3_REPO)
     parser.add_argument("--lacam3-binary", default=None)
+    parser.add_argument("--rollout-shield-type", default=None,
+                        choices=["orca", "po-orca", "epibt", "none"],
+                        help="Override shield used during ORCA/fallback rollouts. "
+                             "Default: 'po-orca' for hybrid/po-orca sources, 'orca' otherwise. "
+                             "Set to 'epibt' to generate data consistent with EPIBTShield evaluation.")
     parser.add_argument("--suboptimality", type=float, default=1.2)
     parser.add_argument("--time-limit", type=int, default=60)
     parser.add_argument("--workers", type=int, default=1)
