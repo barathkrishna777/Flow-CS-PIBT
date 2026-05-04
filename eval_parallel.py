@@ -24,6 +24,7 @@ import glob
 import os
 import subprocess
 import sys
+import threading
 import time
 from collections import defaultdict
 from typing import Dict, List, Optional
@@ -222,6 +223,19 @@ def main() -> None:
     # Launch one subprocess per GPU worker
     log_base = base
     os.makedirs(os.path.dirname(args.output_csv) or ".", exist_ok=True)
+
+    _print_lock = threading.Lock()
+
+    def _stream(rank: int, proc: subprocess.Popen, log_f) -> None:
+        """Read proc stdout line-by-line, write to log and print with rank prefix."""
+        prefix = f"[GPU {rank}]"
+        for raw in proc.stdout:
+            line = raw.decode(errors="replace").rstrip()
+            log_f.write(line + "\n")
+            log_f.flush()
+            with _print_lock:
+                print(f"{prefix} {line}", flush=True)
+
     procs = []
     launch_start = time.time()
     for rank, (ids_chunk, shard_path) in enumerate(zip(chunks, shard_paths)):
@@ -235,18 +249,21 @@ def main() -> None:
         ]
         log_path = f"{log_base}.gpu{rank}.log"
         log_f = open(log_path, "w")
-        proc = subprocess.Popen(cmd, env=env, stdout=log_f, stderr=subprocess.STDOUT)
-        procs.append((rank, proc, log_f, shard_path, log_path))
+        proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        t = threading.Thread(target=_stream, args=(rank, proc, log_f), daemon=True)
+        t.start()
+        procs.append((rank, proc, log_f, shard_path, log_path, t))
         print(f"[parallel] GPU {rank}: scenarios={ids_chunk} -> {shard_path}  log={log_path}")
 
-    print(f"[parallel] {len(procs)} worker(s) launched, waiting...")
+    print(f"[parallel] {len(procs)} worker(s) launched, waiting...\n")
 
     failed = []
-    for rank, proc, log_f, shard_path, log_path in procs:
+    for rank, proc, log_f, shard_path, log_path, t in procs:
         retcode = proc.wait()
+        t.join()
         log_f.close()
         status = "done" if retcode == 0 else f"FAILED (exit {retcode})"
-        print(f"[parallel] GPU {rank}: {status}  log={log_path}")
+        print(f"\n[parallel] GPU {rank}: {status}  log={log_path}")
         if retcode != 0:
             failed.append(rank)
 
@@ -256,7 +273,7 @@ def main() -> None:
         print(f"[parallel] WARNING: workers {failed} exited with errors")
 
     # Merge shards
-    existing = [p for _, _, _, p, _ in procs if os.path.exists(p)]
+    existing = [p for _, _, _, p, _, _ in procs if os.path.exists(p)]
     if existing:
         n_rows = _merge_csvs(existing, args.output_csv)
         print(f"[parallel] Merged {len(existing)} shard(s) -> {args.output_csv} ({n_rows} rows)")
