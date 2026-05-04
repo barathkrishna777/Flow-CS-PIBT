@@ -1,14 +1,19 @@
 import argparse
+import contextlib
+import math
 import os
 import random
 from typing import List
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from torch.utils.data import Subset
+from torch.utils.data import Sampler, Subset
+from torch.utils.data.distributed import DistributedSampler
 from torch_geometric.loader import DataLoader
 from tqdm import tqdm
 
@@ -37,6 +42,88 @@ def seed_worker(worker_id: int) -> None:
     worker_seed = torch.initial_seed() % (2 ** 32)
     random.seed(worker_seed)
     np.random.seed(worker_seed)
+
+
+def _env_int(name, default):
+    value = os.environ.get(name)
+    return default if value is None else int(value)
+
+
+def setup_distributed(distributed=False, local_rank=None):
+    world_size = _env_int("WORLD_SIZE", 1)
+    rank = _env_int("RANK", 0)
+    inferred = world_size > 1
+    enabled = distributed or inferred
+
+    if local_rank is None:
+        local_rank = _env_int("LOCAL_RANK", 0)
+
+    if enabled:
+        if world_size <= 1:
+            raise ValueError("--distributed requires torchrun with WORLD_SIZE > 1")
+        if not torch.cuda.is_available():
+            raise RuntimeError("Distributed training requires CUDA GPUs")
+        torch.cuda.set_device(local_rank)
+        if not dist.is_initialized():
+            dist.init_process_group(backend="nccl", init_method="env://")
+
+    return {
+        "enabled": enabled,
+        "rank": rank,
+        "local_rank": local_rank,
+        "world_size": world_size,
+        "is_main": rank == 0,
+    }
+
+
+def cleanup_distributed(ddp_info):
+    if ddp_info["enabled"] and dist.is_initialized():
+        dist.destroy_process_group()
+
+
+def reduce_average(value, device, ddp_info):
+    if not ddp_info["enabled"]:
+        return value
+    tensor = torch.tensor(float(value), device=device)
+    dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+    return (tensor / ddp_info["world_size"]).item()
+
+
+class DistributedWeightedSampler(Sampler):
+    """WeightedRandomSampler sharded across DDP ranks."""
+
+    def __init__(self, weights, num_samples, num_replicas=None, rank=None, replacement=True, seed=0):
+        if num_replicas is None:
+            num_replicas = dist.get_world_size()
+        if rank is None:
+            rank = dist.get_rank()
+        self.weights = torch.as_tensor(weights, dtype=torch.double)
+        self.num_samples_global = int(num_samples)
+        self.num_replicas = int(num_replicas)
+        self.rank = int(rank)
+        self.replacement = replacement
+        self.seed = int(seed)
+        self.epoch = 0
+        self.num_samples = int(math.ceil(self.num_samples_global / self.num_replicas))
+        self.total_size = self.num_samples * self.num_replicas
+
+    def __iter__(self):
+        generator = torch.Generator()
+        generator.manual_seed(self.seed + self.epoch)
+        indices = torch.multinomial(
+            self.weights,
+            self.total_size,
+            self.replacement,
+            generator=generator,
+        ).tolist()
+        indices = indices[self.rank:self.total_size:self.num_replicas]
+        return iter(indices)
+
+    def __len__(self):
+        return self.num_samples
+
+    def set_epoch(self, epoch):
+        self.epoch = int(epoch)
 
 
 def _batch_string_attr(batch, attr_name: str, num_graphs: int) -> List[str]:
@@ -134,7 +221,7 @@ def compute_discrete_loss(model, batch, device, use_amp):
     return loss
 
 
-def validate(model, loader, device, use_amp, policy_type, args, map_cache):
+def validate(model, loader, device, use_amp, policy_type, args, map_cache, ddp_info=None):
     model.eval()
     total = 0.0
     count = 0
@@ -146,6 +233,11 @@ def validate(model, loader, device, use_amp, policy_type, args, map_cache):
                 loss = compute_discrete_loss(model, batch, device, use_amp)
             total += loss.item()
             count += 1
+    if ddp_info and ddp_info["enabled"]:
+        stats = torch.tensor([total, float(count)], dtype=torch.float64, device=device)
+        dist.all_reduce(stats, op=dist.ReduceOp.SUM)
+        total = stats[0].item()
+        count = int(stats[1].item())
     return total / max(count, 1)
 
 
@@ -153,10 +245,25 @@ def train(args):
     if hasattr(torch.multiprocessing, "set_sharing_strategy"):
         torch.multiprocessing.set_sharing_strategy("file_system")
 
+    ddp_info = setup_distributed(
+        distributed=getattr(args, "distributed", False),
+        local_rank=getattr(args, "local_rank", None),
+    )
+    is_main = ddp_info["is_main"]
+    log = print if is_main else (lambda *a, **kw: None)
+
     set_seed(args.seed)
-    device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
+    if ddp_info["enabled"]:
+        device = torch.device(f"cuda:{ddp_info['local_rank']}")
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
     use_amp = device.type == "cuda"
     data_loader_generator = torch.Generator().manual_seed(args.seed)
+
+    log(
+        f"Device: {device} | AMP: {use_amp}"
+        + (f" | DDP world_size={ddp_info['world_size']}" if ddp_info["enabled"] else "")
+    )
 
     base_dataset = None
     dataset_cls = PreprocessedContinuousShardDataset if args.preprocessed_dir else ContinuousFlowDataset
@@ -186,8 +293,6 @@ def train(args):
             scenario_end=args.train_scenario_end,
             **({"preload": True} if preload and args.preprocessed_dir else {}),
         )
-        # If a separate val shard dir was provided, use it (ignoring scenario filters
-        # since those were baked in during preprocessing).
         if val_preprocessed_dir and args.preprocessed_dir:
             val_kwargs = dict(dataset_kwargs)
             val_kwargs["preprocessed_dir"] = val_preprocessed_dir
@@ -213,6 +318,8 @@ def train(args):
     train_size = len(train_dataset)
     val_size = len(val_dataset) if val_dataset is not None else 0
 
+    # --- Sampler setup ---
+    train_sampler = None
     sampler = None
     if not args.no_weighted_sampling:
         sampler_base = base_dataset if isinstance(train_dataset, Subset) else train_dataset
@@ -222,13 +329,33 @@ def train(args):
             if isinstance(sampler_base, PreprocessedContinuousShardDataset)
             else build_continuous_weighted_sampler
         )
-        sampler = sampler_builder(
+        flat_sampler = sampler_builder(
             sampler_base,
             subset=sampler_subset,
             balance_agent_counts=True,
             balance_expert_sources=True,
             oversample_difficult=args.oversample_difficult,
         )
+        if ddp_info["enabled"]:
+            train_sampler = DistributedWeightedSampler(
+                weights=flat_sampler.weights,
+                num_samples=len(train_dataset),
+                num_replicas=ddp_info["world_size"],
+                rank=ddp_info["rank"],
+                replacement=True,
+                seed=args.seed,
+            )
+            sampler = train_sampler
+        else:
+            sampler = flat_sampler
+    elif ddp_info["enabled"]:
+        train_sampler = DistributedSampler(
+            train_dataset,
+            num_replicas=ddp_info["world_size"],
+            rank=ddp_info["rank"],
+            shuffle=True,
+        )
+        sampler = train_sampler
 
     batch_size = args.batch_size or (128 if device.type == "cuda" else 16)
     workers = args.num_workers if args.num_workers is not None else min(8, os.cpu_count() or 2)
@@ -246,16 +373,24 @@ def train(args):
     if workers > 0:
         train_loader_kwargs["prefetch_factor"] = 2
     train_loader = DataLoader(**train_loader_kwargs)
+
     val_batch_size = getattr(args, "val_batch_size", None) or batch_size
-    # Val workers: default to 0 (single-threaded) to avoid workers each holding
-    # a full shard (~1.7 GB) in RAM while the main process runs the forward pass.
     val_workers = getattr(args, "val_num_workers", 0)
     val_loader = None
+    val_sampler = None
     if val_dataset is not None:
+        if ddp_info["enabled"]:
+            val_sampler = DistributedSampler(
+                val_dataset,
+                num_replicas=ddp_info["world_size"],
+                rank=ddp_info["rank"],
+                shuffle=False,
+            )
         val_loader_kwargs = {
             "dataset": val_dataset,
             "batch_size": val_batch_size,
             "shuffle": False,
+            "sampler": val_sampler,
             "num_workers": val_workers,
             "pin_memory": (device.type == "cuda"),
             "persistent_workers": val_workers > 0,
@@ -288,18 +423,33 @@ def train(args):
             action_dim=args.num_directions + 1,
         ).to(device)
 
+    if ddp_info["enabled"]:
+        find_unused = args.action_loss_weight <= 0
+        model = DDP(
+            model,
+            device_ids=[ddp_info["local_rank"]],
+            output_device=ddp_info["local_rank"],
+            find_unused_parameters=find_unused,
+        )
+
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
     best_val = float("inf")
-    os.makedirs(args.output_dir, exist_ok=True)
+    if is_main:
+        os.makedirs(args.output_dir, exist_ok=True)
 
     prefix = f"continuous_{args.policy_type}_{args.run_name}_" if args.run_name else f"continuous_{args.policy_type}_"
     for epoch in range(args.epochs):
+        if train_sampler is not None and hasattr(train_sampler, "set_epoch"):
+            train_sampler.set_epoch(epoch)
+        if val_sampler is not None and hasattr(val_sampler, "set_epoch"):
+            val_sampler.set_epoch(epoch)
+
         model.train()
         total_loss = 0.0
         count = 0
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{args.epochs}")
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{args.epochs}", disable=not is_main)
         for batch in pbar:
             if args.policy_type == "flow":
                 loss = compute_flow_loss(model, batch, device, use_amp, args, map_cache)
@@ -315,60 +465,69 @@ def train(args):
 
             total_loss += loss.item()
             count += 1
-            pbar.set_postfix({"loss": f"{loss.item():.4f}"})
+            if is_main:
+                pbar.set_postfix({"loss": f"{loss.item():.4f}"})
 
         scheduler.step()
         avg_train = total_loss / max(count, 1)
-        val_loss = validate(model, val_loader, device, use_amp, args.policy_type, args, map_cache) if val_loader else avg_train
-        print(f"Epoch {epoch + 1}: train={avg_train:.4f} val={val_loss:.4f}")
+        avg_train = reduce_average(avg_train, device, ddp_info)
 
-        ckpt = {
-            "epoch": epoch + 1,
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "scheduler_state_dict": scheduler.state_dict(),
-            "policy_type": args.policy_type,
-            "model_type": model_type,
-            "model_config": {
-                "k": args.k,
-                "hidden_dim": args.hidden_dim,
-                "num_layers": args.num_layers,
-                "num_heads": getattr(args, "num_heads", 8),
-                "num_input_channels": 4,
-                "aux_feature_dim": 5,
-                "action_dim": args.num_directions + 1,
-                "velocity_dim": 2,
-                "chunk_horizon": getattr(args, "chunk_horizon", 1),
-            },
-            "dataset_config": {
-                "num_directions": args.num_directions,
-                "wait_threshold": args.wait_threshold,
-                "max_speed": args.max_speed,
-                "expert_sources": args.expert_sources,
-                "train_scenario_ids": args.train_scenario_ids,
-                "train_scenario_start": args.train_scenario_start,
-                "train_scenario_end": args.train_scenario_end,
-                "val_scenario_ids": args.val_scenario_ids,
-                "val_scenario_start": args.val_scenario_start,
-                "val_scenario_end": args.val_scenario_end,
-            },
-            "loss_config": {
-                "shield_aware_loss": args.shield_aware_loss,
-                "train_shield_type": args.train_shield_type,
-                "flow_loss_weight": args.flow_loss_weight,
-                "shield_loss_weight": args.shield_loss_weight,
-                "action_loss_weight": args.action_loss_weight,
-            },
-            "seed": args.seed,
-            "train_loss": avg_train,
-            "val_loss": val_loss,
-        }
-        torch.save(ckpt, os.path.join(args.output_dir, f"{prefix}epoch_{epoch + 1}.pt"))
-        if val_loss <= best_val:
-            best_val = val_loss
-            torch.save(ckpt, os.path.join(args.output_dir, f"{prefix}best.pt"))
+        val_loss = (
+            validate(model, val_loader, device, use_amp, args.policy_type, args, map_cache, ddp_info)
+            if val_loader else avg_train
+        )
+        log(f"Epoch {epoch + 1}: train={avg_train:.4f} val={val_loss:.4f}")
 
-    print(f"Completed training | train_samples={train_size} val_samples={val_size} best_val={best_val:.4f}")
+        if is_main:
+            raw_model = model.module if hasattr(model, "module") else model
+            ckpt = {
+                "epoch": epoch + 1,
+                "model_state_dict": raw_model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
+                "policy_type": args.policy_type,
+                "model_type": model_type,
+                "model_config": {
+                    "k": args.k,
+                    "hidden_dim": args.hidden_dim,
+                    "num_layers": args.num_layers,
+                    "num_heads": getattr(args, "num_heads", 8),
+                    "num_input_channels": 4,
+                    "aux_feature_dim": 5,
+                    "action_dim": args.num_directions + 1,
+                    "velocity_dim": 2,
+                    "chunk_horizon": getattr(args, "chunk_horizon", 1),
+                },
+                "dataset_config": {
+                    "num_directions": args.num_directions,
+                    "wait_threshold": args.wait_threshold,
+                    "max_speed": args.max_speed,
+                    "expert_sources": args.expert_sources,
+                    "train_scenario_ids": args.train_scenario_ids,
+                    "train_scenario_start": args.train_scenario_start,
+                    "train_scenario_end": args.train_scenario_end,
+                    "val_scenario_ids": args.val_scenario_ids,
+                    "val_scenario_start": args.val_scenario_start,
+                    "val_scenario_end": args.val_scenario_end,
+                },
+                "loss_config": {
+                    "shield_aware_loss": args.shield_aware_loss,
+                    "train_shield_type": args.train_shield_type,
+                    "flow_loss_weight": args.flow_loss_weight,
+                    "shield_loss_weight": args.shield_loss_weight,
+                    "action_loss_weight": args.action_loss_weight,
+                },
+                "seed": args.seed,
+                "train_loss": avg_train,
+                "val_loss": val_loss,
+            }
+            torch.save(ckpt, os.path.join(args.output_dir, f"{prefix}epoch_{epoch + 1}.pt"))
+            if val_loss <= best_val:
+                best_val = val_loss
+                torch.save(ckpt, os.path.join(args.output_dir, f"{prefix}best.pt"))
+
+    log(f"Completed training | train_samples={train_size} val_samples={val_size} best_val={best_val:.4f}")
+    cleanup_distributed(ddp_info)
 
 
 def main():
@@ -413,10 +572,14 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--cpu", action="store_true")
     parser.add_argument("--preprocessed-dir", default=None, help="Directory of compact continuous shard files")
-    parser.add_argument("--val-preprocessed-dir", default=None, help="Separate shard directory for validation (e.g. built with different scenario range)")
-    parser.add_argument("--val-batch-size", type=int, default=None, help="Batch size for validation (defaults to --batch-size; reduce for large-agent val sets)")
-    parser.add_argument("--val-num-workers", type=int, default=0, help="DataLoader workers for validation (default 0 to avoid per-worker shard RAM overhead)")
+    parser.add_argument("--val-preprocessed-dir", default=None, help="Separate shard directory for validation")
+    parser.add_argument("--val-batch-size", type=int, default=None, help="Batch size for validation")
+    parser.add_argument("--val-num-workers", type=int, default=0, help="DataLoader workers for validation")
     parser.add_argument("--preload-shards", action="store_true", help="Load all needed shards into RAM at startup")
+    parser.add_argument("--distributed", action="store_true",
+                        help="Enable DDP; also auto-enabled under torchrun WORLD_SIZE>1")
+    parser.add_argument("--local-rank", "--local_rank", dest="local_rank", type=int, default=None,
+                        help="Local GPU rank for DDP (torchrun provides LOCAL_RANK env var)")
     args = parser.parse_args()
     train(args)
 
