@@ -1,0 +1,9 @@
+Missing remote CSVs:
+- evals/lambda_sharded_pibt_20260430_103517/rishi8/rishi8_pibt_combined.csv
+- evals/lambda_sharded_pibt_20260430_103517/rishi12/rishi12_pibt_combined.csv
+- evals/lambda_sharded_rishi_lambda_20260429_191606/rishi12_wave9/rishi12_wave9_flow_combined.csv
+- evals/lambda_sharded_rishi_lambda_20260429_191606/rishi8_hybrid/rishi8_hybrid_action_head_combined.csv
+
+Copy command template:
+mkdir -p evals/lambda_sharded_rishi_lambda_20260429_191606
+rsync -av <lambda-host>:/home/anushree_mattlab/barath/Flow-CS-PIBT/evals/lambda_sharded_rishi_lambda_20260429_191606/ evals/lambda_sharded_rishi_lambda_20260429_191606/

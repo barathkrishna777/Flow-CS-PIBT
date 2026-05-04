@@ -1,0 +1,119 @@
+\begin{tikzpicture}[
+  font=\scriptsize,
+  x=1cm,
+  y=1cm,
+  stage/.style={
+    rectangle,
+    draw=black!45,
+    fill=black!2,
+    rounded corners=1pt,
+    minimum width=3.05cm,
+    minimum height=4.75cm,
+    inner sep=0pt
+  },
+  title/.style={font=\bfseries\small,align=center},
+  box/.style={
+    rectangle,
+    draw=black!45,
+    fill=white,
+    rounded corners=1pt,
+    align=center,
+    text width=2.48cm,
+    minimum height=0.46cm,
+    inner sep=2.5pt
+  },
+  bluebox/.style={box,draw=oiBlue!70!black,fill=oiBlue!6},
+  orangebox/.style={box,draw=oiOrange!80!black,fill=oiOrange!10},
+  purplebox/.style={box,draw=oiReddishPurple!75!black,fill=oiReddishPurple!8},
+  arrow/.style={-Stealth,draw=black!65,line width=0.5pt},
+  auxarrow/.style={-Stealth,draw=black!55,line width=0.5pt,dashed}
+]
+
+% Stage containers.
+\node[stage] (supervision) at (0,0) {};
+\node[stage] (repr) at (3.55,0) {};
+\node[stage] (policy) at (7.10,0) {};
+\node[stage] (exec) at (10.65,0) {};
+
+\node[title] at (0,2.08) {Supervision};
+\node[title] at (3.55,2.08) {Agent input};
+\node[title] at (7.10,2.08) {Flow policy};
+\node[title] at (10.65,2.08) {CS-PIBT execution};
+
+% Supervision stage.
+\begin{scope}[shift={(-0.88,0.86)},scale=0.13]
+  \foreach \dx/\dy in {0/0,1.5/-1.0,3.0/-2.0} {
+    \draw[fill=white,draw=black!60,line width=0.35pt] (\dx,\dy) rectangle +(7,6);
+    \foreach \x/\y in {0/0,1/0,5/0,2/1,3/1,0/2,4/2,1/3,5/3,6/4,0/5,3/5} {
+      \fill[black!78] (\dx+\x,\dy+\y) rectangle +(1,1);
+    }
+    \draw[oiBlue,line width=0.65pt] (\dx+1.2,\dy+4.8) -- (\dx+5.6,\dy+1.0);
+    \fill[oiBluishGreen] (\dx+1.2,\dy+4.8) circle[radius=0.34];
+    \fill[oiVermillion] (\dx+5.6,\dy+1.0) circle[radius=0.34];
+  }
+\end{scope}
+\node[box] (maps) at (0,0.35) {Diverse grid-map\\MAPF instances};
+\node[box] (solver) at (0,-0.48) {Expert solver\\trajectories};
+\node[box] (samples) at (0,-1.30) {Per-agent time step\\examples};
+\node[box,fill=black!3] (targets) at (0,-2.02) {Targets: $\mathbf{x}_1$, $a_i^\star$};
+\draw[arrow] (maps) -- (solver);
+\draw[arrow] (solver) -- (samples);
+\draw[arrow] (samples) -- (targets);
+
+% Agent-input stage.
+\begin{scope}[shift={(2.78,0.84)},scale=0.18]
+  \draw[step=1,black!45,line width=0.25pt] (0,0) grid (7,7);
+  \foreach \x/\y in {2/1,4/2,1/5,5/5,6/2} {
+    \fill[black!75] (\x,\y) rectangle +(1,1);
+  }
+  \draw[oiBlue,line width=0.95pt] (1,1) rectangle (6,6);
+  \fill[oiBlue!35,draw=oiBlue!85!black] (3.5,3.5) circle[radius=0.32];
+  \fill[oiBluishGreen!45,draw=oiBluishGreen!80!black] (1.5,2.5) circle[radius=0.28];
+  \fill[oiOrange!60,draw=oiOrange!85!black] (5.5,1.5) circle[radius=0.28];
+\end{scope}
+\node[box] (fov) at (3.55,0.35) {Agent-centric FoV\\grid channels};
+\node[box] (feat) at (3.55,-0.48) {Obstacle, agent, goal,\\heuristic features};
+\node[box] (graph) at (3.55,-1.30) {Nearby-agent graph\\$G_t=(V_t,E_t)$};
+\node[box,fill=black!3] (msg) at (3.55,-2.02) {Message passing\\neighborhood};
+\draw[arrow] (fov) -- (feat);
+\draw[arrow] (feat) -- (graph);
+\draw[arrow] (graph) -- (msg);
+
+% Policy stage.
+\node[bluebox] (trunk) at (7.10,1.05) {CNN encoder +\\GraphSAGE trunk};
+\node[bluebox] (state) at (7.10,0.25) {Flow state\\$(\mathbf{x}_t,t)$};
+\node[bluebox] (field) at (7.10,-0.55) {Vector field\\$\hat{\mathbf{u}}_\theta$};
+\node[box,fill=oiBlue!3] (loss) at (7.10,-1.35) {Rectified-flow loss\\$\|\hat{\mathbf{u}}_\theta-(\mathbf{x}_1-\mathbf{x}_0)\|_2^2$};
+\node[purplebox] (action) at (7.10,-2.10) {Optional action head\\five logits};
+\draw[arrow] (trunk) -- (state);
+\draw[arrow] (state) -- (field);
+\draw[arrow] (field) -- (loss);
+\draw[auxarrow] (trunk.east) to[out=0,in=0] (action.east);
+
+% Execution stage.
+\node[orangebox] (rank) at (10.65,1.05) {Velocity-to-action\\ranking};
+\node[orangebox] (wait) at (10.65,0.25) {Wait calibration\\by magnitude};
+\node[orangebox] (shield) at (10.65,-0.55) {CS-PIBT shield\\priority + backtracking};
+\node[box,fill=oiBluishGreen!8] (move) at (10.65,-1.35) {Valid joint move};
+\begin{scope}[shift={(10.00,-2.13)},scale=0.15]
+  \draw[step=1,black!45,line width=0.25pt] (0,0) grid (8,4);
+  \foreach \x/\y in {2/1,4/2,5/2} {
+    \fill[black!72] (\x,\y) rectangle +(1,1);
+  }
+  \fill[oiBlue!40,draw=oiBlue!80!black] (1.5,2.5) circle[radius=0.28];
+  \fill[oiBluishGreen!45,draw=oiBluishGreen!80!black] (6.5,0.5) circle[radius=0.28];
+  \draw[arrow,oiBlue!80!black] (1.5,2.5) -- (2.45,2.5);
+  \draw[arrow,oiBluishGreen!80!black] (6.5,0.5) -- (5.55,0.5);
+\end{scope}
+\node[align=center,text width=2.55cm] at (10.65,-2.43) {held-out benchmark\\rollout};
+\draw[arrow] (rank) -- (wait);
+\draw[arrow] (wait) -- (shield);
+\draw[arrow] (shield) -- (move);
+
+% Inter-stage flow.  Keep arrows centered to avoid text collisions.
+\draw[arrow] (targets.east) -- node[above,font=\scriptsize,black!65] {supervision} (fov.west);
+\draw[arrow] (msg.east) -- node[above,font=\scriptsize,black!65] {$G_t$, features} (trunk.west);
+\draw[arrow] (field.east) -- node[above,font=\scriptsize,black!65] {$\hat{\mathbf{v}}$ guidance} (rank.west);
+\draw[auxarrow] (action.east) -- node[below,font=\scriptsize,black!60] {ablation} (shield.west);
+
+\end{tikzpicture}

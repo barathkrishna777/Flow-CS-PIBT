@@ -1,0 +1,8 @@
+scripts/__pycache__/
+*.pyc
+
+# Superseded generated artifacts from the first plotting pass.
+figures/rishi8_*_by_density.png
+tables/rishi8_*_by_density.csv
+tables/rishi8_per_map_success.*
+tables/rishi12_per_map_success.*

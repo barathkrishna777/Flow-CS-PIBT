@@ -21,6 +21,39 @@ already padded with high values, so obstacle and out-of-bounds moves should be
 unattractive; the explicit preference cleanup is a robustness guard and mirrors
 the invalid-action protection used for neural probabilities.
 
+## Completed Lambda Results
+
+Timestamped output root:
+
+```text
+evals/lambda_sharded_pibt_20260430_103517
+```
+
+Combined row counts matched the expected protocol sizes:
+
+| Eval | Rows | All-agents success | Mean agents at goal | Avg runtime |
+|---|---:|---:|---:|---:|
+| Rishi-8 `BD-PIBT` | 1850 | 66.43% (1229/1850) | 98.46% | 6.47s |
+| Rishi-12 `BD-PIBT` | 2700 | 59.48% (1606/2700) | 98.57% | 6.00s |
+
+Comparison against current Flow-CS-PIBT and SSIL CSVs:
+
+| Eval | Method | Rows | All-agents success | Mean agents at goal | Avg runtime |
+|---|---|---:|---:|---:|---:|
+| Rishi-8 | `BD-PIBT` | 1850 | 66.43% | 98.46% | 6.47s |
+| Rishi-8 | Flow-CS-PIBT flow-vector | 1850 | 64.59% | 91.93% | 31.34s |
+| Rishi-8 | SSIL classifier | 1850 | 66.43% | 95.69% | 18.96s |
+| Rishi-12 | `BD-PIBT` | 2700 | 59.48% | 98.57% | 6.00s |
+| Rishi-12 | Flow-CS-PIBT flow-vector | 2700 | 53.07% | 90.56% | 32.16s |
+| Rishi-12 | SSIL classifier | 2700 | 55.22% | 94.83% | 18.62s |
+
+These results change the headline interpretation. Under this exact eval path,
+the non-learned BD-guided CS-PIBT baseline is not weak: it ties SSIL on Rishi-8
+all-agents success, beats both learned methods on Rishi-12 all-agents success,
+has the highest mean agents-at-goal, and is substantially faster. Flow-CS-PIBT
+does not demonstrate improvement over heuristic-only BD guidance in these
+results.
+
 ## Lambda Sync Options
 
 Git workflow:
@@ -184,24 +217,23 @@ Pasteable text:
 > We include `BD-PIBT` as a non-learned classical baseline. It uses
 > backward-Dijkstra distance-to-goal preferences with random tie-breaking and
 > the same CS-PIBT shield, timeout, max-step multiplier, scenarios, maps, and
-> agent counts as the learned policies. This baseline isolates the value of the
-> learned guidance: if Flow-CS-PIBT improves all-agents success over BD-PIBT,
-> the result suggests that the learned velocity field provides useful guidance
-> beyond shortest-path greedy preferences. At the same time, all-agents success
-> and mean agents-at-goal should be interpreted separately. A heuristic policy
-> may move most agents to goal while leaving one or a few agents stuck; those
-> cases have high partial completion but still count as failures under the
-> all-agents success metric.
+> agent counts as the learned policies. In the completed full sweeps, this
+> heuristic-only baseline is surprisingly strong: it reaches 66.43% all-agents
+> success on Rishi-8, tying SSIL and exceeding the Flow-CS-PIBT flow-vector
+> policy, and 59.48% on Rishi-12, exceeding both Flow-CS-PIBT and SSIL. It also
+> obtains the highest mean agents-at-goal and the lowest runtime among the
+> compared methods. These results show that the current learned flow guidance
+> does not improve over BD-guided CS-PIBT under this protocol.
 >
-> We treat SSIL as the strongest learned baseline evaluated on the same
-> protocol. Flow-CS-PIBT does not beat SSIL overall in the current results, but
-> is competitive with SSIL and should be compared against BD-PIBT to quantify
-> improvement over heuristic-only guidance. The gap to SSIL appears
-> concentrated in coordination-heavy maps. Because Flow-CS-PIBT predicts
-> continuous velocities while SSIL predicts discrete actions, the SSIL action
-> objective may better match wait and local coordination behavior; this is
-> consistent with our ablations but should be framed as a hypothesis rather
-> than a proven causal claim.
+> We therefore frame Flow-CS-PIBT as an informative negative/diagnostic result
+> rather than as a strict improvement over the classical baseline. The learned
+> flow-vector policy improves over `BD-PIBT` on a few maps, notably
+> `random-64-64-10`, but loses substantially on maps such as `den312d`,
+> `empty-32-32`, `maze-32-32-4`, and `room-64-64-16`. The comparison suggests
+> that shortest-path BD preferences plus CS-PIBT already encode a strong
+> coordination prior, while the current flow policy may distort useful wait or
+> local routing behavior. This interpretation is supported by the eval results
+> but should not be claimed as a causal proof without further ablation.
 
 External ML MAPF baselines should not be mixed into the main quantitative
 table unless they use the same or a clearly comparable benchmark, metric,

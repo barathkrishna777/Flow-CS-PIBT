@@ -1,0 +1,8 @@
+dataset,relative_path,present,lambda_required
+rishi8_pibt,evals/lambda_sharded_pibt_20260430_103517/rishi8/rishi8_pibt_combined.csv,no,yes
+rishi8_flow,evals/rishi_full_wave9_compact_best.csv,yes,no
+rishi8_ssil,evals/final_evals/rishi_full_ssil_classifier.csv,yes,no
+rishi12_pibt,evals/lambda_sharded_pibt_20260430_103517/rishi12/rishi12_pibt_combined.csv,no,yes
+rishi12_flow,evals/lambda_sharded_rishi_lambda_20260429_191606/rishi12_wave9/rishi12_wave9_flow_combined.csv,no,yes
+rishi12_ssil,evals/final_evals/rishi12_ssil_classifier.csv,yes,no
+rishi8_hybrid,evals/lambda_sharded_rishi_lambda_20260429_191606/rishi8_hybrid/rishi8_hybrid_action_head_combined.csv,no,yes

@@ -1,0 +1,24 @@
+\begin{tikzpicture}[
+  font=\scriptsize,
+  evidence/.style={rectangle,draw=black!45,rounded corners=1.5pt,fill=white,align=left,text width=3.95cm,minimum height=1.02cm,inner sep=4pt},
+  finding/.style={rectangle,draw=black!55,rounded corners=1.5pt,fill=oiBlue!7,align=left,text width=4.10cm,minimum height=1.05cm,inner sep=4pt},
+  center/.style={rectangle,draw=black!60,rounded corners=1.5pt,fill=oiVermillion!8,align=center,text width=3.25cm,minimum height=1.35cm,inner sep=5pt},
+  arr/.style={-Stealth,thick,draw=black!55}
+]
+\node[evidence,fill=oiOrange!15] (e0) at (0.00,5.40) {\textbf{Action-interface alignment}\\0.00\% initial diagnostic evaluation to 43.48\% with matched flow state; 62.70\% in the larger diagnostic run.};
+\node[evidence,fill=oiBluishGreen!13] (e1) at (0.00,3.75) {\textbf{Discrete-primary supervision}\\Dense-random target reached 75\% in one setting, while broad diagnostic success stayed near 60--61\%.};
+\node[evidence,fill=oiSkyBlue!16] (e2) at (0.00,2.10) {\textbf{Coordination-focused data}\\Strict flow-only control reached 70\% on the targeted dense-random map, but broad transfer stayed near 60.5--62.4\%.};
+\node[evidence,fill=oiReddishPurple!13] (e3) at (0.00,0.45) {\textbf{Hybrid action policy}\\Primary held-out evaluation: 62.49\% overall and 58\% dense-random, below the velocity policy's 64.59\% and 71\%.};
+\node[center] (gap) at (5.10,3.05) {Heavy-coordination gap\\requires wait/yield timing and bottleneck negotiation};
+\node[finding,fill=oiBluishGreen!10] (f0) at (10.20,5.05) {Discrete action supervision appears useful on coordination-heavy maps.};
+\node[finding,fill=oiVermillion!8] (f1) at (10.20,3.05) {The velocity-to-action bridge remains a plausible bottleneck.};
+\node[finding,fill=black!4] (f2) at (10.20,1.05) {The evidence does not prove that flow-based policies cannot learn coordination.};
+\draw[arr] (e0.east) -- (gap.west);
+\draw[arr] (e1.east) -- (gap.west);
+\draw[arr] (e2.east) -- (gap.west);
+\draw[arr] (e3.east) -- (gap.west);
+\draw[arr] (gap.east) -- (f0.west);
+\draw[arr] (gap.east) -- (f1.west);
+\draw[arr,densely dashed] (gap.east) -- (f2.west);
+\node[rectangle,draw=black!45,fill=black!3,rounded corners=1.5pt,align=center,text width=13.2cm,inner sep=4pt] at (5.1,-1.10) {Ablations are used as evidence about interface, objective, and data-distribution effects; none is treated as a new state-of-the-art method.};
+\end{tikzpicture}

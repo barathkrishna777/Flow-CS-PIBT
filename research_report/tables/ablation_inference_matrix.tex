@@ -1,0 +1,13 @@
+\scriptsize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{p{0.21\linewidth}p{0.20\linewidth}p{0.20\linewidth}p{0.31\linewidth}}
+\toprule
+Intervention & Targeted topology & Broader evaluation & Supported inference \\
+\midrule
+Action-interface alignment & Improved with state alignment & Below BD-PIBT and FLOMAP & The action interface is sensitive to the state distribution seen at inference; adding an action head alone is insufficient. \\
+Discrete-primary supervision & Coordination target improved & Below BD-PIBT overall & Discrete action labels can help coordination-heavy behavior, but stronger discrete pressure can over-specialize. \\
+Coordination-focused data & Target topology improved & Below BD-PIBT overall & Topology-targeted data can move the desired slice; the data mixture and stopping rule still limit out-of-distribution transfer. \\
+Hybrid action policy & No robust target gain & Below BD-PIBT and FLOMAP & The hybrid head did not replace the velocity policy as the most robust interface. \\
+Reduced-capacity hybrid & No clear target advantage & Below BD-PIBT and FLOMAP & Capacity reduction did not explain the coordination-heavy gap. \\
+\bottomrule
+\end{tabular}

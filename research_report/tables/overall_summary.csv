@@ -1,0 +1,8 @@
+dataset,method,rows,success,success_pct,mean_agents_at_goal_pct,avg_runtime_s,source
+rishi8_pibt,BD-PIBT,1850,1229/1850,66.43,98.46,6.47,remote summary
+rishi8_flow,FLOMAP,1850,1195/1850,64.59,91.93,31.34,local CSV
+rishi8_ssil,SSIL classifier,1850,1229/1850,66.43,95.69,18.96,local CSV
+rishi8_hybrid,FLOMAP (action head),1850,1156/1850,62.49,95.13,21.24,remote summary
+rishi12_pibt,BD-PIBT,2700,1606/2700,59.48,98.57,6.00,remote summary
+rishi12_flow,FLOMAP,2700,1433/2700,53.07,90.56,32.16,remote summary
+rishi12_ssil,SSIL classifier,2700,1491/2700,55.22,94.83,18.62,local CSV

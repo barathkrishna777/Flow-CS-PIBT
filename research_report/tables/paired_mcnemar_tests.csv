@@ -1,0 +1,7 @@
+slice,n,flomap_only,ssil_only,both_success,both_failure,discordant,p_value,p_display
+Full primary held-out evaluation,1850,49,83,1146,572,132,0.0039051217080269887,0.0039
+Coordination stress maps,350,14,49,132,155,63,1.112302300044902e-05,<0.001
+Dense random map,100,7,17,64,12,24,0.06391465663909912,0.0639
+Maze bottleneck map,250,7,32,68,143,39,7.025478407740593e-05,<0.001
+Excluding coordination stress maps,1500,35,34,1014,417,69,1.0,1.0000
+Excluding stress and floor-case maps,1250,31,31,1011,177,62,1.0,1.0000

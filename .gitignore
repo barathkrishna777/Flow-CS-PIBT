@@ -8,3 +8,5 @@ logs/
 test.ipynb
 *.html
 __pycache__/
+.DS_Store
+*.pptx

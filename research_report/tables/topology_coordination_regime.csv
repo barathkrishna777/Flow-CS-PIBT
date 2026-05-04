@@ -1,0 +1,9 @@
+map,label,topology,flow_success,ssil_success,ssil_minus_flow
+Paris_1_256,Paris,Open/city,100.0,100.0,0.0
+den520d,den520d,Open/game,99.6,99.6,0.0
+empty-48-48,empty,Open,95.2,100.0,4.799999999999997
+random-64-64-10,random-64,Moderate random,86.4,85.2,-1.2000000000000028
+den312d,den312d,Cluttered game,35.6,32.0,-3.6000000000000014
+random-32-32-10,dense random,Dense random,71.0,81.0,10.0
+maze-128-128-2,maze bottleneck,Bottleneck,30.0,40.0,10.0
+warehouse-10-20-10-2-1,warehouse,Floor case,2.8,2.4,-0.3999999999999999
