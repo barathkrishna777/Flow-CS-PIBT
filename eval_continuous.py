@@ -201,6 +201,7 @@ def run_orca_baseline(
     goals,
     max_steps: int,
     shield_type: str = "orca",
+    nav: str = "straight",
     progress_label: str = "",
     log_interval: int = 10,
 ) -> Dict[str, float]:
@@ -208,7 +209,8 @@ def run_orca_baseline(
     env.reset(positions, goals)
     for step_idx in range(max_steps):
         step_start = time.time()
-        env.step(env.goal_directed_velocities(), shield_type=shield_type)
+        preferred = env.bd_guided_velocities() if nav == "bd" else env.goal_directed_velocities()
+        env.step(preferred, shield_type=shield_type)
         done = env.is_done()
         if log_interval > 0 and ((step_idx + 1) % log_interval == 0 or done):
             log_rollout_step(env, progress_label, step_idx + 1, max_steps, start_time, step_start)
@@ -278,6 +280,7 @@ def write_rows(output_csv: str, rows: List[Dict[str, object]]) -> None:
         "scenario_id",
         "agents",
         "policy",
+        "nav",
         "shield_type",
         "run_name",
         "model_name",
@@ -320,6 +323,8 @@ def main():
     parser.add_argument("--scenario-start", type=int, default=None)
     parser.add_argument("--scenario-end", type=int, default=None)
     parser.add_argument("--policy", choices=["flow", "discrete", "orca"], default="orca")
+    parser.add_argument("--nav", choices=["straight", "bd"], default="straight",
+                        help="Preferred velocity source for orca policy: straight=goal-directed, bd=BD-guided")
     parser.add_argument("--model-path", default=None)
     parser.add_argument("--run-name", default="")
     parser.add_argument("--train-seed", type=int, default=None)
@@ -437,6 +442,7 @@ def main():
                         goals,
                         args.max_steps,
                         shield_type=args.shield_type,
+                        nav=args.nav,
                         progress_label=case_label,
                         log_interval=args.log_interval,
                     )
@@ -465,6 +471,7 @@ def main():
                     "scenario_id": scen_id,
                     "agents": agent_num,
                     "policy": args.policy,
+                    "nav": args.nav if args.policy == "orca" else "",
                     "shield_type": args.shield_type,
                     "run_name": args.run_name,
                     "model_name": os.path.basename(args.model_path) if args.model_path else "",

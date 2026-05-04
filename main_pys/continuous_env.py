@@ -2,6 +2,7 @@ import importlib
 import math
 import os
 import sys
+from collections import deque
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
@@ -1190,6 +1191,7 @@ class ContinuousMAPFEnv:
 
         # Precompute SDF for obstacle checking
         self._sdf = compute_sdf(self.obstacle_map)
+        self._bd_maps: Optional[np.ndarray] = None
 
     def reset(self, starts: np.ndarray, goals: np.ndarray) -> np.ndarray:
         self.positions = np.asarray(starts, dtype=np.float32).copy()
@@ -1207,6 +1209,15 @@ class ContinuousMAPFEnv:
         self.priorities = goal_dists.astype(np.float64)
         self._goal_dist_snapshot = goal_dists.copy()
 
+        # Compute BD maps for all agent goals (used by bd_guided_velocities)
+        h, w = self.obstacle_map.shape
+        N = len(self.goals)
+        self._bd_maps = np.full((N, h, w), 10000, dtype=np.int32)
+        for i in range(N):
+            gr = int(math.floor(self.goals[i, 0]))
+            gc = int(math.floor(self.goals[i, 1]))
+            self._bd_maps[i] = self._compute_bd(gr, gc)
+
         return self.positions.copy()
 
     def goal_directed_velocities(self) -> np.ndarray:
@@ -1215,6 +1226,51 @@ class ContinuousMAPFEnv:
         velocities = np.zeros_like(delta)
         moving = norms[:, 0] > self.goal_tolerance
         velocities[moving] = delta[moving] / np.maximum(norms[moving], 1e-6) * self.max_speed
+        return velocities
+
+    def _compute_bd(self, goal_row: int, goal_col: int) -> np.ndarray:
+        """BFS from goal cell; returns (H,W) shortest-path distances, 10000 for walls/unreachable."""
+        h, w = self.obstacle_map.shape
+        bd = np.full((h, w), 10000, dtype=np.int32)
+        gr = max(0, min(h - 1, goal_row))
+        gc = max(0, min(w - 1, goal_col))
+        if self.obstacle_map[gr, gc] != 0:
+            return bd
+        bd[gr, gc] = 0
+        queue = deque([(gr, gc)])
+        while queue:
+            r, c = queue.popleft()
+            d = bd[r, c]
+            for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < h and 0 <= nc < w and self.obstacle_map[nr, nc] == 0 and bd[nr, nc] == 10000:
+                    bd[nr, nc] = d + 1
+                    queue.append((nr, nc))
+        return bd
+
+    def bd_guided_velocities(self) -> np.ndarray:
+        """Preferred velocities following precomputed BD gradient (obstacle-aware routing)."""
+        assert self._bd_maps is not None, "Call reset() before bd_guided_velocities()"
+        N = len(self.positions)
+        velocities = np.zeros((N, 2), dtype=np.float32)
+        h, w = self.obstacle_map.shape
+        for i in range(N):
+            if np.linalg.norm(self.goals[i] - self.positions[i]) <= self.goal_tolerance:
+                continue
+            r_int = max(0, min(h - 1, int(math.floor(self.positions[i, 0]))))
+            c_int = max(0, min(w - 1, int(math.floor(self.positions[i, 1]))))
+            best_bd = self._bd_maps[i, r_int, c_int]
+            best_dr, best_dc = 0, 0
+            for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                nr, nc = r_int + dr, c_int + dc
+                if 0 <= nr < h and 0 <= nc < w:
+                    val = self._bd_maps[i, nr, nc]
+                    if val < best_bd:
+                        best_bd = val
+                        best_dr, best_dc = dr, dc
+            if best_dr != 0 or best_dc != 0:
+                velocities[i, 0] = float(best_dr) * self.max_speed
+                velocities[i, 1] = float(best_dc) * self.max_speed
         return velocities
 
     def apply_shield(self, preferred_velocities: np.ndarray, shield_type: str = "orca") -> np.ndarray:
