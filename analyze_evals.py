@@ -1,0 +1,535 @@
+#!/usr/bin/env python3
+"""
+Analyze and summarize all continuous-space MAPF evaluation results.
+
+Run from repo root:
+    python analyze_evals.py
+    python analyze_evals.py --markdown   # also write docs/eval_results.md
+"""
+import argparse
+import csv
+import math
+import os
+from collections import defaultdict
+from typing import Any, Dict, List, Optional, Tuple
+
+
+# ---------------------------------------------------------------------------
+# Experiment catalog
+# (csv_path, display_label, eval_set, max_steps)
+# Files that don't exist are skipped with a warning.
+# ---------------------------------------------------------------------------
+CATALOG = [
+    # ── Eval Set A: primary (random-32-32-10 + empty-48-48, 25 scenarios) ───
+    ("evals/baselines/straight_orca_512_setA.csv",     "ORCA (straight)",           "A", 512),
+    ("evals/baselines/straight_po-orca_512_setA.csv",  "PO-ORCA (straight)",        "A", 512),
+    ("evals/baselines/straight_epibt_512_setA.csv",    "Straight + EPIBTShield",    "A", 512),
+    ("evals/v4b/flow_epibt_256_setA.csv",              "Flow v4b + EPIBT [256 st]", "A", 256),
+    ("evals/v4b/flow_epibt_512_setA.csv",              "Flow v4b + EPIBT [512 st]", "A", 512),
+    # ── Model comparison at 256 steps ────────────────────────────────────────
+    ("evals/v4/flow_epibt_256_setA.csv",               "Flow v4  + EPIBT [256 st]", "A_v4cmp", 256),
+    # ── Eval Set B: generalization (random-64-64-10, room-32-32-4), seen+OOD ─
+    ("evals/baselines/straight_epibt_512_setB.csv",    "Straight + EPIBTShield",    "B", 512),
+    ("evals/v4b/flow_epibt_512_setB.csv",              "Flow v4b + EPIBT",          "B", 512),
+    # ── Eval Set C: OOD warehouse ─────────────────────────────────────────────
+    ("evals/baselines/straight_epibt_512_setC.csv",    "Straight + EPIBTShield",    "C", 512),
+    ("evals/v4b/flow_epibt_512_setC.csv",              "Flow v4b + EPIBT",          "C", 512),
+]
+
+METRICS = ["agent_fraction_at_goal", "collisions", "success",
+           "near_collisions", "obstacle_hits", "path_length_ratio",
+           "smoothness", "mean_arrival_step", "runtime"]
+FLOAT_METRICS = set(METRICS)
+
+SET_NAMES = {
+    "A":      "Set A — Primary   (random-32-32-10, empty-48-48, 25 scen)",
+    "A_v4cmp":"Set A — Model cmp (v4 vs v4b at 256 steps)",
+    "B":      "Set B — Generaliz.(random-64-64-10, room-32-32-4, 25 scen)",
+    "C":      "Set C — OOD       (warehouse-10-20-10-2-1, 25 scen)",
+}
+
+
+# ---------------------------------------------------------------------------
+# Loading
+# ---------------------------------------------------------------------------
+
+def load_csv(path: str) -> List[Dict[str, str]]:
+    with open(path, newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def safe_float(v: Any) -> Optional[float]:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def aggregate(rows: List[Dict[str, str]], metric: str) -> Tuple[float, float, int]:
+    """Return (mean, std, n) for a metric across rows."""
+    vals = [safe_float(r.get(metric)) for r in rows]
+    vals = [v for v in vals if v is not None]
+    if not vals:
+        return float("nan"), float("nan"), 0
+    n = len(vals)
+    mean = sum(vals) / n
+    var = sum((v - mean) ** 2 for v in vals) / n
+    return mean, math.sqrt(var), n
+
+
+# ---------------------------------------------------------------------------
+# Formatting helpers
+# ---------------------------------------------------------------------------
+
+def fmt(mean: float, std: float, n: int, decimals: int = 3, bold: bool = False) -> str:
+    if math.isnan(mean):
+        return "  —  "
+    s = f"{mean:.{decimals}f}±{std:.{decimals}f}"
+    return f"**{s}**" if bold else s
+
+
+def fmt_plain(mean: float, decimals: int = 3) -> str:
+    return "  —  " if math.isnan(mean) else f"{mean:.{decimals}f}"
+
+
+def col(s: str, w: int) -> str:
+    return s[:w].ljust(w)
+
+
+def hline(widths: List[int]) -> str:
+    return "-+-".join("-" * w for w in widths)
+
+
+# ---------------------------------------------------------------------------
+# Main analysis
+# ---------------------------------------------------------------------------
+
+def load_experiments(catalog):
+    experiments = []
+    for csv_path, label, eval_set, max_steps in catalog:
+        if not os.path.exists(csv_path):
+            print(f"  [skip] {csv_path} not found")
+            continue
+        rows = load_csv(csv_path)
+        if not rows:
+            print(f"  [skip] {csv_path} is empty")
+            continue
+        experiments.append({
+            "path": csv_path,
+            "label": label,
+            "eval_set": eval_set,
+            "max_steps": max_steps,
+            "rows": rows,
+        })
+    return experiments
+
+
+def group_by_map_n(rows: List[Dict]) -> Dict[Tuple[str, int], List[Dict]]:
+    groups = defaultdict(list)
+    for r in rows:
+        key = (r["map"], int(r["agents"]))
+        groups[key].append(r)
+    return dict(groups)
+
+
+def print_section(title: str) -> None:
+    print()
+    print("=" * 80)
+    print(f"  {title}")
+    print("=" * 80)
+
+
+def print_table_setA(experiments, max_steps_filter=None, title_suffix=""):
+    """Print core table: rows=experiments, cols=map×N combos."""
+    exps = [e for e in experiments if e["eval_set"] in ("A", "A_v4cmp")]
+    if max_steps_filter:
+        exps = [e for e in exps if e["max_steps"] == max_steps_filter]
+    if not exps:
+        print("  (no data)")
+        return
+
+    # Collect all (map, N) combos present
+    combos = set()
+    for e in exps:
+        for key in group_by_map_n(e["rows"]).keys():
+            combos.add(key)
+    combos = sorted(combos, key=lambda x: (x[0], x[1]))
+
+    # Column widths
+    label_w = max(len(e["label"]) for e in exps) + 2
+    cell_w = 21  # "0.914±0.023 / 054.0"
+
+    header_parts = [col("Method", label_w)]
+    for (map_name, n) in combos:
+        short = map_name.replace("random-32-32-10", "rand32").replace("empty-48-48", "emp48")
+        header_parts.append(col(f"{short} N={n}", cell_w))
+    print()
+    print(col("", label_w) + "  " + "  ".join(col(f"at_goal / collisions", cell_w) for _ in combos))
+    print(col("Method", label_w) + "  " + "  ".join(
+        col(f"{m.replace('random-32-32-10','rand32').replace('empty-48-48','emp48')} N={n}", cell_w)
+        for m, n in combos))
+    print("-" * (label_w + 2 + (cell_w + 2) * len(combos)))
+
+    for e in exps:
+        groups = group_by_map_n(e["rows"])
+        parts = [col(e["label"], label_w)]
+        for key in combos:
+            rows = groups.get(key, [])
+            if not rows:
+                parts.append(col("—", cell_w))
+                continue
+            ag_mean, ag_std, n = aggregate(rows, "agent_fraction_at_goal")
+            col_mean, col_std, _ = aggregate(rows, "collisions")
+            cell = f"{ag_mean:.3f}±{ag_std:.3f} / {col_mean:5.1f}"
+            parts.append(col(cell, cell_w))
+        print("  ".join(parts))
+
+
+def print_detailed_table(experiments, eval_set_key: str):
+    """Detailed per-map, per-N table with multiple metrics."""
+    exps = [e for e in experiments if e["eval_set"] == eval_set_key]
+    if not exps:
+        return
+
+    combos = set()
+    for e in exps:
+        for key in group_by_map_n(e["rows"]).keys():
+            combos.add(key)
+    combos = sorted(combos)
+
+    display_metrics = [
+        ("agent_fraction_at_goal", "AtGoal", 3),
+        ("success",                "Succ",   3),
+        ("collisions",             "Coll",   1),
+        ("near_collisions",        "NearColl",1),
+        ("obstacle_hits",          "ObsHit",  1),
+        ("path_length_ratio",      "PathRatio",3),
+        ("mean_arrival_step",      "ArrStep", 1),
+    ]
+
+    for (map_name, n) in combos:
+        print(f"\n  ── {map_name}  N={n} ──")
+        header = f"  {'Method':<32s}" + "".join(f"  {name:>10s}" for _, name, _ in display_metrics)
+        print(header)
+        print("  " + "-" * (32 + 12 * len(display_metrics)))
+        for e in exps:
+            groups = group_by_map_n(e["rows"])
+            rows = groups.get((map_name, n), [])
+            if not rows:
+                continue
+            line = f"  {e['label']:<32s}"
+            for metric, _, dec in display_metrics:
+                mean, std, cnt = aggregate(rows, metric)
+                if math.isnan(mean):
+                    line += f"  {'—':>10s}"
+                else:
+                    line += f"  {mean:>10.{dec}f}"
+            line += f"  (n={len(rows)})"
+            print(line)
+
+
+def print_ablation_summary(experiments):
+    """High-level one-number-per-row ablation table for the paper."""
+    print_section("ABLATION TABLE  (Set A, 512 steps unless noted)")
+
+    ABLATION = [
+        ("A",       512, "ORCA (straight)",           "ORCA baseline"),
+        ("A",       512, "PO-ORCA (straight)",         "Priority-ordered ORCA (ablation)"),
+        ("A",       512, "Straight + EPIBTShield",     "EPIBTShield without learning"),
+        ("A",       256, "Flow v4b + EPIBT [256 st]",  "Ours at 256 steps"),
+        ("A",       512, "Flow v4b + EPIBT [512 st]",  "Ours at 512 steps"),
+    ]
+
+    col_widths = [38, 9, 9, 9, 9, 9, 9]
+    header = (
+        f"{'Method':<38s} {'N50-AG':>9s} {'N50-CO':>9s} "
+        f"{'N100-AG':>9s} {'N100-CO':>9s} {'N50-Succ':>9s} {'N50-PLR':>9s}"
+    )
+    print()
+    print(header)
+    print("-" * sum(col_widths) + "--" * len(col_widths))
+
+    for (eval_set, steps, label, description) in ABLATION:
+        exp = next(
+            (e for e in experiments
+             if e["eval_set"] == eval_set and e["max_steps"] == steps and e["label"] == label),
+            None
+        )
+        if exp is None:
+            print(f"  {label:<36s} (not found)")
+            continue
+
+        groups = group_by_map_n(exp["rows"])
+
+        def get(map_name, n, metric):
+            rows = groups.get((map_name, n), [])
+            mean, _, _ = aggregate(rows, metric)
+            return mean
+
+        # Average across maps for N=50 and N=100
+        maps_50 = [(m, n) for (m, n) in groups.keys() if n == 50]
+        maps_100 = [(m, n) for (m, n) in groups.keys() if n == 100]
+
+        def avg_across_maps(combos, metric):
+            vals = []
+            for (m, n) in combos:
+                mean, _, cnt = aggregate(groups.get((m, n), []), metric)
+                if not math.isnan(mean) and cnt > 0:
+                    vals.append(mean)
+            return sum(vals) / len(vals) if vals else float("nan")
+
+        n50_ag  = avg_across_maps(maps_50,  "agent_fraction_at_goal")
+        n50_co  = avg_across_maps(maps_50,  "collisions")
+        n100_ag = avg_across_maps(maps_100, "agent_fraction_at_goal")
+        n100_co = avg_across_maps(maps_100, "collisions")
+        n50_su  = avg_across_maps(maps_50,  "success")
+        n50_plr = avg_across_maps(maps_50,  "path_length_ratio")
+
+        nscen = len(exp["rows"]) // max(len(groups), 1) if groups else 0
+        nscen_total = len(exp["rows"])
+
+        print(
+            f"  {label:<36s} "
+            f"{fmt_plain(n50_ag):>9s} {fmt_plain(n50_co, 1):>9s} "
+            f"{fmt_plain(n100_ag):>9s} {fmt_plain(n100_co, 1):>9s} "
+            f"{fmt_plain(n50_su):>9s} {fmt_plain(n50_plr):>9s}"
+            f"  [{nscen_total} rows]"
+        )
+
+    print()
+    print("  Columns: AtGoal (fraction at goal), Coll (collision count),")
+    print("           Succ (episode success rate), PLR (path-length ratio vs optimal).")
+    print("  Averaged across all maps in the eval set.")
+
+
+def print_generalization(experiments):
+    print_section("GENERALIZATION  (Set B — Seen large + OOD room, 512 steps)")
+    print_detailed_table(experiments, "B")
+
+    print_section("OOD HOLDOUT  (Set C — warehouse, 512 steps)")
+    print_detailed_table(experiments, "C")
+
+
+def print_per_map_breakdown(experiments, eval_set_key: str, max_steps: Optional[int] = None):
+    exps = [e for e in experiments if e["eval_set"] == eval_set_key]
+    if max_steps:
+        exps = [e for e in exps if e["max_steps"] == max_steps]
+    if not exps:
+        return
+
+    combos = set()
+    for e in exps:
+        for key in group_by_map_n(e["rows"]).keys():
+            combos.add(key)
+
+    for (map_name, n) in sorted(combos):
+        print(f"\n    {map_name}  N={n}:")
+        for e in exps:
+            rows = group_by_map_n(e["rows"]).get((map_name, n), [])
+            if not rows:
+                continue
+            ag_mean, ag_std, cnt = aggregate(rows, "agent_fraction_at_goal")
+            co_mean, co_std, _   = aggregate(rows, "collisions")
+            nc_mean, nc_std, _   = aggregate(rows, "near_collisions")
+            su_mean, _, _        = aggregate(rows, "success")
+            pl_mean, _, _        = aggregate(rows, "path_length_ratio")
+            ar_mean, _, _        = aggregate(rows, "mean_arrival_step")
+            print(
+                f"      {e['label']:<38s}"
+                f"  at_goal={ag_mean:.3f}±{ag_std:.3f}"
+                f"  coll={co_mean:6.1f}±{co_std:.1f}"
+                f"  near={nc_mean:6.1f}"
+                f"  succ={su_mean:.3f}"
+                f"  PLR={pl_mean:.3f}"
+                f"  arr_step={ar_mean:.1f}"
+                f"  (n={cnt})"
+            )
+
+
+def compute_improvement(experiments, baseline_label, method_label, eval_set="A", max_steps=512):
+    baseline = next((e for e in experiments if e["label"] == baseline_label
+                     and e["eval_set"] == eval_set and e["max_steps"] == max_steps), None)
+    method   = next((e for e in experiments if e["label"] == method_label
+                     and e["eval_set"] == eval_set and e["max_steps"] == max_steps), None)
+    if not baseline or not method:
+        return
+
+    print(f"\n  Improvement: [{method_label}] vs [{baseline_label}]")
+    base_groups = group_by_map_n(baseline["rows"])
+    meth_groups = group_by_map_n(method["rows"])
+    combos = sorted(set(base_groups.keys()) & set(meth_groups.keys()))
+    for key in combos:
+        b_ag, _, _ = aggregate(base_groups[key], "agent_fraction_at_goal")
+        m_ag, _, _ = aggregate(meth_groups[key], "agent_fraction_at_goal")
+        b_co, _, _ = aggregate(base_groups[key], "collisions")
+        m_co, _, _ = aggregate(meth_groups[key], "collisions")
+        if math.isnan(b_ag) or math.isnan(m_ag):
+            continue
+        delta_ag = m_ag - b_ag
+        delta_co = m_co - b_co
+        pct_ag   = 100 * delta_ag / max(b_ag, 1e-6)
+        pct_co   = 100 * delta_co / max(b_co, 1e-6)
+        direction_ag = "↑" if delta_ag >= 0 else "↓"
+        direction_co = "↓" if delta_co <= 0 else "↑"
+        print(
+            f"    {key[0]:<22s} N={key[1]:3d}:  "
+            f"at_goal {b_ag:.3f} → {m_ag:.3f}  "
+            f"({direction_ag}{abs(pct_ag):.1f}%)   "
+            f"coll {b_co:.1f} → {m_co:.1f}  "
+            f"({direction_co}{abs(pct_co):.1f}%)"
+        )
+
+
+def write_markdown(experiments, output_path: str):
+    lines = ["# Evaluation Results Summary\n",
+             f"*Auto-generated by analyze_evals.py*\n"]
+
+    def section(title):
+        lines.append(f"\n## {title}\n")
+
+    # Set A ablation table
+    section("Ablation Table — Set A (random-32-32-10 + empty-48-48)")
+    ABLATION_ORDER = [
+        ("A", 512, "ORCA (straight)"),
+        ("A", 512, "PO-ORCA (straight)"),
+        ("A", 512, "Straight + EPIBTShield"),
+        ("A", 256, "Flow v4b + EPIBT [256 st]"),
+        ("A", 512, "Flow v4b + EPIBT [512 st]"),
+    ]
+
+    # Gather all (map, N) combos in Set A
+    setA_exps = [e for e in experiments if e["eval_set"] == "A"]
+    combos = set()
+    for e in setA_exps:
+        for k in group_by_map_n(e["rows"]).keys():
+            combos.add(k)
+    combos = sorted(combos)
+
+    # Header
+    header_cells = ["| Method |"]
+    for (m, n) in combos:
+        short = m.replace("random-32-32-10", "rand32").replace("empty-48-48", "emp48")
+        header_cells.append(f" {short} N={n} AtGoal | {short} N={n} Coll |")
+    lines.append("".join(header_cells) + "\n")
+    lines.append("|" + "|".join(["---"] * (1 + 2 * len(combos))) + "|\n")
+
+    for (eval_set, steps, label) in ABLATION_ORDER:
+        exp = next((e for e in experiments
+                    if e["eval_set"] == eval_set and e["max_steps"] == steps and e["label"] == label), None)
+        if exp is None:
+            lines.append(f"| {label} |" + " — |" * (2 * len(combos)) + "\n")
+            continue
+        groups = group_by_map_n(exp["rows"])
+        row_cells = [f"| {label} |"]
+        for key in combos:
+            rows = groups.get(key, [])
+            if not rows:
+                row_cells.append(" — | — |")
+                continue
+            ag, ag_std, _ = aggregate(rows, "agent_fraction_at_goal")
+            co, co_std, _ = aggregate(rows, "collisions")
+            row_cells.append(f" {ag:.3f}±{ag_std:.3f} | {co:.1f}±{co_std:.1f} |")
+        lines.append("".join(row_cells) + "\n")
+
+    # Set B and C
+    for skey, stitle in [("B", "Generalization — Set B"), ("C", "OOD Holdout — Set C")]:
+        section(stitle)
+        exps = [e for e in experiments if e["eval_set"] == skey]
+        if not exps:
+            lines.append("*(no data)*\n")
+            continue
+        combos_s = set()
+        for e in exps:
+            for k in group_by_map_n(e["rows"]).keys():
+                combos_s.add(k)
+        combos_s = sorted(combos_s)
+        lines.append("| Method | Map | N | AtGoal | Coll | NearColl | Succ | PathRatio |\n")
+        lines.append("|---|---|---|---|---|---|---|---|\n")
+        for e in exps:
+            groups = group_by_map_n(e["rows"])
+            for key in combos_s:
+                rows = groups.get(key, [])
+                if not rows:
+                    continue
+                ag, _, _ = aggregate(rows, "agent_fraction_at_goal")
+                co, _, _ = aggregate(rows, "collisions")
+                nc, _, _ = aggregate(rows, "near_collisions")
+                su, _, _ = aggregate(rows, "success")
+                pl, _, _ = aggregate(rows, "path_length_ratio")
+                lines.append(
+                    f"| {e['label']} | {key[0]} | {key[1]} "
+                    f"| {ag:.3f} | {co:.1f} | {nc:.1f} | {su:.3f} | {pl:.3f} |\n"
+                )
+
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    with open(output_path, "w") as f:
+        f.writelines(lines)
+    print(f"\n  [markdown] Written to {output_path}")
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--markdown", action="store_true",
+                        help="Also write docs/eval_results.md")
+    args = parser.parse_args()
+
+    print("\nLoading experiments...")
+    experiments = load_experiments(CATALOG)
+    print(f"Loaded {len(experiments)} experiment(s).")
+
+    # ── 1. High-level ablation table ────────────────────────────────────────
+    print_ablation_summary(experiments)
+
+    # ── 2. Per-map detail for Set A ──────────────────────────────────────────
+    print_section("SET A — Per-map detail  (512 steps)")
+    print_per_map_breakdown(experiments, "A", max_steps=512)
+
+    print_section("SET A — Step budget comparison  (v4b, 256 vs 512 steps)")
+    print_per_map_breakdown(experiments, "A")   # all steps
+
+    # ── 3. Improvement computations ──────────────────────────────────────────
+    print_section("IMPROVEMENT ANALYSIS")
+    compute_improvement(experiments,
+                        "ORCA (straight)",
+                        "Straight + EPIBTShield",
+                        eval_set="A", max_steps=512)
+    compute_improvement(experiments,
+                        "Straight + EPIBTShield",
+                        "Flow v4b + EPIBT [512 st]",
+                        eval_set="A", max_steps=512)
+    compute_improvement(experiments,
+                        "ORCA (straight)",
+                        "Flow v4b + EPIBT [512 st]",
+                        eval_set="A", max_steps=512)
+    compute_improvement(experiments,
+                        "PO-ORCA (straight)",
+                        "Straight + EPIBTShield",
+                        eval_set="A", max_steps=512)
+
+    # ── 4. Generalization / OOD ──────────────────────────────────────────────
+    print_section("SET B — Generalization detail  (512 steps)")
+    print_per_map_breakdown(experiments, "B", max_steps=512)
+
+    print_section("SET C — OOD warehouse detail  (512 steps)")
+    print_per_map_breakdown(experiments, "C", max_steps=512)
+
+    # ── 5. Model comparison ──────────────────────────────────────────────────
+    print_section("MODEL COMPARISON — v4 vs v4b at 256 steps  (Set A)")
+    print_per_map_breakdown(experiments, "A",       max_steps=256)
+    print_per_map_breakdown(experiments, "A_v4cmp", max_steps=256)
+
+    # ── 6. Markdown export ───────────────────────────────────────────────────
+    if args.markdown:
+        write_markdown(experiments, "docs/eval_results.md")
+
+    print("\n" + "=" * 80)
+    print("  Done.")
+    print("=" * 80 + "\n")
+
+
+if __name__ == "__main__":
+    main()
