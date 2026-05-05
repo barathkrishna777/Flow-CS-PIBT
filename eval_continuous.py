@@ -296,6 +296,7 @@ def write_rows(output_csv: str, rows: List[Dict[str, object]]) -> None:
         "agent_fraction_at_goal",
         "path_length",
         "path_length_ratio",
+        "arrived_path_length_ratio",
         "smoothness",
         "collisions",
         "near_collisions",
