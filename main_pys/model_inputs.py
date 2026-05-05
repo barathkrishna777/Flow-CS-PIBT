@@ -296,18 +296,24 @@ def create_continuous_data_object(
 
     deltas = pos_list[:, None, :] - pos_list[None, :, :]
     dists = np.sqrt(np.sum(deltas ** 2, axis=2, dtype=np.float32)).astype(np.float32)
-    agent_patch = np.zeros((num_agents, patch_size, patch_size), dtype=np.float32)
     offsets = np.arange(-k, k + 1, dtype=np.float32)
     row_grid, col_grid = np.meshgrid(offsets, offsets, indexing='ij')
-    for i in range(num_agents):
-        rel = pos_list - pos_list[i]
-        occupancy = np.zeros_like(agent_patch[i])
-        for j in range(num_agents):
-            if i == j:
-                continue
-            sigma = max(0.5, dists[i, j])
-            occupancy += np.exp(-((row_grid - rel[j, 0]) ** 2 + (col_grid - rel[j, 1]) ** 2) / (2 * sigma ** 2))
-        agent_patch[i] = np.clip(occupancy, 0.0, 1.0)
+
+    # Vectorized occupancy: broadcast all pairs at once
+    # rel_all[i, j] = pos_list[j] - pos_list[i], shape (N, N, 2)
+    rel_all = pos_list[None, :, :] - pos_list[:, None, :]
+    sigma = np.maximum(0.5, dists)  # (N, N)
+
+    dr = row_grid[None, None, :, :] - rel_all[:, :, 0, None, None]  # (N, N, P, P)
+    dc = col_grid[None, None, :, :] - rel_all[:, :, 1, None, None]  # (N, N, P, P)
+    gauss = np.exp(-(dr ** 2 + dc ** 2) / (2 * sigma[:, :, None, None] ** 2))
+
+    # Zero out self-contributions (i==j diagonal)
+    mask = np.ones((num_agents, num_agents), dtype=np.float32)
+    np.fill_diagonal(mask, 0.0)
+    gauss *= mask[:, :, None, None]
+
+    agent_patch = np.clip(gauss.sum(axis=1), 0.0, 1.0).astype(np.float32)
 
     node_features = np.stack([map_patches, goal_dx, goal_dy, agent_patch], axis=1).astype(np.float32)
     edge_index, edge_attr = build_continuous_neighbor_graph(pos_list, m, neighbor_radius=neighbor_radius)
