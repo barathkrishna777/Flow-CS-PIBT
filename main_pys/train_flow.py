@@ -9,10 +9,12 @@ from torch.utils.data import Sampler, Subset, random_split
 from torch.utils.data.distributed import DistributedSampler
 from torch_geometric.loader import DataLoader
 from tqdm import tqdm
+import numpy as np
 import os
 import argparse
 import contextlib
 import math
+import random
 
 from main_pys.dataset import FlowMAPFDataset
 from main_pys.dataset_preprocessed import PreprocessedFlowMAPFDataset, build_weighted_sampler
@@ -509,10 +511,16 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
           reset_best_val_loss=False, action_head_only=False, action_head_lr=5e-4,
           wait_head_only=False, wait_head_lr=5e-4, calibration_only=False,
           freeze_movement_logit_scale=False,
-          distributed=False, local_rank=None):
+          distributed=False, local_rank=None, seed=42):
     ddp_info = setup_distributed(distributed=distributed, local_rank=local_rank)
     is_main = ddp_info["is_main"]
     log = print if is_main else (lambda *args, **kwargs: None)
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
     device = torch.device(f"cuda:{ddp_info['local_rank']}" if ddp_info["enabled"] else ("cuda" if torch.cuda.is_available() else "cpu"))
     use_amp = device.type == "cuda"
@@ -554,7 +562,7 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
     if val_size > 0:
         train_dataset, val_dataset = random_split(
             full_dataset, [train_size, val_size],
-            generator=torch.Generator().manual_seed(42)
+            generator=torch.Generator().manual_seed(seed)
         )
         log(f"Train/Val split: {train_size:,} / {val_size:,} ({val_split*100:.0f}%)")
     else:
@@ -594,7 +602,7 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
                 num_replicas=ddp_info["world_size"],
                 rank=ddp_info["rank"],
                 replacement=True,
-                seed=42,
+                seed=seed,
             )
             sampler = train_sampler
         else:
@@ -782,6 +790,7 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
             "val_size": val_size,
             "num_workers": cpu_cores,
             "quick": quick,
+            "seed": seed,
             "use_amp": use_amp,
             "device": str(device),
             "weighted_sampling": sampler is not None,
@@ -1045,6 +1054,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--run-name", type=str, default="",
                         help="Suffix for checkpoint names, e.g. wave2 -> large_scale_flow_wave2_epoch_N.pt")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Global random seed for reproducibility")
     parser.add_argument("--quick", action="store_true",
                         help="Quick run: 1 epoch only (for testing)")
     parser.add_argument("--no-wandb", action="store_true",
@@ -1157,4 +1168,5 @@ if __name__ == "__main__":
           calibration_only=args.calibration_only,
           freeze_movement_logit_scale=args.freeze_movement_logit_scale,
           distributed=args.distributed,
-          local_rank=args.local_rank)
+          local_rank=args.local_rank,
+          seed=args.seed)

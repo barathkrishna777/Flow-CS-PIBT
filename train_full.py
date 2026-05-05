@@ -87,6 +87,8 @@ def main():
                         help="Number of GNN layers (default: 6)")
     parser.add_argument("--run-name", type=str, default="",
                         help="Run name suffix for checkpoints")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed for training")
     args = parser.parse_args()
 
     # Resolve project directory (where this script lives = repo root)
@@ -111,12 +113,16 @@ def main():
         sys.executable, "-m", "main_pys.train_flow",
         "--hidden-dim", str(args.hidden_dim),
         "--num-layers", str(args.num_layers),
+        "--seed", str(args.seed),
     ]
     if args.run_name:
         train_cmd.extend(["--run-name", args.run_name])
 
     print("=" * 60)
-    print(f"Starting training (hidden_dim={args.hidden_dim}, num_layers={args.num_layers})...")
+    print(
+        f"Starting training (hidden_dim={args.hidden_dim}, "
+        f"num_layers={args.num_layers}, seed={args.seed})..."
+    )
     print("=" * 60)
     result = subprocess.run(train_cmd, cwd=project_dir)
 
