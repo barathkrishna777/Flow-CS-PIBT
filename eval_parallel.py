@@ -60,23 +60,27 @@ def _split_round_robin(ids: List[int], n: int) -> List[List[int]]:
 
 def _merge_csvs(shard_paths: List[str], output_csv: str) -> int:
     os.makedirs(os.path.dirname(output_csv) or ".", exist_ok=True)
+    existing = [p for p in shard_paths if os.path.exists(p)]
+    if not existing:
+        return 0
+    # Collect the union of fieldnames across all shards to handle mixed schema versions.
+    seen: dict = {}
+    for shard in existing:
+        with open(shard, newline="") as f:
+            names = csv.DictReader(f).fieldnames or []
+            for n in names:
+                if n not in seen:
+                    seen[n] = None
+    fieldnames = list(seen.keys())
     total_rows = 0
-    header_written = False
-    fieldnames = None
     with open(output_csv, "w", newline="") as out_f:
-        writer = None
-        for shard in shard_paths:
-            if not os.path.exists(shard):
-                continue
+        writer = csv.DictWriter(out_f, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        for shard in existing:
             with open(shard, newline="") as in_f:
-                reader = csv.DictReader(in_f)
-                if not header_written:
-                    fieldnames = reader.fieldnames
-                    writer = csv.DictWriter(out_f, fieldnames=fieldnames)
-                    writer.writeheader()
-                    header_written = True
-                for row in reader:
-                    writer.writerow(row)
+                for row in csv.DictReader(in_f):
+                    # Drop None keys produced when a row has more columns than its header.
+                    writer.writerow({k: v for k, v in row.items() if k is not None})
                     total_rows += 1
     return total_rows
 
