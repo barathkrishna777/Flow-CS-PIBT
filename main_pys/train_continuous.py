@@ -424,12 +424,11 @@ def train(args):
         ).to(device)
 
     if ddp_info["enabled"]:
-        find_unused = args.action_loss_weight <= 0
         model = DDP(
             model,
             device_ids=[ddp_info["local_rank"]],
             output_device=ddp_info["local_rank"],
-            find_unused_parameters=find_unused,
+            find_unused_parameters=True,
         )
 
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
