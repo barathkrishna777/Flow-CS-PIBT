@@ -1382,12 +1382,30 @@ class ContinuousMAPFEnv:
         velocities = np.asarray(self.history_velocities, dtype=np.float32) if self.history_velocities else np.zeros((0, len(self.positions), 2), dtype=np.float32)
         direct = np.linalg.norm(self.goals - self.history_positions[0], axis=1).sum()
         path_length = compute_path_length(positions)
+
+        arrived_mask = self.arrival_steps >= 0
+        if arrived_mask.any():
+            direct_arrived = np.linalg.norm(
+                self.goals[arrived_mask] - self.history_positions[0][arrived_mask],
+                axis=1,
+            ).sum()
+            path_length_arrived = 0.0
+            for agent_idx in np.flatnonzero(arrived_mask):
+                end = min(int(self.arrival_steps[agent_idx]) + 1, len(positions))
+                path_length_arrived += compute_path_length(
+                    positions[:end, agent_idx:agent_idx + 1, :]
+                )
+            arrived_plr = float(path_length_arrived / max(direct_arrived, 1e-6))
+        else:
+            arrived_plr = float("nan")
+
         return {
             "success": float(np.all(at_goal)),
             "agents_at_goal": float(at_goal.sum()),
             "agent_fraction_at_goal": float(np.mean(at_goal)),
             "path_length": path_length,
             "path_length_ratio": float(path_length / max(direct, 1e-6)),
+            "arrived_path_length_ratio": arrived_plr,
             "smoothness": compute_smoothness(velocities),
             "collisions": float(self.metrics.collisions),
             "near_collisions": float(self.metrics.near_collisions),
