@@ -771,6 +771,13 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
             output_device=ddp_info["local_rank"],
             find_unused_parameters=find_unused,
         )
+        # DDP calls _sync_params() (in-place broadcast) at the start of every
+        # model.forward(). Two forward calls per backward step (discrete_forward_mode="both")
+        # increment parameter version counters between the first forward and backward,
+        # causing "modified by an inplace operation" errors. Fall back to single forward.
+        if discrete_forward_mode == "both":
+            log("[DDP] discrete_forward_mode='both' unsupported under DDP (double forward/single backward); using 'shared'.")
+            discrete_forward_mode = "shared"
 
     # WandB setup
     if use_wandb and is_main:
