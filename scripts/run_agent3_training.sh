@@ -30,6 +30,7 @@ if [[ ! -d "$MAPDIR" ]]; then
 fi
 
 mkdir -p "$OUTPUT_DIR"
+export PYTHONPATH="${PWD}${PYTHONPATH:+:${PYTHONPATH}}"
 
 for SEED in $SEEDS; do
   RUN_NAME="v4b_seed${SEED}"
