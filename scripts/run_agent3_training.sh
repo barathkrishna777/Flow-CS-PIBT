@@ -11,8 +11,8 @@ PREPROCESSED_DIR="${PREPROCESSED_DIR:-data/continuous_eecbs/preprocessed_shards_
 DATA_DIR="${DATA_DIR:-data/continuous_eecbs/raw}"
 MAPDIR="${MAPDIR:-data/mapf-map}"
 OUTPUT_DIR="${OUTPUT_DIR:-checkpoints/continuous_v4b}"
-BATCH_SIZE="${BATCH_SIZE:-32}"  # per GPU; 32 x 4 GPUs = effective batch 128
-NUM_WORKERS="${NUM_WORKERS:-12}"
+BATCH_SIZE="${BATCH_SIZE:-16}"  # per GPU; 16 x 4 GPUs = effective batch 64
+NUM_WORKERS="${NUM_WORKERS:-2}"  # 4 ranks x 2 workers avoids shard-loader RAM spikes
 HIDDEN_DIM="${HIDDEN_DIM:-1024}"
 NUM_LAYERS="${NUM_LAYERS:-6}"
 EPOCHS="${EPOCHS:-10}"
