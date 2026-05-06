@@ -108,6 +108,23 @@ def aggregate_flow_samples(candidate_velocities: List[np.ndarray], aggregation: 
     raise ValueError(f"Unsupported flow aggregation: {aggregation}")
 
 
+def validate_model_input_channels(model, data, model_path: Optional[str] = None) -> None:
+    expected = getattr(model, "num_input_channels", None)
+    if expected is None:
+        return
+    observed = int(data.x.shape[1])
+    expected = int(expected)
+    if observed == expected:
+        return
+    source = f" ({model_path})" if model_path else ""
+    raise RuntimeError(
+        f"Model/input channel mismatch{source}: checkpoint expects {expected} "
+        f"local-map channel(s), but eval_continuous built {observed}. "
+        "Continuous v4b evals require checkpoints trained with main_pys.train_continuous; "
+        "checkpoints from main_pys.train_flow use the older 3-channel input format."
+    )
+
+
 def load_model(model_path: str, device: torch.device):
     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
     model_type = checkpoint.get("model_type", "gnn")
@@ -160,6 +177,7 @@ def run_learned_policy(
         step_start = time.time()
         data = create_continuous_data_object(env.positions, goals, env.obstacle_map, k=k, m=m, max_speed=env.max_speed)
         data = normalize_continuous_graph_data(data, k=k, max_speed=env.max_speed)
+        validate_model_input_channels(model, data)
         data = data.to(device)
         n_agents = env.positions.shape[0]
 

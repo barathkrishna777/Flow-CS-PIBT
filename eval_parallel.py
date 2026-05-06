@@ -85,6 +85,12 @@ def _merge_csvs(shard_paths: List[str], output_csv: str) -> int:
     return total_rows
 
 
+def _remove_stale_outputs(paths: List[str]) -> None:
+    for path in paths:
+        if os.path.exists(path):
+            os.remove(path)
+
+
 def _print_summary(output_csv: str) -> None:
     if not os.path.exists(output_csv):
         print("[parallel] No output CSV to summarize")
@@ -187,6 +193,8 @@ def main() -> None:
     if not ext:
         ext = ".csv"
     shard_paths = [f"{base}.{r}{ext}" for r in range(num_gpus)]
+    log_paths = [f"{base}.gpu{r}.log" for r in range(num_gpus)]
+    _remove_stale_outputs([args.output_csv, *shard_paths, *log_paths])
 
     # Build the base command forwarding all eval_continuous flags
     base_cmd: List[str] = [
