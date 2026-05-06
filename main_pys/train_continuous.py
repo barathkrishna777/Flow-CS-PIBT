@@ -545,7 +545,7 @@ def main():
     parser.add_argument("--num-heads", type=int, default=8, help="Transformer attention heads (transformer model only)")
     parser.add_argument("--chunk-horizon", type=int, default=1, help="Number of future steps to predict (action chunking)")
     parser.add_argument("--k", type=int, default=4)
-    parser.add_argument("--m", type=int, default=5)
+    parser.add_argument("--m", "--num-neighbors", dest="m", type=int, default=5)
     parser.add_argument("--num-directions", type=int, default=8)
     parser.add_argument("--wait-threshold", type=float, default=0.1)
     parser.add_argument("--dt", type=float, default=0.2)

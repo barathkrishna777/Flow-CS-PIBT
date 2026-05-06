@@ -38,7 +38,7 @@ for SEED in $SEEDS; do
   echo "GPUs=${NGPUS} per-GPU batch=${BATCH_SIZE} hidden=${HIDDEN_DIM} layers=${NUM_LAYERS}"
   echo "======================================================================"
 
-  torchrun --standalone --nproc_per_node="$NGPUS" -m main_pys.train_continuous \
+  torchrun --standalone --nproc_per_node="$NGPUS" -- main_pys/train_continuous.py \
     --preprocessed-dir "$PREPROCESSED_DIR" \
     --data-dir "$DATA_DIR" \
     --map-dir "$MAPDIR" \
@@ -51,7 +51,7 @@ for SEED in $SEEDS; do
     --hidden-dim "$HIDDEN_DIM" \
     --num-layers "$NUM_LAYERS" \
     --k 4 \
-    --m 5 \
+    --num-neighbors 5 \
     --lr "$LR" \
     --flow-loss-weight 1.0 \
     --action-loss-weight 0.1 \
