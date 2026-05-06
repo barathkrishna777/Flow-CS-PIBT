@@ -116,7 +116,7 @@ def fig1_mechanism_decomposition():
     ax2.set_ylim(0, 5000)
     ax2.set_xticks(xs)
     ax2.set_xticklabels(methods, fontsize=7)
-    ax2.text(4.0, 1000, "84.8% fewer\nvs ORCA", fontsize=6.5, color=C["flow_epibt"],
+    ax2.text(3.55, 1200, "84.8% fewer\nvs ORCA", fontsize=6.5, color=C["flow_epibt"],
              ha="center", style="italic")
 
     save(fig, "fig1_mechanism_decomposition")
@@ -135,11 +135,14 @@ def fig2_generalization():
     method_order = ["orca", "straight_epibt", "flow_epibt"]
     labels = {"orca": "ORCA", "straight_epibt": "Straight+EPIBT", "flow_epibt": "Flow+EPIBT"}
 
-    fig, axes = plt.subplots(1, 4, figsize=(6.8, 2.0), sharey=True)
-    fig.subplots_adjust(wspace=0.12)
+    # sharey=False so set_yticks on one panel doesn't clobber others
+    fig, axes = plt.subplots(1, 4, figsize=(6.8, 2.2))
+    fig.subplots_adjust(wspace=0.12, bottom=0.22)
 
-    for ax, (title, data) in zip(axes, maps):
-        ys = np.arange(len(method_order))
+    ys = np.arange(len(method_order))
+    method_display = [labels[m] for m in method_order]
+
+    for col_idx, (ax, (title, data)) in enumerate(zip(axes, maps)):
         vals = [data[m] for m in method_order]
         cols = [C[m] for m in method_order]
 
@@ -147,23 +150,25 @@ def fig2_generalization():
         ax.plot(vals, ys, color="#CCCCCC", lw=1.0, zorder=1)
         for i, (v, c) in enumerate(zip(vals, cols)):
             ax.scatter(v, i, color=c, s=55, zorder=3, edgecolors="white", linewidths=0.4)
-            ax.text(v + 0.02, i + 0.15, f"{v:.3f}", fontsize=6.5, va="bottom")
+            ax.text(v + 0.02, i + 0.12, f"{v:.3f}", fontsize=6.5, va="bottom")
 
         ax.set_xlim(-0.02, 0.75)
+        ax.set_ylim(-0.6, 2.5)
         ax.set_xlabel("AtGoal", fontsize=7.5)
         ax.set_title(title, fontsize=8, fontweight="bold")
         ax.axvline(0, color="#DDDDDD", lw=0.4)
-        if ax == axes[0]:
-            ax.set_yticks(ys)
-            ax.set_yticklabels([labels[m] for m in method_order], fontsize=7)
+        ax.set_yticks(ys)
+        if col_idx == 0:
+            ax.set_yticklabels(method_display, fontsize=7)
         else:
-            ax.set_yticks([])
+            ax.set_yticklabels([""] * len(ys))
+            ax.tick_params(axis="y", length=0)
         ax.grid(axis="x", alpha=0.3, lw=0.3)
 
-    # Annotation on warehouse panels
-    axes[2].text(0.35, -0.7, "OOD reversal:\nlearned prior hurts",
-                 fontsize=6, color=C["flow_epibt"], ha="center",
-                 transform=axes[2].get_xaxis_transform())
+        # OOD annotation inside the warehouse panels
+        if "warehouse" in title:
+            ax.text(0.37, -0.50, "OOD reversal", fontsize=6,
+                    color="#AA4400", ha="center", style="italic")
 
     save(fig, "fig2_generalization_ood")
 
@@ -275,15 +280,19 @@ def fig4_multiseed():
     ax.set_xlim(0.7, 1.05)
     ax.set_title("Training seed robustness (3 seeds)", fontsize=9, fontweight="bold")
 
-    # Reference line label
-    ax.text(0.774, ys[-1] + 0.35, "Straight+EPIBT", fontsize=6,
-            color=C["straight_epibt"], ha="center")
+    # Reference line label — place above the topmost row to avoid overlap
+    ax.text(0.774, ys[0] + 0.45, "Straight\n+EPIBT", fontsize=5.5,
+            color=C["straight_epibt"], ha="center", linespacing=1.2)
 
-    # Seed legend
-    for j, sl in enumerate(seed_labels):
-        ax.scatter([], [], color=C["flow_epibt"], marker=["o", "^", "s"][j], s=20, label=sl)
-    ax.scatter([], [], color=C["flow_epibt"], marker="D", s=40, label="mean")
-    ax.legend(loc="lower left", fontsize=6, frameon=False, ncol=4)
+    # Seed legend: direct labels on the random N=50 row (ys[1]) to avoid
+    # overlapping the densely-packed random N=100 row (ys[-1])
+    label_row = ys[1]  # random N=50
+    seed_vals_ref = configs[2][1]  # [0.868, 0.781, 0.801]
+    for j, (sv, sl) in enumerate(zip(seed_vals_ref, seed_labels)):
+        ax.text(sv, label_row - 0.28, sl, fontsize=5.5,
+                ha="center", color="#555555")
+    ax.text(np.mean(seed_vals_ref), label_row - 0.28, "mean(◆)",
+            fontsize=5.5, ha="center", color="#555555")
 
     save(fig, "fig4_multiseed_robustness")
 
