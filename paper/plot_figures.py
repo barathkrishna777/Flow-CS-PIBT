@@ -248,7 +248,8 @@ def fig4_multiseed():
     }
     seed_labels = ["s42", "s123", "s456"]
 
-    fig, ax = plt.subplots(figsize=(3.4, 2.4))
+    fig, ax = plt.subplots(figsize=(3.4, 2.6))
+    fig.subplots_adjust(bottom=0.22)
 
     ys = np.arange(len(configs))[::-1]
     for i, (label, seeds) in enumerate(configs):
@@ -290,9 +291,8 @@ def fig4_multiseed():
     for j, sl in enumerate(seed_labels):
         ax.scatter([], [], color=C["flow_epibt"], marker=["o", "^", "s"][j], s=20, label=sl)
     ax.scatter([], [], color=C["flow_epibt"], marker="D", s=40, label="mean")
-    ax.legend(loc="lower right", fontsize=6, frameon=True,
-              framealpha=0.92, edgecolor="#DDDDDD", ncol=4,
-              handletextpad=0.3, columnspacing=0.6)
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.18), fontsize=6,
+              frameon=False, ncol=4, handletextpad=0.3, columnspacing=0.8)
 
     save(fig, "fig4_multiseed_robustness")
 
