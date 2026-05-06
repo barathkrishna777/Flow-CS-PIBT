@@ -8,14 +8,14 @@ N="${N:-25}"
 NUM_GPUS="${NUM_GPUS:-4}"
 MODEL_DIR="${MODEL_DIR:-checkpoints/continuous_v4b}"
 MODEL_42="${MODEL_42:-${MODEL_DIR}/continuous_flow_v4b_best.pt}"
-MODEL_TEMPLATE="${MODEL_TEMPLATE:-${MODEL_DIR}/continuous_flow_v4b_seed{seed}_best.pt}"
+MODEL_TEMPLATE="${MODEL_TEMPLATE:-${MODEL_DIR}/continuous_flow_v4b_seed__SEED___best.pt}"
 
 model_path_for_seed() {
   local seed="$1"
   if [[ "$seed" == "42" ]]; then
     echo "$MODEL_42"
   else
-    echo "${MODEL_TEMPLATE/\{seed\}/$seed}"
+    echo "${MODEL_TEMPLATE/__SEED__/$seed}"
   fi
 }
 
