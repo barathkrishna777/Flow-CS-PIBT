@@ -1,52 +1,31 @@
 #!/usr/bin/env bash
-# Agent 3 training commands - run on Lambda from repo root.
-#
-# TODO: Fill in the two zip paths below before running this script.
-#   BASE_DATA: path to the base data zip (maps, BDs, scen files, etc.)
-#   TRAJ_DATA: path to the v4b trajectory training dataset zip
+# Multi-seed training — run on Lambda from repo root.
+# Data must already be extracted to data/ before running.
+# Uses torchrun for 4-GPU DDP; --batch-size 64 keeps effective batch=256 (matching single-GPU seed42).
+# Checkpoints are written to the repo root as large_scale_flow_v4b_seed{N}_best.pt
 set -euo pipefail
 
-BASE_DATA="/path/to/base_data.zip"             # TODO: EDIT THIS
-TRAJ_DATA="/path/to/trajectories_v4b.zip"      # TODO: EDIT THIS
+NGPUS="${NGPUS:-4}"
+# Per-GPU batch: 64 → effective batch = 64×4 = 256, same as single-GPU seed42.
+# Set BATCH_SIZE=256 to maximise throughput at the cost of slightly different training dynamics.
+BATCH_SIZE="${BATCH_SIZE:-64}"
 
-CHECKPOINT_DIR="checkpoints/continuous_v4b"
-SEEDS=(42 123 456)
-
-if [[ "$BASE_DATA" == "/path/to/base_data.zip" || "$TRAJ_DATA" == "/path/to/trajectories_v4b.zip" ]]; then
-  echo "ERROR: edit BASE_DATA and TRAJ_DATA in scripts/run_agent3_training.sh before running." >&2
-  exit 1
-fi
-
-mkdir -p "$CHECKPOINT_DIR"
+SEEDS=(123 456)   # seed=42 already trained single-GPU; start from 123
 
 for SEED in "${SEEDS[@]}"; do
   RUN_NAME="v4b_seed${SEED}"
-
   echo "======================================================================"
-  echo "Training ${RUN_NAME}"
+  echo "Training ${RUN_NAME}  (${NGPUS} GPUs, per-GPU batch=${BATCH_SIZE})"
   echo "======================================================================"
 
-  python train_full.py \
-    --base-data "$BASE_DATA" \
-    --trajectories "$TRAJ_DATA" \
+  torchrun --nproc_per_node="$NGPUS" main_pys/train_flow.py \
     --run-name "$RUN_NAME" \
-    --seed "$SEED"
+    --seed "$SEED" \
+    --hidden-dim 1024 \
+    --num-layers 6 \
+    --batch-size "$BATCH_SIZE"
 
-  shopt -s nullglob
-  CHECKPOINTS=(large_scale_flow_${RUN_NAME}_*.pt)
-  shopt -u nullglob
-
-  if (( ${#CHECKPOINTS[@]} == 0 )); then
-    echo "ERROR: no checkpoints found for ${RUN_NAME}" >&2
-    exit 1
-  fi
-
-  mv "${CHECKPOINTS[@]}" "$CHECKPOINT_DIR"/
-  echo "Moved ${RUN_NAME} checkpoints to ${CHECKPOINT_DIR}/"
+  echo "${RUN_NAME} complete — checkpoint: large_scale_flow_${RUN_NAME}_best.pt"
 done
 
-echo "All 3 training runs complete."
-echo "Checkpoints at:"
-echo "  checkpoints/continuous_v4b/large_scale_flow_v4b_seed42_best.pt"
-echo "  checkpoints/continuous_v4b/large_scale_flow_v4b_seed123_best.pt"
-echo "  checkpoints/continuous_v4b/large_scale_flow_v4b_seed456_best.pt"
+echo "All remaining seeds complete."

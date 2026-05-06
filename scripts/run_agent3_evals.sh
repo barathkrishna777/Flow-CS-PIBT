@@ -17,7 +17,7 @@ for SEED in 42 123 456; do
     --agent-counts 50 100 \
     --max-scenarios "$N" \
     --policy flow \
-    --model-path "checkpoints/continuous_v4b/large_scale_flow_${RUN_NAME}_best.pt" \
+    --model-path "large_scale_flow_${RUN_NAME}_best.pt" \
     --shield-type epibt \
     --max-steps 512 \
     --run-name "$RUN_NAME" \

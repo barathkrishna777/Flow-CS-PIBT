@@ -511,7 +511,8 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
           reset_best_val_loss=False, action_head_only=False, action_head_lr=5e-4,
           wait_head_only=False, wait_head_lr=5e-4, calibration_only=False,
           freeze_movement_logit_scale=False,
-          distributed=False, local_rank=None, seed=42):
+          distributed=False, local_rank=None, seed=42,
+          batch_size=None):
     ddp_info = setup_distributed(distributed=distributed, local_rank=local_rank)
     is_main = ddp_info["is_main"]
     log = print if is_main else (lambda *args, **kwargs: None)
@@ -585,7 +586,8 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
 
     # GPU: more workers + bigger batches to keep GPU saturated; CPU: stay conservative
     cpu_cores = min(12, os.cpu_count() or 2) if device.type == "cuda" else min(4, os.cpu_count() or 2)
-    batch_size = 256 if device.type == "cuda" else 32
+    if batch_size is None:
+        batch_size = 256 if device.type == "cuda" else 32
 
     # ── Weighted sampling (upsamples high-agent-count scenarios) ──
     sampler = None
@@ -1133,6 +1135,8 @@ if __name__ == "__main__":
                         help="Freeze all model params except wait/movement calibration scalars")
     parser.add_argument("--freeze-movement-logit-scale", action="store_true",
                         help="Keep movement_logit_scale fixed at its checkpoint/default value during training")
+    parser.add_argument("--batch-size", type=int, default=None,
+                        help="Per-GPU batch size (default: 256 on GPU). With DDP, set to 64 for effective batch=256 matching single-GPU.")
     parser.add_argument("--distributed", action="store_true",
                         help="Enable DistributedDataParallel; also auto-enabled under torchrun WORLD_SIZE>1")
     parser.add_argument("--local-rank", "--local_rank", dest="local_rank", type=int, default=None,
@@ -1169,4 +1173,5 @@ if __name__ == "__main__":
           freeze_movement_logit_scale=args.freeze_movement_logit_scale,
           distributed=args.distributed,
           local_rank=args.local_rank,
-          seed=args.seed)
+          seed=args.seed,
+          batch_size=args.batch_size)
