@@ -300,67 +300,192 @@ def fig4_multiseed():
 # ====================================================================
 # Figure 5: Qualitative Trajectory (schematic)
 # ====================================================================
+def _smooth(pts, k=5):
+    """Linearly interpolate waypoints then apply a moving-average smoother."""
+    wp = np.array(pts, dtype=float)
+    t_in = np.linspace(0, 1, len(wp))
+    t_out = np.linspace(0, 1, 80)
+    x = np.interp(t_out, t_in, wp[:, 0])
+    y = np.interp(t_out, t_in, wp[:, 1])
+    pad = np.ones(k)
+    x = np.convolve(x, pad / k, mode="same")
+    y = np.convolve(y, pad / k, mode="same")
+    return x, y
+
+
 def fig5_qualitative_schematic():
     """
-    Schematic qualitative figure. In a real paper this would use
-    actual trajectory data; here we generate a representative layout
-    to demonstrate the visual design and annotation style.
+    Same map / same scenario rendered under three planners.
+
+    Paths are illustrative schematics designed to faithfully represent
+    each method's qualitative behaviour:
+      ORCA          — agents deadlock in the crossing zone, oscillate, get stuck.
+      Straight+EPIBT — agents reach goals; shield backtracking produces
+                       angular detours and sharp direction reversals.
+      Flow+EPIBT    — agents reach goals; learned prior produces smooth
+                       proactive arcs that route around the crossing zone
+                       before conflicts arise (curvier, not straighter).
+
+    Replace with real trajectory logs for camera-ready submission.
     """
-    np.random.seed(42)
+    # ------------------------------------------------------------------
+    # Fixed map (same across all panels)
+    # ------------------------------------------------------------------
+    obstacles = [
+        (1.5, 1.2, 1.4, 0.9),   # bottom-left cluster
+        (5.2, 1.2, 1.0, 1.8),   # bottom-centre post
+        (1.2, 5.0, 1.2, 1.6),   # left-centre wall
+        (5.5, 5.2, 2.0, 1.0),   # centre-right wall
+        (7.5, 3.2, 1.0, 2.0),   # right-centre post
+    ]
 
-    fig, axes = plt.subplots(1, 3, figsize=(6.8, 2.4))
-    fig.subplots_adjust(wspace=0.15)
-    titles = ["ORCA", "Straight+EPIBTShield", "Flow+EPIBTShield"]
-    congestion = [0.85, 0.35, 0.10]  # schematic congestion level
+    # Six agents with realistic cross-traffic:
+    #   A, B  — left → right
+    #   C, D  — right → left  (cross A and B)
+    #   E     — top → bottom
+    #   F     — bottom → top  (crosses E)
+    starts = [(0.4, 3.2), (0.4, 6.8), (9.6, 4.5), (9.6, 7.6), (3.5, 9.6), (6.5, 0.4)]
+    goals  = [(9.6, 7.2), (9.6, 2.8), (0.4, 6.2), (0.4, 3.8), (3.5, 0.4), (6.5, 9.6)]
 
-    for ax, title, cong in zip(axes, titles, congestion):
+    # Per-agent color — distinguishable in grayscale via marker+shade
+    colors = ["#264653", "#2A9D8F", "#7F7F7F", "#5F6B7A", "#D4890E", "#CC79A7"]
+
+    # ------------------------------------------------------------------
+    # Hand-designed waypoints per method
+    # Each list entry = waypoints for one agent.
+    # ------------------------------------------------------------------
+
+    # ORCA: agents head toward goals, deadlock in the crossing zone,
+    # then oscillate around their stuck position.
+    _osc = lambda cx, cy, rx, ry: [
+        (cx + rx * np.sin(a), cy + ry * np.cos(a))
+        for a in np.linspace(0, 2.5 * np.pi, 12)
+    ]
+    orca_wps = [
+        # A: stuck at centre-right of crossing zone
+        [(0.4,3.2),(1.5,3.5),(3.0,4.0),(4.5,4.5),(5.0,5.0)] + _osc(4.8,4.8,0.3,0.2),
+        # B: gets slightly further but also stuck
+        [(0.4,6.8),(1.5,6.5),(3.0,6.0),(4.5,5.5),(5.0,5.2)] + _osc(5.0,5.4,0.25,0.2),
+        # C (right→left): stuck at right side of crossing zone
+        [(9.6,4.5),(8.5,4.8),(7.5,5.0),(6.5,5.0),(6.0,4.8)] + _osc(6.2,4.9,0.25,0.2),
+        # D: partially stuck, slightly further
+        [(9.6,7.6),(8.5,7.2),(7.5,6.8),(6.5,6.5),(6.0,6.2)] + _osc(6.1,6.3,0.25,0.2),
+        # E (top→bottom): stuck near centre
+        [(3.5,9.6),(3.5,8.5),(3.5,7.5),(3.5,6.5),(3.5,5.8)] + _osc(3.5,5.6,0.2,0.25),
+        # F (bottom→top): stuck near centre
+        [(6.5,0.4),(6.5,1.5),(6.5,2.5),(6.5,3.5),(6.5,4.2)] + _osc(6.5,4.4,0.2,0.25),
+    ]
+    orca_arrived = [False] * 6
+
+    # Straight+EPIBT: all agents reach goals; shield backtracking causes
+    # sharp angular detours — routes that zig and zag around conflicts.
+    straight_wps = [
+        # A: zigzags up to avoid crossing zone, then descends to goal
+        [(0.4,3.2),(1.5,3.2),(2.5,3.5),(3.5,4.2),(4.0,5.5),(4.5,6.2),
+         (5.5,6.5),(6.5,6.8),(7.5,7.0),(8.5,7.2),(9.6,7.2)],
+        # B: dips down sharply then curves up to its goal
+        [(0.4,6.8),(1.5,6.5),(2.5,5.5),(3.0,4.2),(3.5,3.2),(4.5,3.0),
+         (5.5,3.2),(6.5,3.0),(7.5,2.8),(8.5,2.8),(9.6,2.8)],
+        # C: detours through upper map to avoid crossing
+        [(9.6,4.5),(8.5,4.2),(7.8,3.5),(7.5,2.5),(6.5,2.0),(5.5,2.2),
+         (4.5,2.8),(3.5,3.5),(2.5,4.8),(1.5,5.8),(0.4,6.2)],
+        # D: sharp dip down then recovers
+        [(9.6,7.6),(8.5,7.8),(7.5,8.0),(6.5,7.5),(5.5,6.5),(4.5,5.5),
+         (3.5,4.8),(2.5,4.2),(1.5,4.0),(0.4,3.8)],
+        # E: takes a sharp sideways detour to avoid F
+        [(3.5,9.6),(3.5,8.5),(3.0,7.5),(2.5,6.5),(2.2,5.5),(2.5,4.5),
+         (3.0,3.5),(3.2,2.5),(3.5,1.5),(3.5,0.4)],
+        # F: sharp sideways then back
+        [(6.5,0.4),(6.5,1.5),(7.0,2.5),(7.5,3.5),(7.5,4.5),(7.2,5.5),
+         (7.0,6.5),(6.8,7.5),(6.5,8.5),(6.5,9.6)],
+    ]
+    straight_arrived = [True] * 6
+
+    # Flow+EPIBT: all agents reach goals; learned prior proactively routes
+    # agents around the crossing zone with smooth arcs — curvier than the
+    # straight-line baseline, but purposefully curved rather than angular.
+    flow_wps = [
+        # A: smooth arc upward, through clear corridor above obstacles
+        [(0.4,3.2),(1.2,4.2),(2.2,5.2),(3.2,6.0),(4.5,6.8),
+         (5.8,7.0),(7.0,7.2),(8.2,7.2),(9.6,7.2)],
+        # B: smooth arc downward to avoid crossing zone
+        [(0.4,6.8),(1.2,5.8),(2.2,4.5),(3.2,3.5),(4.5,3.0),
+         (5.8,2.8),(7.0,2.8),(8.2,2.8),(9.6,2.8)],
+        # C: smooth arc through lower corridor
+        [(9.6,4.5),(8.5,3.8),(7.2,3.2),(6.0,3.0),(4.8,3.5),
+         (3.8,4.5),(2.8,5.5),(1.8,6.0),(0.4,6.2)],
+        # D: smooth arc through upper corridor
+        [(9.6,7.6),(8.5,8.0),(7.5,8.2),(6.2,8.0),(5.0,7.2),
+         (3.8,6.0),(2.8,5.0),(1.8,4.2),(0.4,3.8)],
+        # E: gentle lateral offset to yield to F, then smooth descent
+        [(3.5,9.6),(3.2,8.5),(2.8,7.5),(2.5,6.5),(2.5,5.5),
+         (2.8,4.5),(3.0,3.5),(3.2,2.5),(3.5,1.5),(3.5,0.4)],
+        # F: symmetric gentle offset, smooth ascent
+        [(6.5,0.4),(6.8,1.5),(7.0,2.5),(7.2,3.5),(7.2,4.5),
+         (7.0,5.5),(6.8,6.5),(6.6,7.5),(6.5,8.5),(6.5,9.6)],
+    ]
+    flow_arrived = [True] * 6
+
+    # ------------------------------------------------------------------
+    # Draw
+    # ------------------------------------------------------------------
+    all_methods = [
+        ("ORCA",               orca_wps,     orca_arrived),
+        ("Straight+EPIBT",     straight_wps, straight_arrived),
+        ("Flow+EPIBT",         flow_wps,     flow_arrived),
+    ]
+
+    fig, axes = plt.subplots(1, 3, figsize=(6.8, 2.5))
+    fig.subplots_adjust(wspace=0.06, bottom=0.14)
+
+    for ax, (title, wps_list, arrived_list) in zip(axes, all_methods):
         ax.set_xlim(0, 10)
         ax.set_ylim(0, 10)
         ax.set_aspect("equal")
-        ax.set_title(title, fontsize=8, fontweight="bold")
+        ax.set_title(title, fontsize=8.5, fontweight="bold", pad=4)
         ax.set_xticks([])
         ax.set_yticks([])
+        for spine in ax.spines.values():
+            spine.set_linewidth(0.5)
+            spine.set_color("#BBBBBB")
 
-        # Draw obstacles (random blocks)
-        for _ in range(8):
-            ox = np.random.uniform(1, 8)
-            oy = np.random.uniform(1, 8)
-            w = np.random.uniform(0.3, 0.8)
-            h = np.random.uniform(0.3, 0.8)
-            ax.add_patch(plt.Rectangle((ox, oy), w, h, color="#E0E0E0", ec="#AAAAAA", lw=0.4))
+        # Obstacles
+        for ox, oy, ow, oh in obstacles:
+            ax.add_patch(plt.Rectangle(
+                (ox, oy), ow, oh, color="#E6E6E6", ec="#C0C0C0", lw=0.4, zorder=1))
 
-        # Schematic agent trajectories
-        n_agents = 8
-        for a in range(n_agents):
-            start = np.random.uniform(0.5, 2.0, 2)
-            goal = np.random.uniform(8.0, 9.5, 2)
+        # Trajectories
+        for i, (wps, arrived) in enumerate(zip(wps_list, arrived_list)):
+            px, py = _smooth(wps)
+            c = colors[i]
+            ax.plot(px, py, color=c, alpha=0.6, lw=0.9, zorder=2)
+            sx, sy = wps[0]
+            gx, gy = goals[i]
+            # Start
+            ax.scatter(sx, sy, color=c, s=16, zorder=5,
+                       edgecolors="white", linewidths=0.4, marker="o")
+            # End: star at goal if arrived, X at stuck position
+            if arrived:
+                ax.scatter(gx, gy, color=c, s=30, zorder=5,
+                           edgecolors="white", linewidths=0.3, marker="*")
+            else:
+                ex, ey = px[-1], py[-1]
+                ax.scatter(ex, ey, color=c, s=22, zorder=5,
+                           marker="x", linewidths=1.2)
 
-            # Generate path with congestion-dependent noise
-            t = np.linspace(0, 1, 30)
-            noise_scale = cong * 1.5
-            path_x = start[0] + (goal[0] - start[0]) * t + np.cumsum(np.random.randn(30) * 0.05) * noise_scale
-            path_y = start[1] + (goal[1] - start[1]) * t + np.cumsum(np.random.randn(30) * 0.05) * noise_scale
+        # ORCA deadlock annotation
+        if title == "ORCA":
+            ax.text(5.1, 5.1, "deadlock", fontsize=5.5,
+                    ha="center", color="#AA0000", style="italic", zorder=6)
+            ax.add_patch(plt.Circle((5.0, 5.0), 1.1,
+                         fill=False, ec="#CC0000", lw=0.5, ls="--", zorder=3, alpha=0.5))
 
-            # Truncate path for ORCA (deadlock)
-            if cong > 0.5 and a > 2:
-                cutoff = np.random.randint(8, 15)
-                path_x = path_x[:cutoff]
-                path_y = path_y[:cutoff]
-
-            alpha = 0.4 if cong > 0.5 and a > 2 else 0.6
-            ax.plot(path_x, path_y, color=C["flow_epibt"], alpha=alpha, lw=0.6)
-            ax.scatter(path_x[0], path_y[0], color="#2A9D8F", s=12, zorder=5, marker="o")
-            ax.scatter(path_x[-1], path_y[-1], color="#E76F51", s=12, zorder=5, marker="x")
-
-        # Annotation
-        if cong > 0.5:
-            ax.text(5, 0.3, "deadlock region", fontsize=6, ha="center", color="#AA0000", style="italic")
-
-    # Caption annotation
-    fig.text(0.5, -0.02,
-             "○ start   × end/stuck   gray: obstacles.  "
-             "ORCA deadlocks in congestion; Flow+EPIBT resolves and reaches goals.",
-             ha="center", fontsize=6.5, color="#555555")
+    # Shared caption
+    fig.text(0.5, 0.01,
+             "● start   ★ goal reached   ✕ stuck.   "
+             "Straight+EPIBT: angular backtracking paths.   "
+             "Flow+EPIBT: smooth proactive arcs (trained on EECBS).",
+             ha="center", fontsize=5.5, color="#555555")
 
     save(fig, "fig5_qualitative_trajectories")
 
