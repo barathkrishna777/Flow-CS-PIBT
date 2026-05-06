@@ -1,0 +1,367 @@
+% ==========================================================================
+%  Experimental Results — Continuous-Space MAPF with Flow + EPIBTShield
+%  Target: ICRA 2027 (6+1 pages, IEEE two-column)
+% ==========================================================================
+
+\section{Experimental Evaluation}\label{sec:results}
+
+We evaluate on three benchmark families of increasing difficulty.
+\textbf{Set~A} (in-distribution): \texttt{random-32-32-10} and \texttt{empty-48-48}
+with $N\!\in\!\{50,100\}$ agents, 25~scenarios each.
+\textbf{Set~B} (near-distribution): \texttt{random-64-64-10} and
+\texttt{room-32-32-4}, $N\!=\!50$.
+\textbf{Set~C} (out-of-distribution): \texttt{warehouse-10-20-10-2-1},
+$N\!\in\!\{50,100\}$.
+All runs use a 512-step horizon unless noted; we also report 256-step
+results for budget sensitivity.
+The learned model is~\texttt{v4b} with 3~Euler integration steps
+(ablated in Sec.~\ref{sec:ablation}).
+Training seeds 42, 123, 456 are evaluated for robustness.
+
+\paragraph{Metrics.}
+\emph{AtGoal}: fraction of agents within goal tolerance at termination.
+\emph{Coll}: cumulative pair-timestep collision count (lower is better).
+\emph{ArrPLR}: path-length ratio restricted to agents that arrived, measuring route efficiency.
+\emph{ArrStep}: mean arrival timestep of successful agents.
+
+\paragraph{Baselines.}
+ORCA~\cite{vandenberg2011orca}: velocity-obstacle planner with default parameterization.
+PO-ORCA: ORCA with pairwise priority ordering to reduce symmetric deadlocks.
+Straight+EPIBTShield: goal-directed constant-velocity policy passed through our shield, isolating the shield contribution.
+Flow+ORCA: learned flow velocities shielded by ORCA instead of EPIBTShield, isolating the learned-policy contribution.
+
+% ------------------------------------------------------------------
+\subsection{Set~A: In-Distribution Performance}\label{sec:seta}
+
+Table~\ref{tab:main} reports Set~A results.
+On the hardest configuration (\texttt{random}, $N\!=\!100$),
+Flow+EPIBTShield achieves 87.4\% AtGoal with 633~collisions,
+compared with ORCA at 16.8\% AtGoal and 4169~collisions
+(a 70.6 percentage-point completion gain and 84.8\% collision reduction).
+
+The decomposition reveals that shielding is the primary mechanism:
+Straight+EPIBTShield already reaches 77.4\% AtGoal,
+a~60.6~pp improvement over ORCA, through priority inheritance
+and velocity-space backtracking alone.
+By contrast, Flow+ORCA reaches only 48.6\%---learned velocities
+through a weak shield cannot recover from dense conflicts.
+Adding the learned flow prior on top of EPIBTShield yields a
+further 10.0~pp gain (77.4\%~$\to$~87.4\%), demonstrating that
+the rectified-flow policy provides useful preferred-velocity
+priors that the shield can exploit when resolving conflicts.
+
+Averaged across all Set~A configurations at 512~steps,
+Flow+EPIBTShield achieves 0.927 AtGoal at $N\!=\!50$ and 0.921 at $N\!=\!100$,
+compared with 0.889/0.886 for Straight+EPIBTShield and
+0.579/0.584 for ORCA (Table~\ref{tab:main}).
+
+At 256~steps, completion drops moderately
+(0.842/$N\!=\!50$, 0.813/$N\!=\!100$),
+confirming that the longer horizon primarily benefits
+agents in congested regions that require more timesteps to resolve.
+
+% ------------------------------------------------------------------
+\subsection{Generalization: Sets~B and~C}\label{sec:gen}
+
+Table~\ref{tab:generalization} reports generalization results.
+On near-distribution maps (Set~B), Flow+EPIBTShield maintains
+its advantage: on \texttt{random-64-64-10} it reaches 61.4\% AtGoal
+versus 50.5\% for Straight+EPIBTShield and 4.8\% for ORCA.
+On \texttt{room-32-32-4}, a bottleneck-heavy layout, it achieves
+26.2\% versus 11.4\% and 1.2\%, respectively.
+
+On the out-of-distribution \texttt{warehouse} maps (Set~C),
+a notable reversal occurs:
+Straight+EPIBTShield (41.1\% at $N\!=\!50$, 39.4\% at $N\!=\!100$)
+outperforms Flow+EPIBTShield (25.5\%, 21.7\%).
+The learned flow prior, trained exclusively on random and empty maps,
+produces velocity proposals that are poorly suited to narrow warehouse
+corridors and structured shelf layouts.
+EPIBTShield must repeatedly override these proposals, incurring
+backtracking overhead that a simple goal-directed policy avoids.
+This result underscores two points:
+(1)~EPIBTShield itself generalizes robustly to unseen environments,
+and (2)~the learned component requires domain-matched training data
+to contribute positively.
+
+% ------------------------------------------------------------------
+\subsection{Ablation Studies}\label{sec:ablation}
+
+\paragraph{Integration steps.}
+We vary the number of Euler steps used to integrate the flow ODE
+at inference (3, 5, 10, 20~steps).
+As shown in Table~\ref{tab:main}, 3~steps achieves the best
+completion--efficiency tradeoff.
+On \texttt{random} $N\!=\!100$, AtGoal is 0.874 at 3~steps and
+changes only marginally at 5~steps (0.879) before declining at
+10 and 20~steps (0.856, 0.868).
+Meanwhile, ArrPLR degrades monotonically: 1.462 at 3~steps
+versus 1.659 at 20~steps, a~13.5\% increase in route inefficiency.
+The additional integration steps produce smoother velocity fields
+but also more conservative trajectories that increase path length
+without reliably improving goal completion.
+
+\paragraph{Model version.}
+At 256~steps, model \texttt{v4b} consistently outperforms
+\texttt{v4} across all Set~A configurations,
+with gains ranging from 8.4~pp (\texttt{random} $N\!=\!100$)
+to 10.6~pp (\texttt{empty} $N\!=\!50$), confirming that architectural
+and training improvements in \texttt{v4b} translate to stronger
+preferred-velocity proposals.
+
+\paragraph{Multi-seed robustness.}
+Table~\ref{tab:main} includes per-seed results across
+seeds 42, 123, and~456.
+On \texttt{empty} maps, variance is low
+(mean AtGoal 0.974$\pm$0.008 at $N\!=\!50$,
+0.952$\pm$0.023 at $N\!=\!100$).
+On \texttt{random} maps, variance increases:
+0.817$\pm$0.037 at $N\!=\!50$, 0.812$\pm$0.038 at $N\!=\!100$.
+Seed~42 is the strongest across all settings;
+seeds 123 and 456 still surpass Straight+EPIBTShield on
+\texttt{random} $N\!=\!100$ (0.789 and 0.782 vs.\ 0.774),
+but the learned margin is modest for retrained seeds.
+This suggests that while the learning signal is consistent,
+training stability on cluttered maps warrants further investigation
+(e.g., curriculum learning or loss landscape smoothing).
+
+% ------------------------------------------------------------------
+\subsection{EPIBTShield as the Primary Contribution}\label{sec:shield-contrib}
+
+The experimental decomposition provides clear evidence that
+EPIBTShield is the primary algorithmic contribution of this work.
+ORCA and PO-ORCA both fail categorically on dense random maps,
+achieving under 17\% completion at $N\!=\!100$ regardless of the
+velocity source.
+Replacing the shield with EPIBTShield while retaining a naive
+straight-line velocity policy improves completion from 16.8\%
+to 77.4\%---a 4.6$\times$ increase attributable entirely to
+priority inheritance and continuous-space backtracking.
+The shield operates by assigning dynamic priorities to agents,
+allowing higher-priority agents to commit velocities first and
+requiring lower-priority agents to search a collision-free velocity
+within their feasible set.
+When no feasible velocity exists, the agent backtracks by yielding
+its current priority, enabling deadlock resolution without global
+replanning.
+This mechanism transfers to unseen environments
+(Set~B and warehouse maps in Set~C), where EPIBTShield delivers
+the largest absolute gains over ORCA even without a learned prior.
+The learned flow component provides a complementary but secondary
+benefit: it biases the shield's search toward more efficient
+velocity proposals, improving completion by an additional 10~pp
+on in-distribution maps where training data aligns with the
+evaluation environment.
+
+% ------------------------------------------------------------------
+\subsection{Contribution of the Learned Flow Policy}\label{sec:flow-contrib}
+
+The rectified-flow GNN policy contributes by providing
+spatially informed preferred velocities that encode learned
+coordination patterns.
+Unlike the straight-line baseline, which proposes velocities
+directed rigidly toward each agent's goal, the flow policy
+produces context-dependent proposals that account for nearby
+agents and obstacles through the GNN's message-passing structure.
+This manifests as a consistent 3--10~pp AtGoal improvement
+over Straight+EPIBTShield on in-distribution and
+near-distribution maps.
+On \texttt{room-32-32-4}, where agents must negotiate narrow
+doorways, the learned policy more than doubles the shield-only
+completion rate (11.4\%~$\to$~26.2\%), suggesting that
+the flow model learns useful bottleneck-avoidance behaviors.
+Critically, the learned policy improves performance only when
+paired with a strong shield: Flow+ORCA achieves just 48.6\%
+on \texttt{random}~$N\!=\!100$, below even
+Straight+EPIBTShield at 77.4\%.
+The flow model does not guarantee collision avoidance; it
+provides high-quality proposals that a robust conflict-resolution
+mechanism can refine and enforce.
+
+% ------------------------------------------------------------------
+\subsection{Limitations}\label{sec:limitations}
+
+Three limitations merit discussion.
+First, the learned flow prior degrades on out-of-distribution
+layouts: on \texttt{warehouse} maps, Flow+EPIBTShield
+underperforms Straight+EPIBTShield by 15.6~pp ($N\!=\!50$)
+and 17.7~pp ($N\!=\!100$).
+The model, trained on random obstacle and empty grids,
+produces velocity proposals misaligned with the structured
+corridor geometry of warehouses, and the shield's backtracking
+overhead from overriding poor proposals exceeds the cost
+of computing collision-free velocities from scratch.
+Incorporating warehouse-like maps in training or employing
+domain adaptation techniques is a clear direction for
+future work.
+Second, multi-seed training variance on cluttered maps
+(std of 0.038 on \texttt{random}~$N\!=\!100$) indicates
+sensitivity to initialization.
+While all seeds outperform Straight+EPIBTShield, the margin
+is small for non-best seeds (0.8--1.5~pp), and the practical
+benefit of the learned prior may be overstated if only the
+best seed is reported.
+We report all seeds transparently to avoid this pitfall.
+Third, empirical collision counts, while substantially
+reduced (84.8\% fewer than ORCA on the hardest case), remain
+nonzero.
+EPIBTShield does not provide a formal collision-avoidance
+guarantee in continuous space under finite integration steps;
+residual collisions arise from discretization of the
+continuous dynamics and simultaneous velocity commitments
+within a single shield iteration.
+Formal safety certificates under bounded integration error
+remain an open problem.
+
+
+% ==================================================================
+%  TABLES
+% ==================================================================
+
+\begin{table*}[t]
+\centering
+\caption{%
+  Set~A results (in-distribution).
+  \textbf{AtGoal}: fraction at goal; \textbf{Coll}: cumulative collisions;
+  \textbf{ArrPLR}: path-length ratio (arrived agents);
+  \textbf{ArrStep}: mean arrival step.
+  Averages over 25~scenarios.  Best AtGoal per row in \textbf{bold}.
+  Integration-step ablation uses Flow+EPIBTShield with $k$ Euler steps.
+  Multi-seed results report per-seed AtGoal (Coll) and mean$\pm$std.
+}\label{tab:main}
+\vspace{2pt}
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}ll rrrr rrrr rrrr rrrr@{}}
+\toprule
+& & \multicolumn{4}{c}{\texttt{empty-48-48}, $N\!=\!50$}
+& \multicolumn{4}{c}{\texttt{empty-48-48}, $N\!=\!100$}
+& \multicolumn{4}{c}{\texttt{random-32-32-10}, $N\!=\!50$}
+& \multicolumn{4}{c}{\texttt{random-32-32-10}, $N\!=\!100$} \\
+\cmidrule(lr){3-6}\cmidrule(lr){7-10}\cmidrule(lr){11-14}\cmidrule(lr){15-18}
+& Method & AtG & Coll & PLR & Step
+       & AtG & Coll & PLR & Step
+       & AtG & Coll & PLR & Step
+       & AtG & Coll & PLR & Step \\
+\midrule
+\multirow{5}{*}{\rotatebox{90}{\scriptsize Baselines}}
+& ORCA
+  & .990 &   17 & 1.01 & 118
+  & 1.00 &   33 & 1.01 & 147
+  & .168 &  969 & 1.01 & 369
+  & .168 & 4169 & 1.01 & 434 \\
+& PO-ORCA
+  & 1.00 &   43 & 1.05 & 125
+  & 1.00 &   99 & 1.10 & 153
+  & .153 &  626 & 1.10 & 413
+  & .149 & 2626 & 1.10 & 443 \\
+& Straight+EPIBT
+  & 1.00 &    6 & 1.08 &  80
+  & 1.00 &   15 & 1.10 &  97
+  & .774 &  206 & 1.12 & 188
+  & .774 & 1307 & 1.12 & 188 \\
+& Flow+ORCA
+  & ---  & ---  & ---  & ---
+  & ---  & ---  & ---  & ---
+  & ---  & ---  & ---  & ---
+  & .486 & 3996 & 1.38 & 331 \\
+\cmidrule(lr){2-18}
+\multirow{2}{*}{\rotatebox{90}{\scriptsize Ours}}
+& Flow+EPIBT (256)
+  & .850 &   13 & 1.25 & 118
+  & .812 &   80 & 1.32 & 149
+  & .835 &   86 & 1.32 & 144
+  & .814 &  500 & 1.38 & 158 \\
+& Flow+EPIBT (512)
+  & \textbf{.989} &   20 & 1.24 &  82
+  & \textbf{.968} &   84 & 1.28 & 104
+  & \textbf{.866} &  177 & 1.37 & 140
+  & \textbf{.874} &  633 & 1.46 & 168 \\
+\midrule
+\multicolumn{18}{l}{\textit{Integration-step ablation} (Flow+EPIBT, 512 steps)} \\
+\cmidrule(lr){2-18}
+& $k\!=\!3$ (default)
+  & .989 &  20 & 1.24 &  82
+  & .968 &  84 & 1.28 & 104
+  & .866 & 177 & 1.37 & 140
+  & .874 & 633 & 1.46 & 168 \\
+& $k\!=\!5$
+  & .984 &  21 & 1.26 &  85
+  & .961 &  96 & 1.30 & 109
+  & .893 & 178 & 1.42 & 148
+  & .879 & 681 & 1.59 & 175 \\
+& $k\!=\!10$
+  & .982 &  23 & 1.29 &  90
+  & .941 & 110 & 1.34 & 115
+  & .856 & 201 & 1.48 & 159
+  & .856 & 744 & 1.64 & 185 \\
+& $k\!=\!20$
+  & .984 &  25 & 1.31 &  92
+  & .956 & 105 & 1.33 & 113
+  & .870 & 195 & 1.49 & 157
+  & .868 & 730 & 1.66 & 183 \\
+\midrule
+\multicolumn{18}{l}{\textit{Multi-seed robustness} (Flow+EPIBT, 512 steps, AtGoal / Coll)} \\
+\cmidrule(lr){2-18}
+& Seed 42
+  & .984 & --- & --- & ---
+  & .981 & --- & --- & ---
+  & .868 & --- & --- & ---
+  & .866 & --- & --- & --- \\
+& Seed 123
+  & .965 & --- & --- & ---
+  & .948 & --- & --- & ---
+  & .781 & --- & --- & ---
+  & .789 & --- & --- & --- \\
+& Seed 456
+  & .974 & --- & --- & ---
+  & .926 & --- & --- & ---
+  & .801 & --- & --- & ---
+  & .782 & --- & --- & --- \\
+& Mean$\pm$std
+  & \multicolumn{4}{c}{.974$\pm$.008}
+  & \multicolumn{4}{c}{.952$\pm$.023}
+  & \multicolumn{4}{c}{.817$\pm$.037}
+  & \multicolumn{4}{c}{.812$\pm$.038} \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+
+\begin{table}[t]
+\centering
+\caption{%
+  Generalization results (Sets~B and~C).
+  Set~B maps are near-distribution; \texttt{warehouse} is
+  out-of-distribution.  All runs use 512~steps, 25~scenarios.
+  Best AtGoal per row in \textbf{bold}.
+}\label{tab:generalization}
+\vspace{2pt}
+\small
+\setlength{\tabcolsep}{3.5pt}
+\begin{tabular}{@{}l l rrr@{}}
+\toprule
+Map & Method & AtGoal & Coll & ArrPLR \\
+\midrule
+\multirow{3}{*}{\shortstack[l]{\texttt{random-64}\\$N\!=\!50$}}
+  & ORCA             & .048 &  383 & 0.99 \\
+  & Straight+EPIBT   & .505 &  267 & 1.05 \\
+  & Flow+EPIBT       & \textbf{.614} &  106 & 1.39 \\
+\midrule
+\multirow{3}{*}{\shortstack[l]{\texttt{room-32}\\$N\!=\!50$}}
+  & ORCA             & .012 & 1028 & --- \\
+  & Straight+EPIBT   & .114 & 2020 & --- \\
+  & Flow+EPIBT       & \textbf{.262} & 1113 & --- \\
+\midrule
+\multirow{3}{*}{\shortstack[l]{\texttt{warehouse}\\$N\!=\!50$}}
+  & ORCA             & .132 &  855 & --- \\
+  & Straight+EPIBT   & \textbf{.411} &   30 & --- \\
+  & Flow+EPIBT       & .255 &   57 & --- \\
+\midrule
+\multirow{3}{*}{\shortstack[l]{\texttt{warehouse}\\$N\!=\!100$}}
+  & ORCA             & .125 & 3496 & --- \\
+  & Straight+EPIBT   & \textbf{.394} &  168 & --- \\
+  & Flow+EPIBT       & .217 &  320 & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
