@@ -18,7 +18,7 @@ for SEED in "${SEEDS[@]}"; do
   echo "Training ${RUN_NAME}  (${NGPUS} GPUs, per-GPU batch=${BATCH_SIZE})"
   echo "======================================================================"
 
-  torchrun --nproc_per_node="$NGPUS" main_pys/train_flow.py \
+  torchrun --nproc_per_node="$NGPUS" -m main_pys.train_flow \
     --run-name "$RUN_NAME" \
     --seed "$SEED" \
     --hidden-dim 1024 \
