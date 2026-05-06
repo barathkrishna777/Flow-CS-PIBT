@@ -280,19 +280,19 @@ def fig4_multiseed():
     ax.set_xlim(0.7, 1.05)
     ax.set_title("Training seed robustness (3 seeds)", fontsize=9, fontweight="bold")
 
-    # Reference line label — place above the topmost row to avoid overlap
-    ax.text(0.774, ys[0] + 0.45, "Straight\n+EPIBT", fontsize=5.5,
-            color=C["straight_epibt"], ha="center", linespacing=1.2)
+    # Reference line label — placed to the right of the dotted line,
+    # anchored at the random N=50 row where there is vertical space
+    ax.text(0.779, ys[1] + 0.18, "Straight+EPIBT", fontsize=5.5,
+            color=C["straight_epibt"], ha="left", va="bottom")
 
-    # Seed legend: direct labels on the random N=50 row (ys[1]) to avoid
-    # overlapping the densely-packed random N=100 row (ys[-1])
-    label_row = ys[1]  # random N=50
-    seed_vals_ref = configs[2][1]  # [0.868, 0.781, 0.801]
-    for j, (sv, sl) in enumerate(zip(seed_vals_ref, seed_labels)):
-        ax.text(sv, label_row - 0.28, sl, fontsize=5.5,
-                ha="center", color="#555555")
-    ax.text(np.mean(seed_vals_ref), label_row - 0.28, "mean(◆)",
-            fontsize=5.5, ha="center", color="#555555")
+    # Seed legend: compact box in lower-right quadrant (random rows have
+    # data only up to 0.868, so x > 0.88 is clear in those rows)
+    for j, sl in enumerate(seed_labels):
+        ax.scatter([], [], color=C["flow_epibt"], marker=["o", "^", "s"][j], s=20, label=sl)
+    ax.scatter([], [], color=C["flow_epibt"], marker="D", s=40, label="mean")
+    ax.legend(loc="lower right", fontsize=6, frameon=True,
+              framealpha=0.92, edgecolor="#DDDDDD", ncol=4,
+              handletextpad=0.3, columnspacing=0.6)
 
     save(fig, "fig4_multiseed_robustness")
 
