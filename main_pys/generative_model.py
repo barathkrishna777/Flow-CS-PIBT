@@ -168,9 +168,13 @@ class FlowGNNModel(nn.Module):
             nn.Dropout(0.15)
         )
 
-        # Optional residual branch for extra agent-level features (goal disp, BD dist)
+        # Optional residual branch for extra agent-level features (goal disp, BD dist).
+        # Zero-init weight so it starts as a no-op; grows gradually without disrupting
+        # the pre-trained trunk or lattice head embeddings.
         if extra_feature_dim > 0:
             self.extra_proj = nn.Linear(extra_feature_dim, hidden_dim)
+            nn.init.zeros_(self.extra_proj.weight)
+            nn.init.zeros_(self.extra_proj.bias)
         else:
             self.extra_proj = None
 
