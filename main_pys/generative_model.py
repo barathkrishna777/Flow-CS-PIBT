@@ -129,6 +129,7 @@ class FlowGNNModel(nn.Module):
         aux_feature_dim=5,
         action_dim=5,
         velocity_dim=2,
+        extra_feature_dim=0,
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
@@ -137,6 +138,7 @@ class FlowGNNModel(nn.Module):
         self.aux_feature_dim = aux_feature_dim
         self.action_dim = action_dim
         self.velocity_dim = velocity_dim
+        self.extra_feature_dim = extra_feature_dim
         
         # --- 1. Visual Context Encoder ---
         self.conv = nn.Sequential(
@@ -163,9 +165,15 @@ class FlowGNNModel(nn.Module):
             nn.Linear(cnn_out_dim + aux_feature_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.SiLU(),
-            nn.Dropout(0.15) 
+            nn.Dropout(0.15)
         )
-        
+
+        # Optional residual branch for extra agent-level features (goal disp, BD dist)
+        if extra_feature_dim > 0:
+            self.extra_proj = nn.Linear(extra_feature_dim, hidden_dim)
+        else:
+            self.extra_proj = None
+
         # --- 2. GNN with Residual Connections ---
         gnn_input_dim = hidden_dim + velocity_dim + 1 
         self.input_proj = nn.Linear(gnn_input_dim, hidden_dim)
@@ -271,6 +279,10 @@ class FlowGNNModel(nn.Module):
         cnn_out = self.conv(x)
         visual_features = torch.hstack([cnn_out, aux_features])
         visual_emb = self.visual_proj(visual_features)
+        if self.extra_proj is not None:
+            extra_features = getattr(data, "extra_features", None)
+            if extra_features is not None:
+                visual_emb = visual_emb + self.extra_proj(extra_features.to(visual_emb.device).float())
 
         # 2. Inject Flow variables
         if len(t.shape) == 1: t = t.unsqueeze(1)

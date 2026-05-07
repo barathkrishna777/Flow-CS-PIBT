@@ -544,6 +544,7 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
           wait_head_only=False, wait_head_lr=5e-4, calibration_only=False,
           freeze_movement_logit_scale=False,
           lattice_loss_weight=0.0, lattice_head_only=False, lattice_head_lr=5e-4,
+          extra_feature_dim=0,
           distributed=False, local_rank=None, seed=42,
           batch_size=None):
     ddp_info = setup_distributed(distributed=distributed, local_rank=local_rank)
@@ -689,7 +690,7 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
             persistent_workers=True
         )
 
-    model = FlowGNNModel(hidden_dim=hidden_dim, num_layers=num_layers).to(device)
+    model = FlowGNNModel(hidden_dim=hidden_dim, num_layers=num_layers, extra_feature_dim=extra_feature_dim).to(device)
     effective_freeze_movement_logit_scale = freeze_movement_logit_scale or (
         wait_ranking_loss_weight > 0 and hybrid_action_loss_weight <= 0
     )
@@ -1192,6 +1193,8 @@ if __name__ == "__main__":
                         help="Freeze trunk, train only lattice_head (17-class). Requires --lattice-loss-weight > 0")
     parser.add_argument("--lattice-head-lr", type=float, default=5e-4,
                         help="LR for lattice_head_only mode (default: 5e-4)")
+    parser.add_argument("--extra-feature-dim", type=int, default=0,
+                        help="Dim of extra agent features (goal disp + BD dist = 3). 0 disables (default 0)")
     parser.add_argument("--batch-size", type=int, default=None,
                         help="Per-GPU batch size (default: 256 on GPU). With DDP, set to 64 for effective batch=256 matching single-GPU.")
     parser.add_argument("--distributed", action="store_true",
@@ -1231,6 +1234,7 @@ if __name__ == "__main__":
           lattice_loss_weight=args.lattice_loss_weight,
           lattice_head_only=args.lattice_head_only,
           lattice_head_lr=args.lattice_head_lr,
+          extra_feature_dim=args.extra_feature_dim,
           distributed=args.distributed,
           local_rank=args.local_rank,
           seed=args.seed,

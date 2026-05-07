@@ -28,8 +28,12 @@ NUM_STEPS = 5
 CONSENSUS = 3
 TAU       = 0.3
 WAIT_THRESH = 0.25
-MAX_STEPS = "3x"
+MAX_STEPS = "5x"
 TIME_LIMIT = 120
+NEAR_GOAL_BD_THRESH = 5
+NEAR_GOAL_BOOST = 3
+DEADLOCK_WINDOW = 15
+DEADLOCK_BOOST = 10
 
 
 def main():
@@ -53,6 +57,20 @@ def main():
                         help="Skip the Lattice-Cardinal (17→5 projection) condition")
     parser.add_argument("--lattice-score-mode", choices=["velocity", "head"], default="velocity",
                         help="Lattice scoring: velocity=dot-product (default), head=trained 17-class head")
+    parser.add_argument("--near-goal-bd-thresh", type=int, default=NEAR_GOAL_BD_THRESH,
+                        help="BD distance threshold for near-goal priority boost (default 5, 0=disabled)")
+    parser.add_argument("--near-goal-boost", type=float, default=NEAR_GOAL_BOOST,
+                        help="Priority boost for agents within near-goal-bd-thresh (default 3)")
+    parser.add_argument("--deadlock-window", type=int, default=DEADLOCK_WINDOW,
+                        help="Steps between deadlock detection checks (default 15)")
+    parser.add_argument("--deadlock-boost", type=float, default=DEADLOCK_BOOST,
+                        help="Priority boost for detected stuck agents (default 10)")
+    parser.add_argument("--stuck-fallback-bd", action="store_true", default=True,
+                        help="Switch stuck agents to BD preferences (default True)")
+    parser.add_argument("--max-steps", default=MAX_STEPS,
+                        help="Max simulation steps, int or Nx multiplier (default 5x)")
+    parser.add_argument("--lattice-max-tries", type=int, default=17,
+                        help="Max primitives tried per agent in Lattice-PIBT before backtracking (EPIBT L param, default 17=all)")
     args = parser.parse_args()
 
     args.model = args.model_opt or args.model
@@ -98,7 +116,7 @@ def main():
     common_flags = [
         f"--mapNpzFile={MAP_NPZ}",
         f"--modelPath={args.model}",
-        f"--maxSteps={MAX_STEPS}",
+        f"--maxSteps={args.max_steps}",
         f"--seed={args.seed}",
         f"--useGPU={'True' if use_gpu else 'False'}",
         f"--numIntegrationSteps={NUM_STEPS}",
@@ -109,6 +127,11 @@ def main():
         f"--hiddenDim={args.hidden_dim}",
         f"--numLayers={args.num_layers}",
         "--policyType=flow",
+        f"--nearGoalBDThresh={args.near_goal_bd_thresh}",
+        f"--nearGoalBoost={args.near_goal_boost}",
+        f"--deadlockWindow={args.deadlock_window}",
+        f"--deadlockBoost={args.deadlock_boost}",
+        f"--stuckFallbackBD={'True' if args.stuck_fallback_bd else 'False'}",
     ]
 
     num_modes = 1 + (0 if args.skip_lattice_cardinal else 1) + (0 if args.skip_lattice_pibt else 1) + (0 if args.skip_lattice_greedy else 1)
@@ -140,12 +163,14 @@ def main():
             extra = [
                 f"--latticeScoreMode={score_mode}",
                 f"--latticeSpeedBonus={args.speed_bonus}",
+                f"--latticeMaxTries={args.lattice_max_tries}",
             ]
         elif mode == "Lattice-Greedy":
             shield_flag = "--shieldType=Lattice-Greedy-PIBT"
             extra = [
                 f"--latticeScoreMode={score_mode}",
                 f"--latticeSpeedBonus={args.speed_bonus}",
+                f"--latticeMaxTries={args.lattice_max_tries}",
             ]
         else:  # Lattice-Cardinal
             shield_flag = "--shieldType=CS-PIBT"

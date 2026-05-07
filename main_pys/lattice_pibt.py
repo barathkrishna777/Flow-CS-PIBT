@@ -109,7 +109,7 @@ def _lattice_pibt_recursive(grid_map, agent_id, prim_preferences,
                             planned_agents, assigned_primitives,
                             assigned_paths, reserved_nodes, reserved_edges,
                             current_locs, current_locs_to_agent,
-                            start_time, time_limit, _depth=0):
+                            start_time, time_limit, _depth=0, max_tries=None):
     """Recursive lattice-PIBT for a single agent.
 
     Tries primitives in preference order.  When a candidate primitive's
@@ -120,11 +120,19 @@ def _lattice_pibt_recursive(grid_map, agent_id, prim_preferences,
     fail, returns False WITHOUT marking the agent as planned.  This lets the
     caller backtrack its own primitive, removing the reservation that blocked
     WAIT, so the agent can be successfully planned later.
+
+    max_tries : int or None
+        EPIBT L-param: maximum number of primitives to attempt before giving
+        up and falling back to WAIT.  None or 0 means try all (default).
     """
     if time.time() - start_time > time_limit:
         return False
 
-    for prim_idx in prim_preferences[agent_id]:
+    prefs = prim_preferences[agent_id]
+    if max_tries and max_tries > 0:
+        prefs = prefs[:max_tries]
+
+    for prim_idx in prefs:
         feasible, path = _check_primitive_feasible(
             grid_map, current_locs[agent_id], prim_idx,
             reserved_nodes, reserved_edges,
@@ -149,6 +157,7 @@ def _lattice_pibt_recursive(grid_map, agent_id, prim_preferences,
                     current_locs, current_locs_to_agent,
                     start_time, time_limit,
                     _depth=_depth + 1,
+                    max_tries=max_tries,
                 )
                 if not ok:
                     conflict_resolved = False
@@ -190,7 +199,7 @@ def _lattice_pibt_recursive(grid_map, agent_id, prim_preferences,
 
 
 def lattice_pibt(grid_map, prim_preferences, current_locs, agent_priorities,
-                 start_time, time_limit):
+                 start_time, time_limit, max_tries=None):
     """Run one round of lattice-PIBT.
 
     Parameters
@@ -240,6 +249,7 @@ def lattice_pibt(grid_map, prim_preferences, current_locs, agent_priorities,
             current_locs, current_locs_to_agent,
             start_time, time_limit,
             _depth=0,
+            max_tries=max_tries,
         )
         if not ok:
             success = False
@@ -255,7 +265,7 @@ def lattice_pibt(grid_map, prim_preferences, current_locs, agent_priorities,
 
 
 def lattice_pibt_greedy(grid_map, prim_preferences, current_locs, agent_priorities,
-                        start_time, time_limit):
+                        start_time, time_limit, max_tries=None):
     """Greedy (non-backtracking) multi-step lattice planner.
 
     Processes agents in priority order.  For each agent, tries primitives in
@@ -295,7 +305,10 @@ def lattice_pibt_greedy(grid_map, prim_preferences, current_locs, agent_prioriti
             break
 
         committed = False
-        for prim_idx in prim_preferences[agent_id]:
+        greedy_prefs = prim_preferences[agent_id]
+        if max_tries and max_tries > 0:
+            greedy_prefs = greedy_prefs[:max_tries]
+        for prim_idx in greedy_prefs:
             feasible, path = _check_primitive_feasible(
                 grid_map, current_locs[agent_id], prim_idx,
                 reserved_nodes, reserved_edges,

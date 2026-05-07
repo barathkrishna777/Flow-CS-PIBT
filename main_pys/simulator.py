@@ -782,11 +782,13 @@ def simulate(device, model, k, m, grid_map, bd, start_locations, goal_locations,
             prim_prefs = runNNOnStateLattice(
                 cur_locs, bd, grid_map, k, m, model, device, goal_locations, timer,
             )
+            lattice_max_tries = getattr(args, 'latticeMaxTries', 17)
             timer.start("cs-time")
             if shield_type == "Lattice-PIBT":
                 assigned_prims, move_seqs, lpibt_ok = lattice_pibt(
                     grid_map, prim_prefs, cur_locs, agent_priorities,
                     start_time, args.timeLimit,
+                    max_tries=lattice_max_tries,
                 )
                 if not lpibt_ok and (time.time() - start_time >= args.timeLimit):
                     timer.stop("cs-time")
@@ -796,6 +798,7 @@ def simulate(device, model, k, m, grid_map, bd, start_locations, goal_locations,
                 assigned_prims, move_seqs, lpibt_ok = lattice_pibt_greedy(
                     grid_map, prim_prefs, cur_locs, agent_priorities,
                     start_time, args.timeLimit,
+                    max_tries=lattice_max_tries,
                 )
             timer.stop("cs-time")
 
@@ -1111,6 +1114,8 @@ if __name__ == '__main__':
     parser.add_argument('--latticeCardinalMode', '--lattice-cardinal-mode', dest='latticeCardinalMode',
                         type=lambda x: bool(str2bool(x)), default=False,
                         help="Use 17-primitive lattice scoring max-pooled to 5 cardinal actions for CS-PIBT (default: False)")
+    parser.add_argument('--latticeMaxTries', '--lattice-max-tries', dest='latticeMaxTries', type=int, default=17,
+                        help="EPIBT L-param: max primitives tried per agent before backtracking (default 17=all)")
     parser.add_argument('--hiddenDim', type=int, help="Model hidden dimension (default 1024)", default=1024)
     parser.add_argument('--numLayers', type=int, help="Number of GNN layers (default 6)", default=6)
     parser.add_argument('--classifierLinearDim', type=int, default=-1,

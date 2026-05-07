@@ -112,9 +112,11 @@ class FlowMAPFDataset(Dataset):
         bd = bd_grid[:cur_locs.shape[0]].astype(np.float32)
             
         bd = np.pad(bd, ((0, 0), (self.k, self.k), (self.k, self.k)), 'constant', constant_values=10000)
-        dummy_goals = np.zeros_like(cur_locs_discrete)
+        goal_locs_discrete = (discrete_positions[:, -1, :].astype(int) + self.k)
+        goal_locs_discrete[:, 0] = np.clip(goal_locs_discrete[:, 0], self.k, max_r)
+        goal_locs_discrete[:, 1] = np.clip(goal_locs_discrete[:, 1], self.k, max_c)
 
-        graph_data = create_data_object(cur_locs_discrete, bd, grid_map, self.k, self.m, dummy_goals)
+        graph_data = create_data_object(cur_locs_discrete, bd, grid_map, self.k, self.m, goal_locs_discrete)
         graph_data = normalize_graph_data(graph_data, self.k)
 
         lattice_labels = lattice_action_labels_from_positions(discrete_positions, t_step)

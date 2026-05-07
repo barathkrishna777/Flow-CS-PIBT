@@ -120,10 +120,21 @@ def create_data_object(pos_list, bd_list, grid, k, m, goal_locs, labels=np.array
     if debug_checks:
         assert(node_features[:,0,k,k].all() == 0) # Make sure all agents are on empty space
         
+    # Compute extra features BEFORE bd_list is overwritten below
+    H, W = grid.shape
+    scale = max(H, W)
+    # Goal displacement: (N, 2), normalized to [-1, 1]
+    goal_disp = (goal_locs - pos_list).astype(np.float32) / scale
+    goal_disp = np.clip(goal_disp, -1.0, 1.0)
+    # BD distance at current position: scalar per agent, normalized
+    bd_center = bd_list[range_num_agents, pos_list[:, 0], pos_list[:, 1]].astype(np.float32) / scale
+    bd_center = np.clip(bd_center, 0.0, 1.0)
+    extra_features = np.concatenate([goal_disp, bd_center[:, None]], axis=1)  # (N, 3)
+
     bd_pred_arr = None
     linear_dimensions = (grid_slices.shape[1]-2)**2 * num_layers
     # TODO get the best location to go next, just according to the bd
-    # NOTE: because we pad all bds with a large number, 
+    # NOTE: because we pad all bds with a large number,
     # we should be able to get the up, down, left and right of each bd without fear of invalid indexing
     # (N, [Stop, Right, Down, Up, Left])
     x_mesh2, y_mesh2 = np.meshgrid(np.arange(-1,1+1), np.arange(-1,1+1), indexing='ij') # assumes k at least 1; getting a 3x3 grid centered at the same place
@@ -139,9 +150,11 @@ def create_data_object(pos_list, bd_list, grid, k, m, goal_locs, labels=np.array
     bd_pred_arr = min_indices.astype(np.float32) # (N, 5) non-unique argmin solution
     linear_dimensions+=5
     # pdb.set_trace()
-    
-    return Data(x=torch.from_numpy(node_features), edge_index=torch.from_numpy(edge_indices), 
-                edge_attr=torch.from_numpy(edge_features), bd_pred=torch.from_numpy(bd_pred_arr), lin_dim=linear_dimensions, num_channels=num_layers,
+
+    return Data(x=torch.from_numpy(node_features), edge_index=torch.from_numpy(edge_indices),
+                edge_attr=torch.from_numpy(edge_features), bd_pred=torch.from_numpy(bd_pred_arr),
+                extra_features=torch.from_numpy(extra_features),
+                lin_dim=linear_dimensions, num_channels=num_layers,
                 y = torch.from_numpy(labels))
     
 def get_bd_prefs(pos_list, bds, range_num_agents, add_noise=True):
