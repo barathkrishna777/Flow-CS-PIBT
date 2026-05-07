@@ -168,16 +168,6 @@ class FlowGNNModel(nn.Module):
             nn.Dropout(0.15)
         )
 
-        # Optional residual branch for extra agent-level features (goal disp, BD dist).
-        # Zero-init weight so it starts as a no-op; grows gradually without disrupting
-        # the pre-trained trunk or lattice head embeddings.
-        if extra_feature_dim > 0:
-            self.extra_proj = nn.Linear(extra_feature_dim, hidden_dim)
-            nn.init.zeros_(self.extra_proj.weight)
-            nn.init.zeros_(self.extra_proj.bias)
-        else:
-            self.extra_proj = None
-
         # --- 2. GNN with Residual Connections ---
         gnn_input_dim = hidden_dim + velocity_dim + 1 
         self.input_proj = nn.Linear(gnn_input_dim, hidden_dim)
@@ -218,8 +208,11 @@ class FlowGNNModel(nn.Module):
         )
 
         # --- 6. Lattice Primitive Head (NUM_PRIMITIVES-class) ---
+        # extra_features (goal disp + BD dist) are concatenated directly here,
+        # giving a short gradient path without touching the frozen trunk.
+        lattice_in_dim = hidden_dim + extra_feature_dim
         self.lattice_head = nn.Sequential(
-            nn.Linear(hidden_dim, action_head_dim),
+            nn.Linear(lattice_in_dim, action_head_dim),
             nn.SiLU(),
             nn.Dropout(0.15),
             nn.Linear(action_head_dim, NUM_PRIMITIVES),
@@ -283,10 +276,6 @@ class FlowGNNModel(nn.Module):
         cnn_out = self.conv(x)
         visual_features = torch.hstack([cnn_out, aux_features])
         visual_emb = self.visual_proj(visual_features)
-        if self.extra_proj is not None:
-            extra_features = getattr(data, "extra_features", None)
-            if extra_features is not None:
-                visual_emb = visual_emb + self.extra_proj(extra_features.to(visual_emb.device).float())
 
         # 2. Inject Flow variables
         if len(t.shape) == 1: t = t.unsqueeze(1)
@@ -333,7 +322,15 @@ class FlowGNNModel(nn.Module):
             outputs.append(self.wait_ranking_logits(wait_ranking_velocity_for_logits, wait_logit))
 
         if return_lattice_logits:
-            outputs.append(self.lattice_head(node_features))
+            if self.extra_feature_dim > 0:
+                extra_feat = getattr(data, "extra_features", None)
+                if extra_feat is not None:
+                    lat_in = torch.cat([node_features, extra_feat.to(node_features.device).float()], dim=1)
+                else:
+                    lat_in = torch.cat([node_features, node_features.new_zeros(node_features.shape[0], self.extra_feature_dim)], dim=1)
+            else:
+                lat_in = node_features
+            outputs.append(self.lattice_head(lat_in))
 
         if len(outputs) == 1:
             return flow_output

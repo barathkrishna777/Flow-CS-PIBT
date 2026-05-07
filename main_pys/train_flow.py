@@ -706,7 +706,7 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
             train_action = action_head_only and name.startswith("action_head.")
             train_wait = wait_head_only and name.startswith("wait_head.")
             train_calibration = (wait_head_only or calibration_only) and name in calibration_names
-            train_lattice = lattice_head_only and (name.startswith("lattice_head.") or name.startswith("extra_proj."))
+            train_lattice = lattice_head_only and name.startswith("lattice_head.")
             param.requires_grad = train_action or train_wait or train_calibration or train_lattice
         if action_head_only:
             action_params = [p for n, p in model.named_parameters() if n.startswith("action_head.") and p.requires_grad]
@@ -721,8 +721,7 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
             if calibration_params:
                 trainable_groups.append({"params": calibration_params, "lr": wait_head_lr})
         if lattice_head_only:
-            lattice_params = [p for n, p in model.named_parameters()
-                              if (n.startswith("lattice_head.") or n.startswith("extra_proj.")) and p.requires_grad]
+            lattice_params = [p for n, p in model.named_parameters() if n.startswith("lattice_head.") and p.requires_grad]
             if lattice_params:
                 trainable_groups.append({"params": lattice_params, "lr": lattice_head_lr})
         trainable = [p for group in trainable_groups for p in group["params"]]
