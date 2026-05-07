@@ -1,8 +1,9 @@
 % ========================================================
 %  Flow-Guided Priority Shielding for Continuous-Space MAPF
-%  ICRA submission — IEEEtran two-column format
+%  ICRA submission --- IEEEtran two-column format
 %
-%  To compile:
+%  Compile from the paper/ directory:
+%    cd paper
 %    pdflatex main && bibtex main && pdflatex main && pdflatex main
 %
 %  Adapting to CoRL / NeurIPS / ICLR:
@@ -19,26 +20,22 @@
 \usepackage{booktabs}
 \usepackage{cite}
 \usepackage{url}
-\usepackage{hyperref}
+\usepackage[hidelinks]{hyperref}
 \usepackage{xcolor}
 \usepackage{microtype}
 \usepackage{algorithm2e}
-\RestyleAlgo{ruled}
 \usepackage{bm}
 \usepackage{multirow}
 \usepackage{array}
-\usepackage{balance}   % balance last-page columns
 
 % ---- algorithm2e style ---------------------------------
 \SetAlFnt{\small}
 \SetAlCapFnt{\small}
 \SetAlCapNameFnt{\small}
+\RestyleAlgo{ruled}
 
 % ---- Suppress extra space after periods ----------------
 \frenchspacing
-
-% ---- Hyperref (no colored boxes for submission) --------
-\hypersetup{colorlinks=true,linkcolor=black,citecolor=black,urlcolor=black}
 
 % ========================================================
 \begin{document}
@@ -46,17 +43,17 @@
 \title{Flow-Guided Priority Shielding for\\Continuous-Space Multi-Agent Path Finding}
 
 \author{%
-  \IEEEauthorblockN{[Authors — omitted for review]}
-  \IEEEauthorblockA{[Institution]\\
-    [City, Country]\\
-    [email@institution.edu]}
+  \IEEEauthorblockN{Author Names}
+  \IEEEauthorblockA{Institution Name\\
+    City, Country\\
+    email@institution.edu}
 }
 
 \maketitle
 
 % --------------------------------------------------------
 \begin{abstract}
-Continuous-space Multi-Agent Path Finding (MAPF) requires agents to navigate to individual goals in shared physical space while avoiding collisions. Classical velocity-obstacle methods such as ORCA suffer from symmetric deadlocks under high agent density. We introduce \textbf{EPIBTShield}, a continuous-space generalization of the discrete Priority Inheritance with Backtracking (PIBT) algorithm, which resolves velocity conflicts via dynamic priority ordering, a scored set of 19 candidate velocities per agent, and recursive backtracking up to depth~3. We pair EPIBTShield with a rectified-flow Graph Neural Network (GNN) that predicts spatially-informed preferred velocities from egocentric local observations and a dynamic neighbor communication graph, trained on EECBS expert demonstrations. On dense random maps with 100 agents over 512 steps, the combined system achieves $0.874$ fraction of agents at goal — a 70.6 percentage-point improvement over ORCA — with substantially fewer collisions. We characterize OOD failure on warehouse environments, isolating the learned flow component as the generalization bottleneck, and confirm low training variance across five random seeds.
+Continuous-space Multi-Agent Path Finding (MAPF) requires agents to navigate to individual goals in shared physical space while avoiding collisions. Classical velocity-obstacle methods such as ORCA suffer from symmetric deadlocks under high agent density. We introduce \textbf{EPIBTShield}, a continuous-space generalization of the discrete Priority Inheritance with Backtracking (PIBT) algorithm, which resolves velocity conflicts via dynamic priority ordering, a scored set of 19 candidate velocities per agent, and recursive backtracking up to depth~3. We pair EPIBTShield with a rectified-flow Graph Neural Network (GNN) that predicts spatially-informed preferred velocities from egocentric local observations and a dynamic neighbor communication graph, trained on EECBS expert demonstrations. On dense random maps with 100 agents over 512 steps, the combined system achieves $0.874$ fraction of agents at goal --- a 70.6 percentage-point improvement over ORCA --- with substantially fewer collisions. We characterize OOD failure on warehouse environments, isolating the learned flow component as the generalization bottleneck, and confirm low training variance across five random seeds.
 \end{abstract}
 
 % --------------------------------------------------------
@@ -68,9 +65,7 @@ Continuous-space Multi-Agent Path Finding (MAPF) requires agents to navigate to 
 
 % --------------------------------------------------------
 \section*{Acknowledgments}
-\small{[Acknowledgments omitted for anonymous review.]}
-
-\balance
+\small{Acknowledgments omitted for anonymous review.}
 
 % --------------------------------------------------------
 \bibliographystyle{IEEEtran}
