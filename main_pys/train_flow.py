@@ -232,6 +232,7 @@ def compute_flow_loss(
         need_hybrid_loss = hybrid_action_loss_weight > 0
         need_wait_ranking_loss = wait_ranking_loss_weight > 0
         need_wait_logit = need_wait_head_loss or need_hybrid_loss or need_wait_ranking_loss
+        need_lattice_loss = lattice_loss_weight > 0
         need_discrete_loss = need_action_loss or need_wait_logit
         use_shared_discrete = need_discrete_loss and discrete_forward_mode in ("shared", "both")
 
@@ -255,6 +256,7 @@ def compute_flow_loss(
             calibrated_wait = None
             hybrid_logits = None
             ranking_logits = None
+            lattice_logits = None
             if need_action_loss:
                 logits = outputs[idx]
                 idx += 1
@@ -269,7 +271,10 @@ def compute_flow_loss(
                 idx += 1
             if need_wait_ranking_loss:
                 ranking_logits = outputs[idx]
-            return flow, logits, wait, calibrated_wait, hybrid_logits, ranking_logits
+                idx += 1
+            if need_lattice_loss:
+                lattice_logits = outputs[idx]
+            return flow, logits, wait, calibrated_wait, hybrid_logits, ranking_logits, lattice_logits
 
         def forward_discrete_heads(v, t_in):
             outputs = model(
@@ -286,10 +291,11 @@ def compute_flow_loss(
                     need_wait_ranking_loss,
                     wait_ranking_velocity_source,
                 ),
+                return_lattice_logits=need_lattice_loss,
             )
             return unpack_discrete_forward(outputs)
 
-        if use_shared_discrete:
+        if use_shared_discrete or need_lattice_loss:
             (
                 predicted_flow,
                 action_logits,
@@ -297,6 +303,7 @@ def compute_flow_loss(
                 calibrated_wait_logit,
                 hybrid_logits,
                 ranking_logits,
+                lattice_logits_shared,
             ) = (
                 forward_discrete_heads(x_t, t)
             )
@@ -307,6 +314,7 @@ def compute_flow_loss(
             calibrated_wait_logit = None
             hybrid_logits = None
             ranking_logits = None
+            lattice_logits_shared = None
 
         target_flow = x_1 - x_0
         base_loss = F.mse_loss(predicted_flow, target_flow, reduction='none')
@@ -392,6 +400,7 @@ def compute_flow_loss(
                     calibrated_wait_logit_zero,
                     hybrid_logits_zero,
                     ranking_logits_zero,
+                    _,
                 ) = forward_discrete_heads(zero_v, zero_t)
                 action_loss_zero, wait_loss_zero, hybrid_loss_zero, ranking_loss_zero = compute_discrete_losses(
                     action_logits_zero,
@@ -412,6 +421,7 @@ def compute_flow_loss(
                     calibrated_wait_logit_x1,
                     hybrid_logits_x1,
                     ranking_logits_x1,
+                    _,
                 ) = forward_discrete_heads(x_1, t_high)
                 action_loss_x1, wait_loss_x1, hybrid_loss_x1, ranking_loss_x1 = compute_discrete_losses(
                     action_logits_x1,
@@ -439,7 +449,7 @@ def compute_flow_loss(
 
         # ── Lattice primitive head loss ──
         lattice_loss = zero
-        if lattice_loss_weight > 0:
+        if lattice_loss_weight > 0 and lattice_logits_shared is not None:
             if hasattr(batch, "lattice_action_y") and batch.lattice_action_y is not None:
                 lattice_targets = batch.lattice_action_y.view(-1).long().to(device)
             else:
@@ -451,10 +461,7 @@ def compute_flow_loss(
                 _c2l = torch.from_numpy(CARDINAL_TO_LATTICE).long().to(device)
                 lattice_targets = _c2l[cardinal_labels]
 
-            _, lattice_logits = model(
-                x_t, t, batch, return_lattice_logits=True,
-            )
-            lattice_ce = F.cross_entropy(lattice_logits, lattice_targets, reduction='none')
+            lattice_ce = F.cross_entropy(lattice_logits_shared, lattice_targets, reduction='none')
             lattice_loss = _reduce_node_loss(lattice_ce, node_weights, unweighted_action_loss)
 
         loss = (
@@ -787,6 +794,7 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
             or wait_head_loss_weight <= 0
             or hybrid_action_loss_weight <= 0
             or wait_ranking_loss_weight <= 0
+            or lattice_loss_weight <= 0
             or action_head_only
             or wait_head_only
             or calibration_only
