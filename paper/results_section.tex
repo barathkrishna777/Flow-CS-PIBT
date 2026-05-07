@@ -1,5 +1,5 @@
 % ==========================================================================
-%  Experimental Results — Continuous-Space MAPF with Flow + EPIBTShield
+%  Experimental Results — Continuous-Space MAPF with Flow + CV-PIBT
 %  Target: ICRA 2027 (6+1 pages, IEEE two-column)
 % ==========================================================================
 
@@ -27,32 +27,32 @@ Training seeds 42, 123, 456 are evaluated for robustness.
 \paragraph{Baselines.}
 ORCA~\cite{vandenberg2011orca}: velocity-obstacle planner with default parameterization.
 PO-ORCA: ORCA with pairwise priority ordering to reduce symmetric deadlocks.
-Straight+EPIBTShield: goal-directed constant-velocity policy passed through our shield, isolating the shield contribution.
-Flow+ORCA: learned flow velocities shielded by ORCA instead of EPIBTShield, isolating the learned-policy contribution.
+Straight+CV-PIBT: goal-directed constant-velocity policy passed through our shield, isolating the shield contribution.
+Flow+ORCA: learned flow velocities shielded by ORCA instead of CV-PIBT, isolating the learned-policy contribution.
 
 % ------------------------------------------------------------------
 \subsection{Set~A: In-Distribution Performance}\label{sec:seta}
 
 Table~\ref{tab:main} reports Set~A results.
 On the hardest configuration (\texttt{random}, $N\!=\!100$),
-Flow+EPIBTShield achieves 87.4\% AtGoal with 633~collisions,
+Flow+CV-PIBT achieves 87.4\% AtGoal with 633~collisions,
 compared with ORCA at 16.8\% AtGoal and 4169~collisions
 (a 70.6 percentage-point completion gain and 84.8\% collision reduction).
 
 The decomposition reveals that shielding is the primary mechanism:
-Straight+EPIBTShield already reaches 77.4\% AtGoal,
+Straight+CV-PIBT already reaches 77.4\% AtGoal,
 a~60.6~pp improvement over ORCA, through priority inheritance
 and velocity-space backtracking alone.
 By contrast, Flow+ORCA reaches only 48.6\%---learned velocities
 through a weak shield cannot recover from dense conflicts.
-Adding the learned flow prior on top of EPIBTShield yields a
+Adding the learned flow prior on top of CV-PIBT yields a
 further 10.0~pp gain (77.4\%~$\to$~87.4\%), demonstrating that
 the rectified-flow policy provides useful preferred-velocity
 priors that the shield can exploit when resolving conflicts.
 
 Averaged across all Set~A configurations at 512~steps,
-Flow+EPIBTShield achieves 0.927 AtGoal at $N\!=\!50$ and 0.921 at $N\!=\!100$,
-compared with 0.889/0.886 for Straight+EPIBTShield and
+Flow+CV-PIBT achieves 0.927 AtGoal at $N\!=\!50$ and 0.921 at $N\!=\!100$,
+compared with 0.889/0.886 for Straight+CV-PIBT and
 0.579/0.584 for ORCA (Table~\ref{tab:main}).
 
 At 256~steps, completion drops moderately
@@ -64,23 +64,23 @@ agents in congested regions that require more timesteps to resolve.
 \subsection{Generalization: Sets~B and~C}\label{sec:gen}
 
 Table~\ref{tab:generalization} reports generalization results.
-On near-distribution maps (Set~B), Flow+EPIBTShield maintains
+On near-distribution maps (Set~B), Flow+CV-PIBT maintains
 its advantage: on \texttt{random-64-64-10} it reaches 61.4\% AtGoal
-versus 50.5\% for Straight+EPIBTShield and 4.8\% for ORCA.
+versus 50.5\% for Straight+CV-PIBT and 4.8\% for ORCA.
 On \texttt{room-32-32-4}, a bottleneck-heavy layout, it achieves
 26.2\% versus 11.4\% and 1.2\%, respectively.
 
 On the out-of-distribution \texttt{warehouse} maps (Set~C),
 a notable reversal occurs:
-Straight+EPIBTShield (41.1\% at $N\!=\!50$, 39.4\% at $N\!=\!100$)
-outperforms Flow+EPIBTShield (25.5\%, 21.7\%).
+Straight+CV-PIBT (41.1\% at $N\!=\!50$, 39.4\% at $N\!=\!100$)
+outperforms Flow+CV-PIBT (25.5\%, 21.7\%).
 The learned flow prior, trained exclusively on random and empty maps,
 produces velocity proposals that are poorly suited to narrow warehouse
 corridors and structured shelf layouts.
-EPIBTShield must repeatedly override these proposals, incurring
+CV-PIBT must repeatedly override these proposals, incurring
 backtracking overhead that a simple goal-directed policy avoids.
 This result underscores two points:
-(1)~EPIBTShield itself generalizes robustly to unseen environments,
+(1)~CV-PIBT itself generalizes robustly to unseen environments,
 and (2)~the learned component requires domain-matched training data
 to contribute positively.
 
@@ -118,7 +118,7 @@ On \texttt{empty} maps, variance is low
 On \texttt{random} maps, variance increases:
 0.817$\pm$0.037 at $N\!=\!50$, 0.812$\pm$0.038 at $N\!=\!100$.
 Seed~42 is the strongest across all settings;
-seeds 123 and 456 still surpass Straight+EPIBTShield on
+seeds 123 and 456 still surpass Straight+CV-PIBT on
 \texttt{random} $N\!=\!100$ (0.789 and 0.782 vs.\ 0.774),
 but the learned margin is modest for retrained seeds.
 This suggests that while the learning signal is consistent,
@@ -126,14 +126,14 @@ training stability on cluttered maps warrants further investigation
 (e.g., curriculum learning or loss landscape smoothing).
 
 % ------------------------------------------------------------------
-\subsection{EPIBTShield as the Primary Contribution}\label{sec:shield-contrib}
+\subsection{CV-PIBT as the Primary Contribution}\label{sec:shield-contrib}
 
 The experimental decomposition provides clear evidence that
-EPIBTShield is the primary algorithmic contribution of this work.
+CV-PIBT is the primary algorithmic contribution of this work.
 ORCA and PO-ORCA both fail categorically on dense random maps,
 achieving under 17\% completion at $N\!=\!100$ regardless of the
 velocity source.
-Replacing the shield with EPIBTShield while retaining a naive
+Replacing the shield with CV-PIBT while retaining a naive
 straight-line velocity policy improves completion from 16.8\%
 to 77.4\%---a 4.6$\times$ increase attributable entirely to
 priority inheritance and continuous-space backtracking.
@@ -145,7 +145,7 @@ When no feasible velocity exists, the agent backtracks by yielding
 its current priority, enabling deadlock resolution without global
 replanning.
 This mechanism transfers to unseen environments
-(Set~B and warehouse maps in Set~C), where EPIBTShield delivers
+(Set~B and warehouse maps in Set~C), where CV-PIBT delivers
 the largest absolute gains over ORCA even without a learned prior.
 The learned flow component provides a complementary but secondary
 benefit: it biases the shield's search toward more efficient
@@ -164,7 +164,7 @@ directed rigidly toward each agent's goal, the flow policy
 produces context-dependent proposals that account for nearby
 agents and obstacles through the GNN's message-passing structure.
 This manifests as a consistent 3--10~pp AtGoal improvement
-over Straight+EPIBTShield on in-distribution and
+over Straight+CV-PIBT on in-distribution and
 near-distribution maps.
 On \texttt{room-32-32-4}, where agents must negotiate narrow
 doorways, the learned policy more than doubles the shield-only
@@ -173,7 +173,7 @@ the flow model learns useful bottleneck-avoidance behaviors.
 Critically, the learned policy improves performance only when
 paired with a strong shield: Flow+ORCA achieves just 48.6\%
 on \texttt{random}~$N\!=\!100$, below even
-Straight+EPIBTShield at 77.4\%.
+Straight+CV-PIBT at 77.4\%.
 The flow model does not guarantee collision avoidance; it
 provides high-quality proposals that a robust conflict-resolution
 mechanism can refine and enforce.
@@ -183,8 +183,8 @@ mechanism can refine and enforce.
 
 Three limitations merit discussion.
 First, the learned flow prior degrades on out-of-distribution
-layouts: on \texttt{warehouse} maps, Flow+EPIBTShield
-underperforms Straight+EPIBTShield by 15.6~pp ($N\!=\!50$)
+layouts: on \texttt{warehouse} maps, Flow+CV-PIBT
+underperforms Straight+CV-PIBT by 15.6~pp ($N\!=\!50$)
 and 17.7~pp ($N\!=\!100$).
 The model, trained on random obstacle and empty grids,
 produces velocity proposals misaligned with the structured
@@ -197,7 +197,7 @@ future work.
 Second, multi-seed training variance on cluttered maps
 (std of 0.038 on \texttt{random}~$N\!=\!100$) indicates
 sensitivity to initialization.
-While all seeds outperform Straight+EPIBTShield, the margin
+While all seeds outperform Straight+CV-PIBT, the margin
 is small for non-best seeds (0.8--1.5~pp), and the practical
 benefit of the learned prior may be overstated if only the
 best seed is reported.
@@ -205,7 +205,7 @@ We report all seeds transparently to avoid this pitfall.
 Third, empirical collision counts, while substantially
 reduced (84.8\% fewer than ORCA on the hardest case), remain
 nonzero.
-EPIBTShield does not provide a formal collision-avoidance
+CV-PIBT does not provide a formal collision-avoidance
 guarantee in continuous space under finite integration steps;
 residual collisions arise from discretization of the
 continuous dynamics and simultaneous velocity commitments
@@ -226,7 +226,7 @@ remain an open problem.
   \textbf{ArrPLR}: path-length ratio (arrived agents);
   \textbf{ArrStep}: mean arrival step.
   Averages over 25~scenarios.  Best AtGoal per row in \textbf{bold}.
-  Integration-step ablation uses Flow+EPIBTShield with $k$ Euler steps.
+  Integration-step ablation uses Flow+CV-PIBT with $k$ Euler steps.
   Multi-seed results report per-seed AtGoal (Coll) and mean$\pm$std.
 }\label{tab:main}
 \vspace{2pt}
@@ -255,7 +255,7 @@ remain an open problem.
   & 1.00 &   99 & 1.10 & 153
   & .153 &  626 & 1.10 & 413
   & .149 & 2626 & 1.10 & 443 \\
-& Straight+EPIBT
+& Straight+CV-PIBT
   & 1.00 &    6 & 1.08 &  80
   & 1.00 &   15 & 1.10 &  97
   & .774 &  206 & 1.12 & 188
@@ -267,18 +267,18 @@ remain an open problem.
   & .486 & 3996 & 1.38 & 331 \\
 \cmidrule(lr){2-18}
 \multirow{2}{*}{\rotatebox{90}{\scriptsize Ours}}
-& Flow+EPIBT (256)
+& Flow+CV-PIBT (256)
   & .850 &   13 & 1.25 & 118
   & .812 &   80 & 1.32 & 149
   & .835 &   86 & 1.32 & 144
   & .814 &  500 & 1.38 & 158 \\
-& Flow+EPIBT (512)
+& Flow+CV-PIBT (512)
   & \textbf{.989} &   20 & 1.24 &  82
   & \textbf{.968} &   84 & 1.28 & 104
   & \textbf{.866} &  177 & 1.37 & 140
   & \textbf{.874} &  633 & 1.46 & 168 \\
 \midrule
-\multicolumn{18}{l}{\textit{Integration-step ablation} (Flow+EPIBT, 512 steps)} \\
+\multicolumn{18}{l}{\textit{Integration-step ablation} (Flow+CV-PIBT, 512 steps)} \\
 \cmidrule(lr){2-18}
 & $k\!=\!3$ (default)
   & .989 &  20 & 1.24 &  82
@@ -301,7 +301,7 @@ remain an open problem.
   & .870 & 195 & 1.49 & 157
   & .868 & 730 & 1.66 & 183 \\
 \midrule
-\multicolumn{18}{l}{\textit{Multi-seed robustness} (Flow+EPIBT, 512 steps, AtGoal / Coll)} \\
+\multicolumn{18}{l}{\textit{Multi-seed robustness} (Flow+CV-PIBT, 512 steps, AtGoal / Coll)} \\
 \cmidrule(lr){2-18}
 & Seed 42
   & .984 & --- & --- & ---
@@ -345,23 +345,23 @@ Map & Method & AtGoal & Coll & ArrPLR \\
 \midrule
 \multirow{3}{*}{\shortstack[l]{\texttt{random-64}\\$N\!=\!50$}}
   & ORCA             & .048 &  383 & 0.99 \\
-  & Straight+EPIBT   & .505 &  267 & 1.05 \\
-  & Flow+EPIBT       & \textbf{.614} &  106 & 1.39 \\
+  & Straight+CV-PIBT   & .505 &  267 & 1.05 \\
+  & Flow+CV-PIBT       & \textbf{.614} &  106 & 1.39 \\
 \midrule
 \multirow{3}{*}{\shortstack[l]{\texttt{room-32}\\$N\!=\!50$}}
   & ORCA             & .012 & 1028 & --- \\
-  & Straight+EPIBT   & .114 & 2020 & --- \\
-  & Flow+EPIBT       & \textbf{.262} & 1113 & --- \\
+  & Straight+CV-PIBT   & .114 & 2020 & --- \\
+  & Flow+CV-PIBT       & \textbf{.262} & 1113 & --- \\
 \midrule
 \multirow{3}{*}{\shortstack[l]{\texttt{warehouse}\\$N\!=\!50$}}
   & ORCA             & .132 &  855 & --- \\
-  & Straight+EPIBT   & \textbf{.411} &   30 & --- \\
-  & Flow+EPIBT       & .255 &   57 & --- \\
+  & Straight+CV-PIBT   & \textbf{.411} &   30 & --- \\
+  & Flow+CV-PIBT       & .255 &   57 & --- \\
 \midrule
 \multirow{3}{*}{\shortstack[l]{\texttt{warehouse}\\$N\!=\!100$}}
   & ORCA             & .125 & 3496 & --- \\
-  & Straight+EPIBT   & \textbf{.394} &  168 & --- \\
-  & Flow+EPIBT       & .217 &  320 & --- \\
+  & Straight+CV-PIBT   & \textbf{.394} &  168 & --- \\
+  & Flow+CV-PIBT       & .217 &  320 & --- \\
 \bottomrule
 \end{tabular}
 \end{table}

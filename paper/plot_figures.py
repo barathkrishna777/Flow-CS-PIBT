@@ -69,7 +69,7 @@ def save(fig, name):
 # Figure 1: Mechanism Decomposition (connected dot / slope)
 # ====================================================================
 def fig1_mechanism_decomposition():
-    methods = ["ORCA", "PO-ORCA", "Straight\n+EPIBT", "Flow\n+ORCA", "Flow\n+EPIBT"]
+    methods = ["ORCA", "PO-ORCA", "Straight\n+CV-PIBT", "Flow\n+ORCA", "Flow\n+CV-PIBT"]
     at_goal = [0.168, 0.149, 0.774, 0.486, 0.874]
     coll =    [4168.9, 2626.3, 1306.9, 3996.0, 633.4]
     colors = [C["orca"], C["po_orca"], C["straight_epibt"], C["flow_orca"], C["flow_epibt"]]
@@ -133,7 +133,7 @@ def fig2_generalization():
         ("warehouse\nN=100",{"orca": 0.125, "straight_epibt": 0.394, "flow_epibt": 0.217}),
     ]
     method_order = ["orca", "straight_epibt", "flow_epibt"]
-    labels = {"orca": "ORCA", "straight_epibt": "Straight+EPIBT", "flow_epibt": "Flow+EPIBT"}
+    labels = {"orca": "ORCA", "straight_epibt": "Straight+CV-PIBT", "flow_epibt": "Flow+CV-PIBT"}
 
     # sharey=False so set_yticks on one panel doesn't clobber others
     fig, axes = plt.subplots(1, 4, figsize=(6.8, 2.2))
@@ -267,7 +267,7 @@ def fig4_multiseed():
         # Mean marker (larger)
         ax.scatter(mean, y, color=C["flow_epibt"], s=70, zorder=5,
                    edgecolors="white", linewidths=0.6, marker="D")
-        # Straight+EPIBT reference
+        # Straight+CV-PIBT reference
         ref = straight_epibt_ref[label]
         if ref < 0.99:
             ax.axvline(ref, color=C["straight_epibt"], lw=0.6, ls=":", alpha=0.7)
@@ -283,7 +283,7 @@ def fig4_multiseed():
 
     # Reference line label — placed to the right of the dotted line,
     # anchored at the random N=50 row where there is vertical space
-    ax.text(0.779, ys[1] + 0.18, "Straight+EPIBT", fontsize=5.5,
+    ax.text(0.779, ys[1] + 0.18, "Straight+CV-PIBT", fontsize=5.5,
             color=C["straight_epibt"], ha="left", va="bottom")
 
     # Seed legend: compact box in lower-right quadrant (random rows have
@@ -309,7 +309,7 @@ def _interp(pts, n=80):
 
 
 def _catmull_rom(pts, n=80):
-    """Catmull-Rom spline for smooth curved paths (Flow+EPIBT)."""
+    """Catmull-Rom spline for smooth curved paths (Flow+CV-PIBT)."""
     wp = np.array(pts, dtype=float)
     # Phantom endpoints duplicate first/last for tangent computation
     p = np.vstack([wp[0], wp, wp[-1]])
@@ -335,9 +335,9 @@ def fig5_qualitative_schematic():
     Four agents create two crossing pairs — a natural conflict zone in the
     centre. Paths are illustrative schematics:
       ORCA          — deadlock; agents oscillate and never reach goals.
-      Straight+EPIBT — all reach goals via angular detours (shield
+      Straight+CV-PIBT — all reach goals via angular detours (shield
                        backtracking causes sharp direction reversals).
-      Flow+EPIBT    — all reach goals via smooth proactive arcs (learned
+      Flow+CV-PIBT    — all reach goals via smooth proactive arcs (learned
                        prior routes around the crossing zone early;
                        paths are CURVIER than Straight, not straighter).
 
@@ -366,8 +366,8 @@ def fig5_qualitative_schematic():
     # ------------------------------------------------------------------
     # Waypoints — all coordinates verified within [0.4, 9.6]
     # ORCA: path → deadlock oscillation cluster → X (never arrives)
-    # Straight+EPIBT: path → sharp angular kink at conflict → goal
-    # Flow+EPIBT: wide smooth arc bypassing conflict early → goal
+    # Straight+CV-PIBT: path → sharp angular kink at conflict → goal
+    # Flow+CV-PIBT: wide smooth arc bypassing conflict early → goal
     #             (Catmull-Rom spline; intentionally CURVIER than Straight)
     # ------------------------------------------------------------------
     orca_wps = [
@@ -426,8 +426,8 @@ def fig5_qualitative_schematic():
     # ------------------------------------------------------------------
     all_methods = [
         ("ORCA",           orca_wps,     [False]*4, _interp),
-        ("Straight+EPIBT", straight_wps, [True]*4,  _interp),
-        ("Flow+EPIBT",     flow_wps,     [True]*4,  _catmull_rom),
+        ("Straight+CV-PIBT", straight_wps, [True]*4,  _interp),
+        ("Flow+CV-PIBT",     flow_wps,     [True]*4,  _catmull_rom),
     ]
 
     fig, axes = plt.subplots(1, 3, figsize=(6.8, 2.5))
@@ -473,8 +473,8 @@ def fig5_qualitative_schematic():
 
     fig.text(0.5, 0.01,
              "● start   ★ goal reached   ✕ stuck.   "
-             "Straight+EPIBT: sharp angular kinks from shield backtracking.   "
-             "Flow+EPIBT: smooth proactive arcs (EECBS prior; wider, not straighter).",
+             "Straight+CV-PIBT: sharp angular kinks from shield backtracking.   "
+             "Flow+CV-PIBT: smooth proactive arcs (EECBS prior; wider, not straighter).",
              ha="center", fontsize=5.5, color="#555555")
 
     save(fig, "fig5_qualitative_trajectories")

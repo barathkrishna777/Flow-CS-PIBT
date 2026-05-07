@@ -2,7 +2,7 @@
 \section{Method}
 \label{sec:method}
 
-Our system consists of two coupled components: (1) a rectified-flow GNN that maps each agent's local observation to a preferred velocity, and (2) EPIBTShield, which takes these preferred velocities as inputs and resolves inter-agent conflicts to produce collision-aware committed velocities. At each planning step, both components execute in sequence.
+Our system consists of two coupled components: (1) a rectified-flow GNN that maps each agent's local observation to a preferred velocity, and (2) CV-PIBT, which takes these preferred velocities as inputs and resolves inter-agent conflicts to produce collision-aware committed velocities. At each planning step, both components execute in sequence.
 
 \subsection{Problem Formulation}
 
@@ -53,7 +53,7 @@ The final GNN representation $z_i^{(L)}$ feeds three heads:
 \begin{itemize}
   \item \textbf{Flow head}: $\hat{u}_i = \text{Linear}(512 \to 2)(\text{SiLU}(\text{Dropout}(\text{Linear}(1024 \to 512)(\text{SiLU}(\text{Dropout}(z_i^{(L)}))))))$. This outputs the predicted velocity field $f_\theta(v_t, t, h_i) \in \mathbb{R}^2$.
   \item \textbf{Action head}: a 5-class discrete action classifier trained with cross-entropy, used as an auxiliary training signal.
-  \item \textbf{Wait-logit head}: a scalar $w_i$ with learnable scale $s_w$ and bias $b_w$; $\sigma(s_w \cdot w_i + b_w)$ is the probability that agent $i$ should wait. This is used as a soft prior during candidate scoring in EPIBTShield.
+  \item \textbf{Wait-logit head}: a scalar $w_i$ with learnable scale $s_w$ and bias $b_w$; $\sigma(s_w \cdot w_i + b_w)$ is the probability that agent $i$ should wait. This is used as a soft prior during candidate scoring in CV-PIBT.
 \end{itemize}
 
 \subsubsection{Rectified Flow Training and Inference}
@@ -74,10 +74,10 @@ At inference, we integrate $k=3$ Euler steps from $v_0 \sim \mathcal{N}(0, I)$:
 \]
 The final $v_3$ is taken as the preferred velocity $\tilde{u}_i$ for agent $i$, clipped to $[-v_{\max}, v_{\max}]^2$.
 
-\subsection{EPIBTShield}
+\subsection{CV-PIBT}
 \label{sec:method:shield}
 
-EPIBTShield resolves velocity conflicts among the $N$ preferred velocities $\{\tilde{u}_i\}$ produced by the flow GNN. It generalizes the discrete PIBT algorithm~\cite{okumura2022pibt} to continuous space by operating on a set of scored candidate velocities rather than graph-adjacent positions.
+CV-PIBT resolves velocity conflicts among the $N$ preferred velocities $\{\tilde{u}_i\}$ produced by the flow GNN. It generalizes the discrete PIBT algorithm~\cite{okumura2022pibt} to continuous space by operating on a set of scored candidate velocities rather than graph-adjacent positions.
 
 \subsubsection{Candidate Velocity Set}
 
@@ -103,11 +103,11 @@ Agents are processed in descending order of a priority score. We use the remaini
 
 \subsubsection{Conflict Resolution with Backtracking}
 
-Algorithm~\ref{alg:epibt} gives the full procedure. The key invariant is that once an agent $i$ commits a velocity $u_i^* \in \mathcal{C}_i$, that velocity is not subsequently changed unless a lower-priority agent fails to find a conflict-free candidate, triggering backtracking into agent $i$.
+Algorithm~\ref{alg:cvpibt} gives the full procedure. The key invariant is that once an agent $i$ commits a velocity $u_i^* \in \mathcal{C}_i$, that velocity is not subsequently changed unless a lower-priority agent fails to find a conflict-free candidate, triggering backtracking into agent $i$.
 
 \begin{algorithm}[t]
-\caption{EPIBTShield($\{\tilde{u}_i\}$, $\{p_i\}$, $\{g_i\}$, $r_a$, $\Delta t$)}
-\label{alg:epibt}
+\caption{CV-PIBT($\{\tilde{u}_i\}$, $\{p_i\}$, $\{g_i\}$, $r_a$, $\Delta t$)}
+\label{alg:cvpibt}
 \small
 \SetAlgoLined
 \KwIn{Preferred velocities $\{\tilde{u}_i\}$; positions $\{p_i\}$; goals $\{g_i\}$; agent radius $r_a$; time step $\Delta t$}
@@ -170,13 +170,13 @@ In rare cases where the backtracking budget is exhausted, the agent commits the 
 
 \subsection{System Integration}
 
-At each planning step, the flow GNN takes $3$ Euler steps to produce preferred velocities (wall time $\approx 8$\,ms for $N{=}100$ on a single GPU). EPIBTShield then resolves conflicts in $O(N \cdot |\mathcal{C}| \cdot N_{\text{committed}})$ worst-case time per step. All agents then integrate their committed velocities for one step of duration $\Delta t = 1$.
+At each planning step, the flow GNN takes $3$ Euler steps to produce preferred velocities (wall time $\approx 8$\,ms for $N{=}100$ on a single GPU). CV-PIBT then resolves conflicts in $O(N \cdot |\mathcal{C}| \cdot N_{\text{committed}})$ worst-case time per step. All agents then integrate their committed velocities for one step of duration $\Delta t = 1$.
 
 Figure~\ref{fig:qualitative} shows example trajectories from the combined system in a random map.
 
 \begin{figure}[t]
   \centering
   \includegraphics[width=\linewidth]{figures/fig5_qualitative_trajectories}
-  \caption{Qualitative trajectory comparison on random-32-32-10 with $N{=}10$ agents over 512 steps. Each column shows a different conflict-resolution strategy with the same start/goal configuration. ORCA deadlocks at symmetric conflicts (crosses); Straight+EPIBTShield resolves deadlocks but takes angular detours; Flow+EPIBTShield produces smooth, proactive arcs that clear inter-agent conflicts earlier.}
+  \caption{Qualitative trajectory comparison on random-32-32-10 with $N{=}10$ agents over 512 steps. Each column shows a different conflict-resolution strategy with the same start/goal configuration. ORCA deadlocks at symmetric conflicts (crosses); Straight+CV-PIBT resolves deadlocks but takes angular detours; Flow+CV-PIBT produces smooth, proactive arcs that clear inter-agent conflicts earlier.}
   \label{fig:qualitative}
 \end{figure}
