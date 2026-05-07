@@ -45,7 +45,10 @@ def _check_primitive_feasible(grid_map, agent_pos, prim_idx,
     path = PRIMITIVE_PATHS[prim_idx] + agent_pos  # (D+1, 2)
     H, W = grid_map.shape
 
-    for t in range(PRIMITIVE_DURATION + 1):
+    # Skip t=0: path[0] is always the agent's own current position, which is
+    # pre-reserved for itself and can never conflict with another agent's path.
+    # Checking it would block every primitive including WAIT.
+    for t in range(1, PRIMITIVE_DURATION + 1):
         r, c = path[t]
         if r < 0 or r >= H or c < 0 or c >= W:
             return False, None
@@ -65,8 +68,12 @@ def _check_primitive_feasible(grid_map, agent_pos, prim_idx,
 
 
 def _commit_primitive(agent_id, path, reserved_nodes, reserved_edges):
-    """Reserve all space-time cells and edges for a committed primitive."""
-    for t in range(PRIMITIVE_DURATION + 1):
+    """Reserve space-time cells and edges for a committed primitive.
+
+    t=0 (starting cell) is already pre-reserved during lattice_pibt init and
+    is never modified by commit/uncommit — it persists for the full round.
+    """
+    for t in range(1, PRIMITIVE_DURATION + 1):
         r, c = path[t]
         reserved_nodes[(r, c, t)] = agent_id
     for t in range(PRIMITIVE_DURATION):
@@ -76,8 +83,12 @@ def _commit_primitive(agent_id, path, reserved_nodes, reserved_edges):
 
 
 def _uncommit_primitive(agent_id, path, reserved_nodes, reserved_edges):
-    """Release reservations for a primitive (backtracking)."""
-    for t in range(PRIMITIVE_DURATION + 1):
+    """Release reservations for a primitive (backtracking).
+
+    Only releases t>=1 entries committed by this agent; the t=0 entry is
+    left intact (it was set during init and never touched by commit).
+    """
+    for t in range(1, PRIMITIVE_DURATION + 1):
         r, c = path[t]
         key = (r, c, t)
         if reserved_nodes.get(key) == agent_id:
