@@ -34,7 +34,7 @@ import sys
 
 MAP_NPZ = "data/all_maps.npz"
 BD_DIR = "data/bd_npzs/large_scale"
-SCEN_DIR = "data/scen-random"
+SCEN_DIR = "data/mapf-scen-random"
 
 # Same 8 maps as generate_and_preprocess.HELD_OUT_TEST (paper protocol)
 RISHI_HELD_OUT_MAPS = [
