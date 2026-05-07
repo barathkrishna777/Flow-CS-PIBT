@@ -1,16 +1,13 @@
-"""Compare Lattice-PIBT vs CS-PIBT on grid-world MAPF.
+"""Compare CS-PIBT, Lattice-PIBT, and Lattice-Cardinal CS-PIBT.
 
-Runs both shield types with the same model checkpoint, maps, and scenarios
-so the comparison is apples-to-apples.
+Three conditions evaluated on the same model, maps, and scenarios:
+  1. CS-PIBT           — standard flow → 5-cardinal preferences → 1-step PIBT
+  2. Lattice-PIBT      — flow → 17-primitive lattice PIBT (multi-step)
+  3. Lattice-Cardinal  — flow → 17-prim scores max-pooled to 5 cardinals → CS-PIBT
 
 Usage:
-    # Quick sanity check (5 maps, 3 agent counts, 1 scenario each)
     python eval_lattice.py data/model/large_scale_flow_best.pt
-
-    # Full eval (more agent counts)
     python eval_lattice.py data/model/large_scale_flow_best.pt --extended
-
-    # Custom model path
     python eval_lattice.py --model data/model/YOUR_CHECKPOINT.pt
 """
 import os, sys, subprocess, argparse, csv
@@ -27,7 +24,7 @@ DEFAULT_MAPS = [
     ("warehouse-10-20-10-2-1", "warehouse-10-20-10-2-1-random-1.scen"),
 ]
 DEFAULT_AGENTS = [100, 200, 400]
-NUM_STEPS = 5        # Euler integration steps
+NUM_STEPS = 5
 CONSENSUS = 3
 TAU       = 0.3
 WAIT_THRESH = 0.25
@@ -48,6 +45,8 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--hidden-dim", type=int, default=1024)
     parser.add_argument("--num-layers", type=int, default=6)
+    parser.add_argument("--skip-lattice-pibt", action="store_true",
+                        help="Skip the multi-step Lattice-PIBT condition (useful when it times out)")
     args = parser.parse_args()
 
     args.model = args.model_opt or args.model
@@ -64,6 +63,7 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     csv_cs    = os.path.join(args.output_dir, "cs_pibt.csv")
     csv_lat   = os.path.join(args.output_dir, "lattice_pibt.csv")
+    csv_lc    = os.path.join(args.output_dir, "lattice_cardinal_pibt.csv")
 
     import torch
     use_gpu = torch.cuda.is_available()
@@ -104,25 +104,39 @@ def main():
         "--policyType=flow",
     ]
 
+    num_modes = 3 if not args.skip_lattice_pibt else 2
     total = len(runs)
     print(f"{'='*65}")
-    print(f"Lattice-PIBT vs CS-PIBT comparison")
+    print(f"CS-PIBT vs Lattice-Cardinal vs Lattice-PIBT comparison")
     print(f"Model  : {args.model}")
     print(f"Maps   : {len(DEFAULT_MAPS)} | Agents: {agent_counts} | Steps: {NUM_STEPS}")
-    print(f"GPU    : {use_gpu} | Total runs: {total * 2} ({total} per shield)")
+    print(f"GPU    : {use_gpu} | Total runs: {total * num_modes} ({total} per condition)")
     print(f"Output : {args.output_dir}/")
     print(f"{'='*65}\n")
 
-    def run_one(map_name, scen_path, bd_path, n, shield, out_csv, label):
-        tmp = "logs/_eval_lattice_tmp.csv"
+    def run_one(map_name, scen_path, bd_path, n, mode, out_csv):
+        """Run a single simulator call.
+
+        mode is one of: "CS-PIBT", "Lattice-PIBT", "Lattice-Cardinal"
+        """
+        tmp = f"logs/_eval_lattice_tmp_{mode.replace(' ', '_').replace('-', '_')}.csv"
         os.makedirs("logs", exist_ok=True)
         if os.path.exists(tmp):
             os.remove(tmp)
 
-        extra = []
-        if shield == "Lattice-PIBT":
+        if mode == "CS-PIBT":
+            shield_flag = "--shieldType=CS-PIBT"
+            extra = []
+        elif mode == "Lattice-PIBT":
+            shield_flag = "--shieldType=Lattice-PIBT"
             extra = [
                 "--latticeScoreMode=velocity",
+                f"--latticeSpeedBonus={args.speed_bonus}",
+            ]
+        else:  # Lattice-Cardinal
+            shield_flag = "--shieldType=CS-PIBT"
+            extra = [
+                "--latticeCardinalMode=True",
                 f"--latticeSpeedBonus={args.speed_bonus}",
             ]
 
@@ -134,7 +148,7 @@ def main():
                 f"--scenFile={scen_path}",
                 f"--bdNpzFile={bd_path}",
                 f"--agentNum={n}",
-                f"--shieldType={shield}",
+                shield_flag,
                 f"--outputCSVFile={tmp}",
             ]
             + extra
@@ -144,11 +158,11 @@ def main():
             subprocess.run(cmd, capture_output=True, text=True,
                            timeout=TIME_LIMIT + 60)
         except subprocess.TimeoutExpired:
-            print(f"  {label} TIMEOUT")
+            print(f"  {mode} TIMEOUT")
             return None
 
         if not os.path.exists(tmp):
-            print(f"  {label} NO OUTPUT")
+            print(f"  {mode} NO OUTPUT")
             return None
 
         with open(tmp) as f:
@@ -163,53 +177,65 @@ def main():
         cost_nr  = row.get("total_cost_not_resting_at_goal", 0)
         pct      = 100.0 * at_goal / n
 
-        # Append to combined CSV
         write_header = not os.path.exists(out_csv)
         with open(out_csv, "a", newline="") as f:
             writer = csv.writer(f)
             if write_header:
                 writer.writerow(["shield","map","agents","at_goal_pct","success",
                                   "runtime","total_cost","cost_not_resting"])
-            writer.writerow([shield, map_name, n, f"{pct:.1f}", success,
+            writer.writerow([mode, map_name, n, f"{pct:.1f}", success,
                               f"{runtime:.2f}", cost, cost_nr])
 
         return at_goal, success, runtime, pct
 
-    # ── Run both shield types ────────────────────────────────────────────────
+    # ── Run all conditions ───────────────────────────────────────────────────
     for i, (map_name, scen_path, bd_path, n) in enumerate(runs, 1):
         print(f"[{i}/{total}] {map_name} | {n} agents")
 
-        r_cs = run_one(map_name, scen_path, bd_path, n,
-                       "CS-PIBT", csv_cs, "CS-PIBT")
-        r_lat = run_one(map_name, scen_path, bd_path, n,
-                        "Lattice-PIBT", csv_lat, "Lattice-PIBT")
+        r_cs = run_one(map_name, scen_path, bd_path, n, "CS-PIBT", csv_cs)
+        r_lc = run_one(map_name, scen_path, bd_path, n, "Lattice-Cardinal", csv_lc)
 
-        if r_cs and r_lat:
-            gain = r_lat[3] - r_cs[3]
+        if not args.skip_lattice_pibt:
+            r_lat = run_one(map_name, scen_path, bd_path, n, "Lattice-PIBT", csv_lat)
+        else:
+            r_lat = None
+
+        if r_cs:
+            print(f"  CS-PIBT          : {r_cs[0]}/{n} ({r_cs[3]:.1f}%)  {r_cs[2]:.1f}s")
+        if r_lc:
+            gain = r_lc[3] - (r_cs[3] if r_cs else 0)
             sign = "+" if gain >= 0 else ""
-            print(f"  CS-PIBT    : {r_cs[0]}/{n} ({r_cs[3]:.1f}%)  {r_cs[2]:.1f}s")
-            print(f"  Lattice-PIBT: {r_lat[0]}/{n} ({r_lat[3]:.1f}%)  {r_lat[2]:.1f}s  [{sign}{gain:.1f}%]")
+            print(f"  Lattice-Cardinal : {r_lc[0]}/{n} ({r_lc[3]:.1f}%)  {r_lc[2]:.1f}s  [{sign}{gain:.1f}%]")
+        if r_lat:
+            gain = r_lat[3] - (r_cs[3] if r_cs else 0)
+            sign = "+" if gain >= 0 else ""
+            print(f"  Lattice-PIBT     : {r_lat[0]}/{n} ({r_lat[3]:.1f}%)  {r_lat[2]:.1f}s  [{sign}{gain:.1f}%]")
         print()
 
     # ── Summary table ────────────────────────────────────────────────────────
     print(f"{'='*65}")
-    print("SUMMARY")
+    print("SUMMARY — avg agents-at-goal % by agent count")
     print(f"{'='*65}")
     try:
         import pandas as pd
-        for label, path in [("CS-PIBT", csv_cs), ("Lattice-PIBT", csv_lat)]:
+        entries = [("CS-PIBT", csv_cs), ("Lattice-Cardinal", csv_lc)]
+        if not args.skip_lattice_pibt:
+            entries.append(("Lattice-PIBT", csv_lat))
+        for label, path in entries:
             if os.path.exists(path):
                 df = pd.read_csv(path)
                 df["at_goal_pct"] = pd.to_numeric(df["at_goal_pct"], errors="coerce")
                 avg = df.groupby("agents")["at_goal_pct"].mean()
-                print(f"\n{label} — avg agents-at-goal % by count:")
+                print(f"\n{label}:")
                 print(avg.to_string())
     except ImportError:
-        print(f"  (install pandas for summary)")
+        print("  (install pandas for summary)")
 
     print(f"\nDone!")
-    print(f"  CS-PIBT    : {csv_cs}")
-    print(f"  Lattice-PIBT: {csv_lat}")
+    print(f"  CS-PIBT          : {csv_cs}")
+    print(f"  Lattice-Cardinal : {csv_lc}")
+    if not args.skip_lattice_pibt:
+        print(f"  Lattice-PIBT     : {csv_lat}")
 
 
 if __name__ == "__main__":

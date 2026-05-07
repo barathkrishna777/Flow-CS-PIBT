@@ -112,6 +112,53 @@ for i in range(NUM_PRIMITIVES):
 CARDINAL_TO_LATTICE = np.array([0, 1, 2, 3, 4], dtype=np.int32)
 # 0=wait→WAIT, 1=right→MOVE_R, 2=down→MOVE_D, 3=up→MOVE_U, 4=left→MOVE_L
 
+# Inverse: for each of the 17 primitives, which cardinal group does it belong to?
+# Determined by the first step of each primitive.
+# Groups: 0=wait, 1=right, 2=down, 3=up, 4=left
+LATTICE_TO_CARDINAL = np.array([
+    0,          # WAIT
+    1, 2, 3, 4, # MOVE_R, MOVE_D, MOVE_U, MOVE_L
+    1, 2, 3, 4, # STRAIGHT_RR, STRAIGHT_DD, STRAIGHT_UU, STRAIGHT_LL
+    1, 1, 3, 3, # TURN_RU, TURN_RD, TURN_UR, TURN_UL
+    2, 2, 4, 4, # TURN_DR, TURN_DL, TURN_LU, TURN_LD
+], dtype=np.int32)
+
+_LATTICE_TO_CARDINAL_TORCH = torch.from_numpy(LATTICE_TO_CARDINAL)
+
+
+def lattice_scores_to_cardinal_scores(lattice_scores):
+    """Max-pool 17 lattice primitive scores down to 5 cardinal action scores.
+
+    For each cardinal group (wait/right/down/up/left), takes the maximum
+    score over all primitives whose first step falls in that group.
+
+    Parameters
+    ----------
+    lattice_scores : (N, NUM_PRIMITIVES) float tensor or ndarray
+
+    Returns
+    -------
+    cardinal_scores : (N, 5) same type as input
+    """
+    if isinstance(lattice_scores, np.ndarray):
+        N = lattice_scores.shape[0]
+        cardinal = np.full((N, 5), -np.inf, dtype=lattice_scores.dtype)
+        for p in range(NUM_PRIMITIVES):
+            c = LATTICE_TO_CARDINAL[p]
+            np.maximum(cardinal[:, c], lattice_scores[:, p], out=cardinal[:, c])
+        return cardinal
+    else:
+        # torch tensor
+        device = lattice_scores.device
+        N = lattice_scores.shape[0]
+        cardinal = torch.full((N, 5), float('-inf'),
+                              dtype=lattice_scores.dtype, device=device)
+        l2c = _LATTICE_TO_CARDINAL_TORCH.to(device)
+        for p in range(NUM_PRIMITIVES):
+            c = int(l2c[p].item())
+            cardinal[:, c] = torch.maximum(cardinal[:, c], lattice_scores[:, p])
+        return cardinal
+
 
 def primitive_scores_from_velocity(velocity, wait_logit=None,
                                    wait_logit_scale=1.0, wait_logit_bias=0.0,

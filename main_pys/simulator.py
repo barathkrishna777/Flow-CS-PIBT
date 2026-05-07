@@ -29,6 +29,7 @@ from main_pys.lattice_primitives import (
     PRIMITIVE_DISPLACEMENTS,
     PRIMITIVE_VELOCITY_VECTORS_TORCH,
     PRIMITIVE_SPEED_CLASS,
+    lattice_scores_to_cardinal_scores,
 )
 from main_pys.lattice_pibt import lattice_pibt
 
@@ -421,6 +422,22 @@ def runNNOnState(cur_locs, bd, grid_map, k, m, model, device, goal_locations, ti
                         wait_logit_bias=wait_logit_bias,
                         movement_logit_scale=movement_logit_scale,
                     ).cpu().numpy()
+            elif getattr(args, 'latticeCardinalMode', False):
+                # Lattice-cardinal mode: score 17 primitives from velocity,
+                # then max-pool by first-step cardinal to get 5-class scores.
+                lattice_scores_t = lattice_action_logits_from_velocity(
+                    velocity_tensor,
+                    wait_logit=None,
+                    speed_bonus=getattr(args, 'latticeSpeedBonus', 0.3),
+                )
+                scores = lattice_scores_to_cardinal_scores(
+                    lattice_scores_t
+                ).cpu().numpy()
+                # Recompute wait/threshold on cardinal scores
+                magnitudes = np.linalg.norm(
+                    velocity_tensor.cpu().numpy(), axis=1
+                )
+                should_wait = magnitudes < args.waitThreshold
             else:
                 # --- WAIT FIX: magnitude threshold ---
                 magnitudes = np.linalg.norm(predicted_velocity, axis=1)
@@ -933,6 +950,9 @@ if __name__ == '__main__':
                         help="Lattice primitive scoring: velocity=dot-product with flow output (default), head=learned lattice classifier head")
     parser.add_argument('--latticeSpeedBonus', '--lattice-speed-bonus', dest='latticeSpeedBonus', type=float, default=0.3,
                         help="Additive speed bonus for double-step lattice primitives (default: 0.3)")
+    parser.add_argument('--latticeCardinalMode', '--lattice-cardinal-mode', dest='latticeCardinalMode',
+                        type=lambda x: bool(str2bool(x)), default=False,
+                        help="Use 17-primitive lattice scoring max-pooled to 5 cardinal actions for CS-PIBT (default: False)")
     parser.add_argument('--hiddenDim', type=int, help="Model hidden dimension (default 1024)", default=1024)
     parser.add_argument('--numLayers', type=int, help="Number of GNN layers (default 6)", default=6)
     parser.add_argument('--classifierLinearDim', type=int, default=-1,
