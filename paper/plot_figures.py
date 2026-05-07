@@ -300,145 +300,140 @@ def fig4_multiseed():
 # ====================================================================
 # Figure 5: Qualitative Trajectory (schematic)
 # ====================================================================
-def _smooth(pts, k=5):
-    """Linearly interpolate waypoints then apply a moving-average smoother."""
+def _interp(pts, n=80):
+    """Linear interpolation through waypoints. No smoothing — preserves exact endpoints."""
     wp = np.array(pts, dtype=float)
     t_in = np.linspace(0, 1, len(wp))
-    t_out = np.linspace(0, 1, 80)
-    x = np.interp(t_out, t_in, wp[:, 0])
-    y = np.interp(t_out, t_in, wp[:, 1])
-    pad = np.ones(k)
-    x = np.convolve(x, pad / k, mode="same")
-    y = np.convolve(y, pad / k, mode="same")
-    return x, y
+    t_out = np.linspace(0, 1, n)
+    return np.interp(t_out, t_in, wp[:, 0]), np.interp(t_out, t_in, wp[:, 1])
+
+
+def _catmull_rom(pts, n=80):
+    """Catmull-Rom spline for smooth curved paths (Flow+EPIBT)."""
+    wp = np.array(pts, dtype=float)
+    # Phantom endpoints duplicate first/last for tangent computation
+    p = np.vstack([wp[0], wp, wp[-1]])
+    segs = len(p) - 3
+    xs, ys = [], []
+    per_seg = max(2, n // segs)
+    for i in range(1, len(p) - 2):
+        p0, p1, p2, p3 = p[i-1], p[i], p[i+1], p[i+2]
+        ts = np.linspace(0, 1, per_seg, endpoint=(i == len(p) - 3))
+        for t in ts:
+            t2, t3 = t*t, t*t*t
+            x = 0.5*((2*p1[0]) + (-p0[0]+p2[0])*t + (2*p0[0]-5*p1[0]+4*p2[0]-p3[0])*t2 + (-p0[0]+3*p1[0]-3*p2[0]+p3[0])*t3)
+            y = 0.5*((2*p1[1]) + (-p0[1]+p2[1])*t + (2*p0[1]-5*p1[1]+4*p2[1]-p3[1])*t2 + (-p0[1]+3*p1[1]-3*p2[1]+p3[1])*t3)
+            xs.append(x)
+            ys.append(y)
+    return np.array(xs), np.array(ys)
 
 
 def fig5_qualitative_schematic():
     """
     Same map / same scenario rendered under three planners.
 
-    Paths are illustrative schematics designed to faithfully represent
-    each method's qualitative behaviour:
-      ORCA          — agents deadlock in the crossing zone, oscillate, get stuck.
-      Straight+EPIBT — agents reach goals; shield backtracking produces
-                       angular detours and sharp direction reversals.
-      Flow+EPIBT    — agents reach goals; learned prior produces smooth
-                       proactive arcs that route around the crossing zone
-                       before conflicts arise (curvier, not straighter).
+    Four agents create two crossing pairs — a natural conflict zone in the
+    centre. Paths are illustrative schematics:
+      ORCA          — deadlock; agents oscillate and never reach goals.
+      Straight+EPIBT — all reach goals via angular detours (shield
+                       backtracking causes sharp direction reversals).
+      Flow+EPIBT    — all reach goals via smooth proactive arcs (learned
+                       prior routes around the crossing zone early;
+                       paths are CURVIER than Straight, not straighter).
 
     Replace with real trajectory logs for camera-ready submission.
     """
     # ------------------------------------------------------------------
-    # Fixed map (same across all panels)
+    # Fixed map — same across all three panels.
+    # Corner obstacles keep interior open; conflict comes from agents.
     # ------------------------------------------------------------------
     obstacles = [
-        (1.5, 1.2, 1.4, 0.9),   # bottom-left cluster
-        (5.2, 1.2, 1.0, 1.8),   # bottom-centre post
-        (1.2, 5.0, 1.2, 1.6),   # left-centre wall
-        (5.5, 5.2, 2.0, 1.0),   # centre-right wall
-        (7.5, 3.2, 1.0, 2.0),   # right-centre post
+        (0.3, 8.8, 1.8, 0.9),   # top-left
+        (0.3, 0.3, 1.8, 0.9),   # bottom-left
+        (7.9, 8.8, 1.8, 0.9),   # top-right
+        (7.9, 0.3, 1.8, 0.9),   # bottom-right
     ]
 
-    # Six agents with realistic cross-traffic:
-    #   A, B  — left → right
-    #   C, D  — right → left  (cross A and B)
-    #   E     — top → bottom
-    #   F     — bottom → top  (crosses E)
-    starts = [(0.4, 3.2), (0.4, 6.8), (9.6, 4.5), (9.6, 7.6), (3.5, 9.6), (6.5, 0.4)]
-    goals  = [(9.6, 7.2), (9.6, 2.8), (0.4, 6.2), (0.4, 3.8), (3.5, 0.4), (6.5, 9.6)]
-
-    # Per-agent color — distinguishable in grayscale via marker+shade
-    colors = ["#264653", "#2A9D8F", "#7F7F7F", "#5F6B7A", "#D4890E", "#CC79A7"]
+    # Four agents — two crossing pairs, all within [0.4, 9.6]:
+    #   A (navy):  bottom-left  → top-right    (diagonal)
+    #   B (amber): top-left     → bottom-right (diagonal, crosses A)
+    #   C (teal):  bottom-mid   → top-mid      (vertical, crosses both)
+    #   D (slate): top-left-mid → bottom-right (diagonal, crosses all)
+    starts = [(0.4, 3.0), (0.4, 7.0), (5.0, 0.4), (2.5, 9.6)]
+    goals  = [(9.6, 7.0), (9.6, 3.0), (5.0, 9.6), (7.5, 0.4)]
+    colors = [C["flow_epibt"], C["flow_orca"], C["straight_epibt"], C["po_orca"]]
 
     # ------------------------------------------------------------------
-    # Hand-designed waypoints per method
-    # Each list entry = waypoints for one agent.
+    # Waypoints — all coordinates verified within [0.4, 9.6]
+    # ORCA: path → deadlock oscillation cluster → X (never arrives)
+    # Straight+EPIBT: path → sharp angular kink at conflict → goal
+    # Flow+EPIBT: wide smooth arc bypassing conflict early → goal
+    #             (Catmull-Rom spline; intentionally CURVIER than Straight)
     # ------------------------------------------------------------------
-
-    # ORCA: agents head toward goals, deadlock in the crossing zone,
-    # then oscillate around their stuck position.
-    _osc = lambda cx, cy, rx, ry: [
-        (cx + rx * np.sin(a), cy + ry * np.cos(a))
-        for a in np.linspace(0, 2.5 * np.pi, 12)
-    ]
     orca_wps = [
-        # A: stuck at centre-right of crossing zone
-        [(0.4,3.2),(1.5,3.5),(3.0,4.0),(4.5,4.5),(5.0,5.0)] + _osc(4.8,4.8,0.3,0.2),
-        # B: gets slightly further but also stuck
-        [(0.4,6.8),(1.5,6.5),(3.0,6.0),(4.5,5.5),(5.0,5.2)] + _osc(5.0,5.4,0.25,0.2),
-        # C (right→left): stuck at right side of crossing zone
-        [(9.6,4.5),(8.5,4.8),(7.5,5.0),(6.5,5.0),(6.0,4.8)] + _osc(6.2,4.9,0.25,0.2),
-        # D: partially stuck, slightly further
-        [(9.6,7.6),(8.5,7.2),(7.5,6.8),(6.5,6.5),(6.0,6.2)] + _osc(6.1,6.3,0.25,0.2),
-        # E (top→bottom): stuck near centre
-        [(3.5,9.6),(3.5,8.5),(3.5,7.5),(3.5,6.5),(3.5,5.8)] + _osc(3.5,5.6,0.2,0.25),
-        # F (bottom→top): stuck near centre
-        [(6.5,0.4),(6.5,1.5),(6.5,2.5),(6.5,3.5),(6.5,4.2)] + _osc(6.5,4.4,0.2,0.25),
+        # A: heads toward goal, stalls near (4.6, 4.8)
+        [(0.4,3.0),(1.5,3.4),(2.8,3.9),(3.8,4.3),(4.6,4.8),
+         (4.3,4.6),(4.8,5.0),(4.3,4.6),(4.8,5.0),(4.6,4.8)],
+        # B: heads toward goal, stalls near (4.6, 5.5)
+        [(0.4,7.0),(1.5,6.6),(2.8,6.1),(3.8,5.7),(4.6,5.3),
+         (4.3,5.5),(4.8,5.1),(4.3,5.5),(4.8,5.1),(4.6,5.3)],
+        # C: heads upward, stalls near (5.0, 4.5)
+        [(5.0,0.4),(5.0,1.8),(5.0,3.2),(5.0,4.1),(5.0,4.5),
+         (4.7,4.3),(5.2,4.7),(4.7,4.3),(5.2,4.7),(5.0,4.5)],
+        # D: heads toward goal, stalls near (4.3, 6.3)
+        [(2.5,9.6),(3.0,8.5),(3.5,7.5),(3.9,6.8),(4.3,6.3),
+         (4.0,6.5),(4.5,6.1),(4.0,6.5),(4.5,6.1),(4.3,6.3)],
     ]
-    orca_arrived = [False] * 6
 
-    # Straight+EPIBT: all agents reach goals; shield backtracking causes
-    # sharp angular detours — routes that zig and zag around conflicts.
     straight_wps = [
-        # A: zigzags up to avoid crossing zone, then descends to goal
-        [(0.4,3.2),(1.5,3.2),(2.5,3.5),(3.5,4.2),(4.0,5.5),(4.5,6.2),
-         (5.5,6.5),(6.5,6.8),(7.5,7.0),(8.5,7.2),(9.6,7.2)],
-        # B: dips down sharply then curves up to its goal
-        [(0.4,6.8),(1.5,6.5),(2.5,5.5),(3.0,4.2),(3.5,3.2),(4.5,3.0),
-         (5.5,3.2),(6.5,3.0),(7.5,2.8),(8.5,2.8),(9.6,2.8)],
-        # C: detours through upper map to avoid crossing
-        [(9.6,4.5),(8.5,4.2),(7.8,3.5),(7.5,2.5),(6.5,2.0),(5.5,2.2),
-         (4.5,2.8),(3.5,3.5),(2.5,4.8),(1.5,5.8),(0.4,6.2)],
-        # D: sharp dip down then recovers
-        [(9.6,7.6),(8.5,7.8),(7.5,8.0),(6.5,7.5),(5.5,6.5),(4.5,5.5),
-         (3.5,4.8),(2.5,4.2),(1.5,4.0),(0.4,3.8)],
-        # E: takes a sharp sideways detour to avoid F
-        [(3.5,9.6),(3.5,8.5),(3.0,7.5),(2.5,6.5),(2.2,5.5),(2.5,4.5),
-         (3.0,3.5),(3.2,2.5),(3.5,1.5),(3.5,0.4)],
-        # F: sharp sideways then back
-        [(6.5,0.4),(6.5,1.5),(7.0,2.5),(7.5,3.5),(7.5,4.5),(7.2,5.5),
-         (7.0,6.5),(6.8,7.5),(6.5,8.5),(6.5,9.6)],
+        # A: heads right-up, forced sharply DOWN at conflict (~x=3.5),
+        #    then sharp correction back up to goal — angular kink visible
+        [(0.4,3.0),(1.5,3.4),(3.0,3.8),(3.5,2.8),(4.8,2.5),
+         (6.2,3.5),(7.5,5.0),(8.6,6.2),(9.6,7.0)],
+        # B: heads right-down, forced sharply UP at conflict,
+        #    then sharp correction back down
+        [(0.4,7.0),(1.5,6.6),(3.0,6.2),(3.5,7.3),(4.8,7.6),
+         (6.2,6.6),(7.5,5.2),(8.6,4.0),(9.6,3.0)],
+        # C: deflected RIGHT sharply at the crossing zone, then back up
+        [(5.0,0.4),(5.0,2.0),(5.0,3.5),(6.0,4.6),(6.5,6.0),
+         (6.0,7.5),(5.5,8.8),(5.0,9.6)],
+        # D: deflected LEFT sharply, then back on diagonal to goal
+        [(2.5,9.6),(3.0,8.5),(3.5,7.5),(2.8,6.3),(2.5,5.2),
+         (3.5,4.0),(5.0,2.8),(6.5,1.5),(7.5,0.4)],
     ]
-    straight_arrived = [True] * 6
 
-    # Flow+EPIBT: all agents reach goals; learned prior proactively routes
-    # agents around the crossing zone with smooth arcs — curvier than the
-    # straight-line baseline, but purposefully curved rather than angular.
     flow_wps = [
-        # A: smooth arc upward, through clear corridor above obstacles
-        [(0.4,3.2),(1.2,4.2),(2.2,5.2),(3.2,6.0),(4.5,6.8),
-         (5.8,7.0),(7.0,7.2),(8.2,7.2),(9.6,7.2)],
-        # B: smooth arc downward to avoid crossing zone
-        [(0.4,6.8),(1.2,5.8),(2.2,4.5),(3.2,3.5),(4.5,3.0),
-         (5.8,2.8),(7.0,2.8),(8.2,2.8),(9.6,2.8)],
-        # C: smooth arc through lower corridor
-        [(9.6,4.5),(8.5,3.8),(7.2,3.2),(6.0,3.0),(4.8,3.5),
-         (3.8,4.5),(2.8,5.5),(1.8,6.0),(0.4,6.2)],
-        # D: smooth arc through upper corridor
-        [(9.6,7.6),(8.5,8.0),(7.5,8.2),(6.2,8.0),(5.0,7.2),
-         (3.8,6.0),(2.8,5.0),(1.8,4.2),(0.4,3.8)],
-        # E: gentle lateral offset to yield to F, then smooth descent
-        [(3.5,9.6),(3.2,8.5),(2.8,7.5),(2.5,6.5),(2.5,5.5),
-         (2.8,4.5),(3.0,3.5),(3.2,2.5),(3.5,1.5),(3.5,0.4)],
-        # F: symmetric gentle offset, smooth ascent
-        [(6.5,0.4),(6.8,1.5),(7.0,2.5),(7.2,3.5),(7.2,4.5),
-         (7.0,5.5),(6.8,6.5),(6.6,7.5),(6.5,8.5),(6.5,9.6)],
+        # A: proactively swings DOWN well before the conflict zone,
+        #    smooth arc through lower corridor, curves up to goal.
+        #    Wide U-shape — clearly curvier than Straight A's kink.
+        [(0.4,3.0),(1.2,2.2),(2.5,1.8),(4.2,2.0),(5.8,2.8),
+         (7.2,4.2),(8.5,5.8),(9.6,7.0)],
+        # B: proactively swings UP, smooth arc through upper corridor
+        [(0.4,7.0),(1.2,7.8),(2.5,8.2),(4.2,8.0),(5.8,7.2),
+         (7.2,5.8),(8.5,4.2),(9.6,3.0)],
+        # C: proactively arcs LEFT before conflict zone, smooth
+        #    serpentine path to goal — wide sweep vs Straight C's kink
+        [(5.0,0.4),(4.4,1.5),(3.6,3.0),(3.2,5.0),
+         (3.6,7.0),(4.4,8.5),(5.0,9.6)],
+        # D: proactively arcs RIGHT through open corridor —
+        #    smooth sweep vs Straight D's hard-left detour
+        [(2.5,9.6),(3.5,8.5),(5.0,7.5),(6.2,6.2),
+         (7.0,4.8),(7.4,3.2),(7.5,1.6),(7.5,0.4)],
     ]
-    flow_arrived = [True] * 6
 
     # ------------------------------------------------------------------
-    # Draw
+    # Render — Flow uses Catmull-Rom for smooth curves; others linear
     # ------------------------------------------------------------------
     all_methods = [
-        ("ORCA",               orca_wps,     orca_arrived),
-        ("Straight+EPIBT",     straight_wps, straight_arrived),
-        ("Flow+EPIBT",         flow_wps,     flow_arrived),
+        ("ORCA",           orca_wps,     [False]*4, _interp),
+        ("Straight+EPIBT", straight_wps, [True]*4,  _interp),
+        ("Flow+EPIBT",     flow_wps,     [True]*4,  _catmull_rom),
     ]
 
     fig, axes = plt.subplots(1, 3, figsize=(6.8, 2.5))
-    fig.subplots_adjust(wspace=0.06, bottom=0.14)
+    fig.subplots_adjust(wspace=0.06, bottom=0.13)
 
-    for ax, (title, wps_list, arrived_list) in zip(axes, all_methods):
+    for ax, (title, wps_list, arrived_list, path_fn) in zip(axes, all_methods):
         ax.set_xlim(0, 10)
         ax.set_ylim(0, 10)
         ax.set_aspect("equal")
@@ -449,42 +444,37 @@ def fig5_qualitative_schematic():
             spine.set_linewidth(0.5)
             spine.set_color("#BBBBBB")
 
-        # Obstacles
         for ox, oy, ow, oh in obstacles:
             ax.add_patch(plt.Rectangle(
-                (ox, oy), ow, oh, color="#E6E6E6", ec="#C0C0C0", lw=0.4, zorder=1))
+                (ox, oy), ow, oh, color="#E8E8E8", ec="#C0C0C0", lw=0.4, zorder=1))
 
-        # Trajectories
         for i, (wps, arrived) in enumerate(zip(wps_list, arrived_list)):
-            px, py = _smooth(wps)
+            px, py = path_fn(wps)
             c = colors[i]
-            ax.plot(px, py, color=c, alpha=0.6, lw=0.9, zorder=2)
-            sx, sy = wps[0]
+            ax.plot(px, py, color=c, alpha=0.65, lw=1.0, zorder=2)
+            sx, sy = starts[i]
             gx, gy = goals[i]
-            # Start
-            ax.scatter(sx, sy, color=c, s=16, zorder=5,
-                       edgecolors="white", linewidths=0.4, marker="o")
-            # End: star at goal if arrived, X at stuck position
+            ax.scatter(sx, sy, color=c, s=20, zorder=5,
+                       edgecolors="white", linewidths=0.5, marker="o")
             if arrived:
-                ax.scatter(gx, gy, color=c, s=30, zorder=5,
+                ax.scatter(gx, gy, color=c, s=35, zorder=5,
                            edgecolors="white", linewidths=0.3, marker="*")
             else:
                 ex, ey = px[-1], py[-1]
-                ax.scatter(ex, ey, color=c, s=22, zorder=5,
-                           marker="x", linewidths=1.2)
+                ax.scatter(ex, ey, color=c, s=28, zorder=5,
+                           marker="x", linewidths=1.5)
 
-        # ORCA deadlock annotation
         if title == "ORCA":
-            ax.text(5.1, 5.1, "deadlock", fontsize=5.5,
+            ax.text(4.5, 3.5, "deadlock", fontsize=5.5,
                     ha="center", color="#AA0000", style="italic", zorder=6)
-            ax.add_patch(plt.Circle((5.0, 5.0), 1.1,
-                         fill=False, ec="#CC0000", lw=0.5, ls="--", zorder=3, alpha=0.5))
+            ax.add_patch(plt.Circle((4.6, 5.1), 1.4,
+                         fill=False, ec="#CC0000", lw=0.5, ls="--",
+                         zorder=3, alpha=0.5))
 
-    # Shared caption
     fig.text(0.5, 0.01,
              "● start   ★ goal reached   ✕ stuck.   "
-             "Straight+EPIBT: angular backtracking paths.   "
-             "Flow+EPIBT: smooth proactive arcs (trained on EECBS).",
+             "Straight+EPIBT: sharp angular kinks from shield backtracking.   "
+             "Flow+EPIBT: smooth proactive arcs (EECBS prior; wider, not straighter).",
              ha="center", fontsize=5.5, color="#555555")
 
     save(fig, "fig5_qualitative_trajectories")
