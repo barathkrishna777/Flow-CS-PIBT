@@ -46,7 +46,11 @@ def main():
     parser.add_argument("--hidden-dim", type=int, default=1024)
     parser.add_argument("--num-layers", type=int, default=6)
     parser.add_argument("--skip-lattice-pibt", action="store_true",
-                        help="Skip the multi-step Lattice-PIBT condition (useful when it times out)")
+                        help="Skip the recursive Lattice-PIBT condition (useful when it times out)")
+    parser.add_argument("--skip-lattice-greedy", action="store_true",
+                        help="Skip the greedy Lattice-PIBT condition")
+    parser.add_argument("--skip-lattice-cardinal", action="store_true",
+                        help="Skip the Lattice-Cardinal (17→5 projection) condition")
     parser.add_argument("--lattice-score-mode", choices=["velocity", "head"], default="velocity",
                         help="Lattice scoring: velocity=dot-product (default), head=trained 17-class head")
     args = parser.parse_args()
@@ -66,6 +70,7 @@ def main():
     csv_cs    = os.path.join(args.output_dir, "cs_pibt.csv")
     csv_lat   = os.path.join(args.output_dir, "lattice_pibt.csv")
     csv_lc    = os.path.join(args.output_dir, "lattice_cardinal_pibt.csv")
+    csv_lg    = os.path.join(args.output_dir, "lattice_greedy_pibt.csv")
 
     import torch
     use_gpu = torch.cuda.is_available()
@@ -106,10 +111,10 @@ def main():
         "--policyType=flow",
     ]
 
-    num_modes = 3 if not args.skip_lattice_pibt else 2
+    num_modes = 1 + (0 if args.skip_lattice_cardinal else 1) + (0 if args.skip_lattice_pibt else 1) + (0 if args.skip_lattice_greedy else 1)
     total = len(runs)
     print(f"{'='*65}")
-    print(f"CS-PIBT vs Lattice-Cardinal vs Lattice-PIBT comparison")
+    print(f"CS-PIBT vs Lattice conditions comparison")
     print(f"Model  : {args.model}")
     print(f"Maps   : {len(DEFAULT_MAPS)} | Agents: {agent_counts} | Steps: {NUM_STEPS}")
     print(f"GPU    : {use_gpu} | Total runs: {total * num_modes} ({total} per condition)")
@@ -119,7 +124,7 @@ def main():
     def run_one(map_name, scen_path, bd_path, n, mode, out_csv):
         """Run a single simulator call.
 
-        mode is one of: "CS-PIBT", "Lattice-PIBT", "Lattice-Cardinal"
+        mode is one of: "CS-PIBT", "Lattice-PIBT", "Lattice-Cardinal", "Lattice-Greedy"
         """
         tmp = f"logs/_eval_lattice_tmp_{mode.replace(' ', '_').replace('-', '_')}.csv"
         os.makedirs("logs", exist_ok=True)
@@ -132,6 +137,12 @@ def main():
             extra = []
         elif mode == "Lattice-PIBT":
             shield_flag = "--shieldType=Lattice-PIBT"
+            extra = [
+                f"--latticeScoreMode={score_mode}",
+                f"--latticeSpeedBonus={args.speed_bonus}",
+            ]
+        elif mode == "Lattice-Greedy":
+            shield_flag = "--shieldType=Lattice-Greedy-PIBT"
             extra = [
                 f"--latticeScoreMode={score_mode}",
                 f"--latticeSpeedBonus={args.speed_bonus}",
@@ -197,12 +208,9 @@ def main():
         print(f"[{i}/{total}] {map_name} | {n} agents")
 
         r_cs = run_one(map_name, scen_path, bd_path, n, "CS-PIBT", csv_cs)
-        r_lc = run_one(map_name, scen_path, bd_path, n, "Lattice-Cardinal", csv_lc)
-
-        if not args.skip_lattice_pibt:
-            r_lat = run_one(map_name, scen_path, bd_path, n, "Lattice-PIBT", csv_lat)
-        else:
-            r_lat = None
+        r_lc = None if args.skip_lattice_cardinal else run_one(map_name, scen_path, bd_path, n, "Lattice-Cardinal", csv_lc)
+        r_lg = None if args.skip_lattice_greedy  else run_one(map_name, scen_path, bd_path, n, "Lattice-Greedy",   csv_lg)
+        r_lat = None if args.skip_lattice_pibt   else run_one(map_name, scen_path, bd_path, n, "Lattice-PIBT",     csv_lat)
 
         if r_cs:
             print(f"  CS-PIBT          : {r_cs[0]}/{n} ({r_cs[3]:.1f}%)  {r_cs[2]:.1f}s")
@@ -210,6 +218,10 @@ def main():
             gain = r_lc[3] - (r_cs[3] if r_cs else 0)
             sign = "+" if gain >= 0 else ""
             print(f"  Lattice-Cardinal : {r_lc[0]}/{n} ({r_lc[3]:.1f}%)  {r_lc[2]:.1f}s  [{sign}{gain:.1f}%]")
+        if r_lg:
+            gain = r_lg[3] - (r_cs[3] if r_cs else 0)
+            sign = "+" if gain >= 0 else ""
+            print(f"  Lattice-Greedy   : {r_lg[0]}/{n} ({r_lg[3]:.1f}%)  {r_lg[2]:.1f}s  [{sign}{gain:.1f}%]")
         if r_lat:
             gain = r_lat[3] - (r_cs[3] if r_cs else 0)
             sign = "+" if gain >= 0 else ""
@@ -222,7 +234,11 @@ def main():
     print(f"{'='*65}")
     try:
         import pandas as pd
-        entries = [("CS-PIBT", csv_cs), ("Lattice-Cardinal", csv_lc)]
+        entries = [("CS-PIBT", csv_cs)]
+        if not args.skip_lattice_cardinal:
+            entries.append(("Lattice-Cardinal", csv_lc))
+        if not args.skip_lattice_greedy:
+            entries.append(("Lattice-Greedy", csv_lg))
         if not args.skip_lattice_pibt:
             entries.append(("Lattice-PIBT", csv_lat))
         for label, path in entries:
@@ -237,7 +253,10 @@ def main():
 
     print(f"\nDone!")
     print(f"  CS-PIBT          : {csv_cs}")
-    print(f"  Lattice-Cardinal : {csv_lc}")
+    if not args.skip_lattice_cardinal:
+        print(f"  Lattice-Cardinal : {csv_lc}")
+    if not args.skip_lattice_greedy:
+        print(f"  Lattice-Greedy   : {csv_lg}")
     if not args.skip_lattice_pibt:
         print(f"  Lattice-PIBT     : {csv_lat}")
 

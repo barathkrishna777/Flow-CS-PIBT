@@ -543,7 +543,7 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
           reset_best_val_loss=False, action_head_only=False, action_head_lr=5e-4,
           wait_head_only=False, wait_head_lr=5e-4, calibration_only=False,
           freeze_movement_logit_scale=False,
-          lattice_loss_weight=0.0,
+          lattice_loss_weight=0.0, lattice_head_only=False, lattice_head_lr=5e-4,
           distributed=False, local_rank=None, seed=42,
           batch_size=None):
     ddp_info = setup_distributed(distributed=distributed, local_rank=local_rank)
@@ -565,6 +565,8 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
 
     if wait_head_only and wait_head_loss_weight <= 0 and hybrid_action_loss_weight <= 0 and wait_ranking_loss_weight <= 0:
         raise ValueError("--wait-head-only requires a positive wait, hybrid, or ranking loss weight")
+    if lattice_head_only and lattice_loss_weight <= 0:
+        raise ValueError("--lattice-head-only requires --lattice-loss-weight > 0")
     if calibration_only and (action_head_only or wait_head_only):
         raise ValueError("--calibration-only cannot be combined with --action-head-only or --wait-head-only")
     if calibration_only and wait_head_loss_weight <= 0 and hybrid_action_loss_weight <= 0 and wait_ranking_loss_weight <= 0:
@@ -694,7 +696,7 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
     if effective_freeze_movement_logit_scale:
         model.movement_logit_scale.requires_grad = False
 
-    if action_head_only or wait_head_only or calibration_only:
+    if action_head_only or wait_head_only or calibration_only or lattice_head_only:
         trainable_groups = []
         calibration_names = {"wait_logit_scale", "wait_logit_bias"}
         if not effective_freeze_movement_logit_scale:
@@ -703,7 +705,8 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
             train_action = action_head_only and name.startswith("action_head.")
             train_wait = wait_head_only and name.startswith("wait_head.")
             train_calibration = (wait_head_only or calibration_only) and name in calibration_names
-            param.requires_grad = train_action or train_wait or train_calibration
+            train_lattice = lattice_head_only and name.startswith("lattice_head.")
+            param.requires_grad = train_action or train_wait or train_calibration or train_lattice
         if action_head_only:
             action_params = [p for n, p in model.named_parameters() if n.startswith("action_head.") and p.requires_grad]
             if action_params:
@@ -716,6 +719,10 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
             calibration_params = [p for n, p in model.named_parameters() if n in calibration_names and p.requires_grad]
             if calibration_params:
                 trainable_groups.append({"params": calibration_params, "lr": wait_head_lr})
+        if lattice_head_only:
+            lattice_params = [p for n, p in model.named_parameters() if n.startswith("lattice_head.") and p.requires_grad]
+            if lattice_params:
+                trainable_groups.append({"params": lattice_params, "lr": lattice_head_lr})
         trainable = [p for group in trainable_groups for p in group["params"]]
         if not trainable:
             raise RuntimeError("No trainable parameters selected")
@@ -723,7 +730,7 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
             "head_only: freezing trunk, training "
             f"{sum(p.numel() for p in trainable):,} params "
             f"(action_head={action_head_only}, wait_head={wait_head_only}, "
-            f"calibration_only={calibration_only})"
+            f"calibration_only={calibration_only}, lattice_head={lattice_head_only})"
         )
         optimizer = AdamW(trainable_groups, weight_decay=1e-4)
     else:
@@ -798,6 +805,7 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
             or action_head_only
             or wait_head_only
             or calibration_only
+            or lattice_head_only
         )
         model = DDP(
             model,
@@ -1180,6 +1188,10 @@ if __name__ == "__main__":
                         help="Keep movement_logit_scale fixed at its checkpoint/default value during training")
     parser.add_argument("--lattice-loss-weight", type=float, default=0.0,
                         help="Weight for lattice primitive classification CE loss (17-class). Default 0 disables it")
+    parser.add_argument("--lattice-head-only", action="store_true",
+                        help="Freeze trunk, train only lattice_head (17-class). Requires --lattice-loss-weight > 0")
+    parser.add_argument("--lattice-head-lr", type=float, default=5e-4,
+                        help="LR for lattice_head_only mode (default: 5e-4)")
     parser.add_argument("--batch-size", type=int, default=None,
                         help="Per-GPU batch size (default: 256 on GPU). With DDP, set to 64 for effective batch=256 matching single-GPU.")
     parser.add_argument("--distributed", action="store_true",
@@ -1217,6 +1229,8 @@ if __name__ == "__main__":
           calibration_only=args.calibration_only,
           freeze_movement_logit_scale=args.freeze_movement_logit_scale,
           lattice_loss_weight=args.lattice_loss_weight,
+          lattice_head_only=args.lattice_head_only,
+          lattice_head_lr=args.lattice_head_lr,
           distributed=args.distributed,
           local_rank=args.local_rank,
           seed=args.seed,

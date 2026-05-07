@@ -29,9 +29,13 @@ from main_pys.lattice_primitives import (
     PRIMITIVE_DISPLACEMENTS,
     PRIMITIVE_VELOCITY_VECTORS_TORCH,
     PRIMITIVE_SPEED_CLASS,
+    LATTICE_TO_CARDINAL,
     lattice_scores_to_cardinal_scores,
 )
-from main_pys.lattice_pibt import lattice_pibt
+from main_pys.lattice_pibt import lattice_pibt, lattice_pibt_greedy
+
+# Reverse map: (dr, dc) delta → cardinal index (0=wait,1=right,2=down,3=up,4=left)
+_DELTA_TO_CARDINAL = {(0, 0): 0, (0, 1): 1, (1, 0): 2, (-1, 0): 3, (0, -1): 4}
 
 def str2bool(v: str) -> bool:
     return v.lower() in ("yes", "true", "t", "1")
@@ -530,6 +534,59 @@ def runNNOnStateLattice(cur_locs, bd, grid_map, k, m, model, device, goal_locati
     return preferences
 
 
+def runNNOnStateLatticeCS(cur_locs, bd, grid_map, k, m, model, device, goal_locations, timer):
+    """For Lattice-CS-PIBT: returns (5-class probs for 1-step PIBT, raw 17-prim scores for step-2 selection)."""
+    with torch.no_grad():
+        timer.start("create_nn_data")
+        data = create_data_object(cur_locs, bd, grid_map, k, m, goal_locations)
+        data = normalize_graph_data(data, k)
+        data = data.to(device)
+        timer.stop("create_nn_data")
+
+        n_agents = cur_locs.shape[0]
+        num_steps = args.numIntegrationSteps
+        dt = 1.0 / num_steps
+        num_samples = args.numConsensusSamples
+
+        all_velocities = torch.zeros(n_agents, 2, device=device)
+        for _ in range(num_samples):
+            v = torch.randn(n_agents, 2, device=device)
+            for step in range(num_steps):
+                t_val = torch.full((n_agents, 1), step * dt, device=device)
+                timer.start("forward_pass")
+                flow = model(v, t_val, data)
+                timer.stop("forward_pass")
+                v = v + flow * dt
+            all_velocities += v
+        velocity_tensor = all_velocities / num_samples
+
+        lattice_mode = getattr(args, 'latticeScoreMode', 'velocity')
+        if lattice_mode == 'head':
+            t_final = torch.full((n_agents, 1), 0.99, device=device)
+            timer.start("forward_pass")
+            _, lattice_logits = model(velocity_tensor, t_final, data, return_lattice_logits=True)
+            timer.stop("forward_pass")
+            raw_scores_17 = lattice_logits.cpu().numpy()
+        else:
+            raw_scores_17 = lattice_action_logits_from_velocity(
+                velocity_tensor,
+                wait_logit=None,
+                speed_bonus=getattr(args, 'latticeSpeedBonus', 0.3),
+            ).cpu().numpy()
+
+        # Max-pool 17→5 for PIBT input
+        cardinal_scores = lattice_scores_to_cardinal_scores(
+            torch.from_numpy(raw_scores_17)
+        ).cpu().numpy()
+        cardinal_scores = cardinal_scores / args.tau
+        cardinal_scores -= np.max(cardinal_scores, axis=1, keepdims=True)
+        probs_5 = np.exp(cardinal_scores) / np.sum(np.exp(cardinal_scores), axis=1, keepdims=True)
+        probs_5 = np.clip(probs_5, 1e-8, 1.0)
+        probs_5 = probs_5 / probs_5.sum(axis=1, keepdims=True)
+
+    return probs_5, raw_scores_17
+
+
 def load_flow_model(args, device, k):
     model = FlowGNNModel(k=k, hidden_dim=args.hiddenDim, num_layers=args.numLayers).to(device)
 
@@ -635,7 +692,7 @@ def _bd_flow_hybrid_merge(nn_probs, bd_prefs, at_goal, action_mask, override_thr
 
 def simulate(device, model, k, m, grid_map, bd, start_locations, goal_locations,
              max_steps, shield_type, lacam_lookahead, args, timer: CustomTimer):
-    if shield_type not in ["CS-PIBT", "CS-Freeze", "LaCAM", "Real-Time-LaCAM", "Lattice-PIBT"]:
+    if shield_type not in ["CS-PIBT", "CS-Freeze", "LaCAM", "Real-Time-LaCAM", "Lattice-PIBT", "Lattice-CS-PIBT", "Lattice-Greedy-PIBT"]:
         raise KeyError('Invalid shield type: {}'.format(shield_type))
     
     wrapper_nn = WrapperNNWithCache(bd, grid_map, model, device, k, m, goal_locations, timer)
@@ -721,34 +778,126 @@ def simulate(device, model, k, m, grid_map, bd, start_locations, goal_locations,
             print("time limit hit")
             break
         
-        if shield_type == "Lattice-PIBT":
+        if shield_type in ("Lattice-PIBT", "Lattice-Greedy-PIBT"):
             prim_prefs = runNNOnStateLattice(
                 cur_locs, bd, grid_map, k, m, model, device, goal_locations, timer,
             )
             timer.start("cs-time")
-            assigned_prims, move_seqs, lpibt_ok = lattice_pibt(
-                grid_map, prim_prefs, cur_locs, agent_priorities,
-                start_time, args.timeLimit,
-            )
+            if shield_type == "Lattice-PIBT":
+                assigned_prims, move_seqs, lpibt_ok = lattice_pibt(
+                    grid_map, prim_prefs, cur_locs, agent_priorities,
+                    start_time, args.timeLimit,
+                )
+                if not lpibt_ok and (time.time() - start_time >= args.timeLimit):
+                    timer.stop("cs-time")
+                    print("time limit hit during Lattice-PIBT")
+                    break
+            else:
+                assigned_prims, move_seqs, lpibt_ok = lattice_pibt_greedy(
+                    grid_map, prim_prefs, cur_locs, agent_priorities,
+                    start_time, args.timeLimit,
+                )
             timer.stop("cs-time")
-            if not lpibt_ok and (time.time() - start_time >= args.timeLimit):
-                print("time limit hit during Lattice-PIBT")
-                break
 
             for sub_t in range(PRIMITIVE_DURATION):
                 sub_move = move_seqs[:, sub_t]
                 cur_locs = cur_locs + sub_move
                 solution_path.append(cur_locs.copy())
                 assert np.all(grid_map[cur_locs[:, 0], cur_locs[:, 1]] == 0), \
-                    f"Lattice-PIBT obstacle collision at sub-step {sub_t}"
+                    f"{shield_type} obstacle collision at sub-step {sub_t}"
                 if len(set(map(tuple, cur_locs))) != len(cur_locs):
                     raise RuntimeError(
-                        f"Lattice-PIBT agent collision at sub-step {sub_t}"
+                        f"{shield_type} agent collision at sub-step {sub_t}"
                     )
                 if np.all(np.equal(cur_locs, goal_locations)):
                     success = True
                     break
             if success:
+                break
+            continue
+
+        if shield_type == "Lattice-CS-PIBT":
+            probs_5, raw_scores_17 = runNNOnStateLatticeCS(
+                cur_locs, bd, grid_map, k, m, model, device, goal_locations, timer,
+            )
+            at_goal = np.all(np.equal(cur_locs, goal_locations), axis=1)
+            probs_5[at_goal] = 1e-6
+            probs_5[at_goal, 0] = 1.0
+            action_preferences_5 = convertProbsToPreferences(probs_5, args.prefConversion)
+            timer.start("cs-time")
+            new_move, cspibt_worked = pibt(
+                grid_map, action_preferences_5, cur_locs, agent_priorities, [],
+                start_time, args.timeLimit,
+            )
+            timer.stop("cs-time")
+            if not cspibt_worked:
+                if time.time() - start_time < args.timeLimit:
+                    print("ERROR: Lattice-CS-PIBT step1 PIBT failed (should never happen)")
+                break
+
+            # Step 1: guaranteed safe by CS-PIBT
+            cur_locs = cur_locs + new_move
+            solution_path.append(cur_locs.copy())
+            assert np.all(grid_map[cur_locs[:, 0], cur_locs[:, 1]] == 0)
+            if len(set(map(tuple, cur_locs))) != len(cur_locs):
+                raise RuntimeError("Lattice-CS-PIBT step1 agent collision")
+            if np.all(np.equal(cur_locs, goal_locations)):
+                success = True
+                break
+
+            # Step 2: pick top primitive matching each agent's assigned cardinal,
+            # take its second step, check bounds/obstacles/agent conflicts greedily.
+            N = len(cur_locs)
+            step2_deltas = np.zeros((N, 2), dtype=np.int32)
+            for i in range(N):
+                c = _DELTA_TO_CARDINAL.get(tuple(new_move[i]), 0)
+                best_prim, best_score = 0, -np.inf
+                for p in range(NUM_PRIMITIVES):
+                    if LATTICE_TO_CARDINAL[p] == c and raw_scores_17[i, p] > best_score:
+                        best_score = raw_scores_17[i, p]
+                        best_prim = p
+                step2_deltas[i] = PRIMITIVE_STEPS[best_prim, 1]
+
+            # Bounds + obstacle check
+            step2_locs_tentative = cur_locs + step2_deltas
+            H, W = grid_map.shape
+            oob_or_obs = (
+                (step2_locs_tentative[:, 0] < 0) | (step2_locs_tentative[:, 0] >= H) |
+                (step2_locs_tentative[:, 1] < 0) | (step2_locs_tentative[:, 1] >= W) |
+                (grid_map[
+                    np.clip(step2_locs_tentative[:, 0], 0, H-1),
+                    np.clip(step2_locs_tentative[:, 1], 0, W-1)
+                ] == 1)
+            )
+            step2_deltas[oob_or_obs] = 0
+
+            # Greedy agent-agent conflict check in priority order.
+            # Pre-register staying agents first, then process movers.
+            staying = step2_deltas[:, 0] == 0  # after zeroing oob/obs; (dr==0 && dc==0)
+            staying &= step2_deltas[:, 1] == 0
+            occupied_at_step2 = {}
+            for i in range(N):
+                if staying[i]:
+                    occupied_at_step2[tuple(cur_locs[i])] = i
+            for i in np.argsort(-agent_priorities):
+                if staying[i]:
+                    continue
+                target = tuple(cur_locs[i] + step2_deltas[i])
+                if target in occupied_at_step2:
+                    step2_deltas[i] = [0, 0]
+                    occupied_at_step2[tuple(cur_locs[i])] = i
+                    staying[i] = True
+                else:
+                    occupied_at_step2[target] = i
+
+            cur_locs = cur_locs + step2_deltas
+            solution_path.append(cur_locs.copy())
+            assert np.all(grid_map[cur_locs[:, 0], cur_locs[:, 1]] == 0), \
+                "Lattice-CS-PIBT step2 obstacle collision"
+            if len(set(map(tuple, cur_locs))) != len(cur_locs):
+                raise RuntimeError("Lattice-CS-PIBT step2 agent collision")
+            if np.all(np.equal(cur_locs, goal_locations)):
+                success = True
                 break
             continue
 
@@ -913,7 +1062,7 @@ if __name__ == '__main__':
     parser.add_argument('--useGPU', type=lambda x: bool(str2bool(x)), default=False)
     parser.add_argument('--maxSteps', type=str, help="int or [int]x, e.g. 100 or 2x to denote multiplicative factor", required=True)
     parser.add_argument('--seed', type=int, default=0)
-    parser.add_argument('--shieldType', type=str, default='CS-PIBT', choices=['CS-PIBT', 'CS-Freeze', 'LaCAM', 'Real-Time-LaCAM', 'Lattice-PIBT'])
+    parser.add_argument('--shieldType', type=str, default='CS-PIBT', choices=['CS-PIBT', 'CS-Freeze', 'LaCAM', 'Real-Time-LaCAM', 'Lattice-PIBT', 'Lattice-CS-PIBT', 'Lattice-Greedy-PIBT'])
     parser.add_argument('--lacamLookahead', type=int, help="LaCAM node expansion limit", default=0)
     parser.add_argument('--timeLimit', type=int, help="Time limit in seconds (default: 120, matching paper)", default=120)
     parser.add_argument('--outputCSVFile', type=str, help="where to output statistics", required=True)

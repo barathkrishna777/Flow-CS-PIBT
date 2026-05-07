@@ -252,3 +252,70 @@ def lattice_pibt(grid_map, prim_preferences, current_locs, agent_priorities,
             move_sequences[i] = PRIMITIVE_STEPS[prim]
 
     return assigned_primitives, move_sequences, success
+
+
+def lattice_pibt_greedy(grid_map, prim_preferences, current_locs, agent_priorities,
+                        start_time, time_limit):
+    """Greedy (non-backtracking) multi-step lattice planner.
+
+    Processes agents in priority order.  For each agent, tries primitives in
+    preference order and commits the first one whose full path (all sub-steps)
+    is collision-free against the growing reservation table.  No recursion:
+    if an agent's preferred primitive is blocked by a lower-priority agent, we
+    simply move to the next candidate rather than asking that agent to replan.
+
+    This avoids the cascade-failure risk of recursive PIBT at high density
+    while still checking every sub-step of every candidate primitive.
+
+    Parameters
+    ----------
+    Same as ``lattice_pibt``.
+
+    Returns
+    -------
+    assigned_primitives : (N,) int array
+    move_sequences : (N, PRIMITIVE_DURATION, 2) int array
+    success : bool — always True (greedy never hangs)
+    """
+    N = len(agent_priorities)
+    agent_order = np.argsort(-agent_priorities)
+
+    assigned_primitives = np.zeros(N, dtype=np.int32)  # default WAIT
+    assigned_paths = [None] * N
+
+    reserved_nodes = {}
+    reserved_edges = {}
+
+    for i in range(N):
+        r, c = current_locs[i]
+        reserved_nodes[(r, c, 0)] = i
+
+    for agent_id in agent_order:
+        if time.time() - start_time > time_limit:
+            break
+
+        committed = False
+        for prim_idx in prim_preferences[agent_id]:
+            feasible, path = _check_primitive_feasible(
+                grid_map, current_locs[agent_id], prim_idx,
+                reserved_nodes, reserved_edges,
+            )
+            if feasible:
+                assigned_primitives[agent_id] = prim_idx
+                assigned_paths[agent_id] = path
+                _commit_primitive(agent_id, path, reserved_nodes, reserved_edges)
+                committed = True
+                break
+
+        if not committed:
+            # Force WAIT (stays at current position)
+            assigned_primitives[agent_id] = 0
+            wait_path = PRIMITIVE_PATHS[0] + current_locs[agent_id]
+            assigned_paths[agent_id] = wait_path
+            _commit_primitive(agent_id, wait_path, reserved_nodes, reserved_edges)
+
+    move_sequences = np.zeros((N, PRIMITIVE_DURATION, 2), dtype=np.int32)
+    for i in range(N):
+        move_sequences[i] = PRIMITIVE_STEPS[assigned_primitives[i]]
+
+    return assigned_primitives, move_sequences, True
