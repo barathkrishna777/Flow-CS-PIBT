@@ -755,7 +755,7 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
                 log(f"  Missing checkpoint keys initialized from scratch: {incompatible.missing_keys}")
             if incompatible.unexpected_keys:
                 log(f"  Unexpected checkpoint keys ignored: {incompatible.unexpected_keys}")
-            if action_head_only or wait_head_only or calibration_only:
+            if action_head_only or wait_head_only or calibration_only or lattice_head_only:
                 # Optimizer only covers selected head params — skip incompatible full-model state
                 start_epoch = ckpt['epoch']
                 epochs = start_epoch + epochs
