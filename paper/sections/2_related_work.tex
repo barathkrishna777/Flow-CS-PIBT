@@ -1,0 +1,27 @@
+% Related Work
+\section{Related Work}
+\label{sec:related}
+
+\subsection{Classical MAPF and Continuous Extensions}
+
+The MAPF literature is extensive; we refer to Stern et al.~\cite{stern2019mapfsurvey} for a survey. CBS~\cite{sharon2015cbs} finds optimal solutions on graphs by splitting constraints upon conflict detection, and EECBS~\cite{li2021eecbs} extends this to bounded-suboptimal planning with inadmissible heuristics. PIBT~\cite{okumura2022pibt} is an incomplete but highly scalable priority-based method for iterative MAPF that resolves conflicts by recursively reassigning priorities; LaCAM~\cite{okumura2023lacam} further augments this with learning-based guidance. MAPF-LNS2~\cite{li2022mapflns2} achieves scalability through large-neighborhood search repair. These methods operate on discrete graphs and do not directly transfer to continuous kinematics.
+
+Continuous-space MAPF has received comparatively less attention from the algorithmic community. Andreychuk and Yakovlev~\cite{andreychuk2019ccbs} extend CBS to continuous time, allowing agents to move at arbitrary speeds along grid edges, reducing artificial conflicts caused by time-step synchronization. However, this still assumes discrete spatial graphs. Our work operates in fully continuous 2D space with finite agent radii.
+
+\subsection{Velocity Obstacle Methods}
+
+Reciprocal Velocity Obstacles (RVO)~\cite{vandenberg2008rvo} introduced the idea of constraining each agent's velocity choice to lie outside the reciprocal velocity obstacle of each neighbor. ORCA~\cite{vandenberg2011orca} linearizes these constraints and uses a linear program to find the minimum-deviation feasible velocity, distributing collision-avoidance responsibility equally between agent pairs. The social force model~\cite{helbing1995socialforce} instead applies attractive and repulsive forces and has been influential in pedestrian simulation. Both approaches are purely reactive and local: they have no notion of global path coordination and are prone to symmetric deadlocks under high agent density, where agents block each other in a cycle. EPIBTShield addresses this via strict priority ordering, breaking symmetry by design.
+
+\subsection{Learning-Based MAPF}
+
+PRIMAL~\cite{sartoretti2019primal} and PRIMAL\textsubscript{2}~\cite{damani2021primal2} train decentralized policies using reinforcement learning with communication on discrete grid worlds. DHC~\cite{ma2021dhc} introduces a distributed heuristic communication module that conditions agent policies on aggregated neighbor messages. SCRIMP~\cite{wang2023scrimp} combines imitation learning from expert solvers with RL fine-tuning and scalable communication, achieving strong performance on large discrete instances. POGEMA~\cite{skrynnik2024pogema} formulates lifelong MAPF as a multi-agent RL problem and demonstrates that following a learned planner with a safe fallback improves robustness. Veerapaneni et al.~\cite{veerapaneni2022worksmart} show that a simple GNN imitation learner paired with a CS-PIBT shield (the discrete predecessor of EPIBTShield) outperforms large-scale RL baselines on discrete-grid MAPF.
+
+All of the above operate in discrete space. In the continuous domain, the most common approach is to pair a learned policy with ORCA for safety~\cite{hu2024graphmapf}. Our work shows that replacing ORCA with a priority-based continuous shield (EPIBTShield) dramatically reduces both collisions and deadlocks, and that the learned preferred velocity is essential for performance on in-distribution maps.
+
+\subsection{Generative Models for Motion Planning}
+
+Diffusion models and flow matching have recently emerged as powerful policy representations for robot manipulation~\cite{chi2023diffusionpolicy}. Rectified flow~\cite{liu2023rectifiedflow} learns straight-line trajectory couplings in data space with a simple MSE loss and supports efficient inference with very few Euler steps. Flow matching~\cite{lipman2023flowmatching} provides a more general probabilistic framing. We adopt rectified flow for velocity prediction because it is simple to train and requires only $k{=}3$ inference steps, making it viable for real-time use. To our knowledge, this is the first application of rectified flow to MAPF velocity prediction conditioned on a multi-agent communication graph.
+
+\subsection{Safe Reinforcement Learning and Shielding}
+
+Shielding~\cite{alshiekh2018shielding} is a technique from formal methods that wraps a learned policy with a verifiable safety filter: if the policy's action is unsafe, the shield substitutes a certified safe action. In our setting, the shield is not formally verified (geometric constraints admit counterexamples under concurrent motion), but EPIBTShield provides strong empirical safety by explicitly checking collision geometry for every committed velocity before it is executed.
