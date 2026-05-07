@@ -23,7 +23,7 @@ DEFAULT_MAPS = [
     ("Paris_1_256",            "Paris_1_256-random-1.scen"),
     ("warehouse-10-20-10-2-1", "warehouse-10-20-10-2-1-random-1.scen"),
 ]
-DEFAULT_AGENTS = [100, 200, 400]
+DEFAULT_AGENTS = [100, 200, 400, 600]
 NUM_STEPS = 5
 CONSENSUS = 3
 TAU       = 0.3
@@ -47,6 +47,8 @@ def main():
     parser.add_argument("--num-layers", type=int, default=6)
     parser.add_argument("--skip-lattice-pibt", action="store_true",
                         help="Skip the multi-step Lattice-PIBT condition (useful when it times out)")
+    parser.add_argument("--lattice-score-mode", choices=["velocity", "head"], default="velocity",
+                        help="Lattice scoring: velocity=dot-product (default), head=trained 17-class head")
     args = parser.parse_args()
 
     args.model = args.model_opt or args.model
@@ -124,19 +126,21 @@ def main():
         if os.path.exists(tmp):
             os.remove(tmp)
 
+        score_mode = getattr(args, 'lattice_score_mode', 'velocity')
         if mode == "CS-PIBT":
             shield_flag = "--shieldType=CS-PIBT"
             extra = []
         elif mode == "Lattice-PIBT":
             shield_flag = "--shieldType=Lattice-PIBT"
             extra = [
-                "--latticeScoreMode=velocity",
+                f"--latticeScoreMode={score_mode}",
                 f"--latticeSpeedBonus={args.speed_bonus}",
             ]
         else:  # Lattice-Cardinal
             shield_flag = "--shieldType=CS-PIBT"
             extra = [
                 "--latticeCardinalMode=True",
+                f"--latticeScoreMode={score_mode}",
                 f"--latticeSpeedBonus={args.speed_bonus}",
             ]
 

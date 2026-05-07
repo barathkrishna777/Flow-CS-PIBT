@@ -5,6 +5,22 @@ list.  PIBT processes agents in priority order, checking the full space-time
 path of each candidate primitive against a reservation table.  Conflicts
 trigger recursive backtracking, exactly mirroring classic PIBT but over
 multi-cell, multi-timestep trajectories.
+
+Key invariant for WAIT safety:
+  In classic 1-step PIBT, WAIT is always feasible because the agent's own
+  cell is pre-reserved at t=0 and no other agent can reserve it at t=1
+  (since that agent would have to recursively plan *this* agent first).
+
+  In multi-step PIBT (PRIMITIVE_DURATION=2), a higher-priority agent B can
+  commit a path that passes through agent A's cell at t>=1.  If A is then
+  recursively planned and cannot find any valid primitive, A's WAIT also
+  fails because B's reservation blocks (A_r, A_c, t>=1).
+
+  Fix: when an agent fails during *recursive* planning (called by another
+  agent), do NOT mark it as planned — just return False.  This lets the
+  caller backtrack its primitive (removing the blocking reservation), after
+  which the agent's WAIT becomes feasible again.  The unconditional WAIT
+  fallback is only used at the *top level* where no caller can backtrack.
 """
 
 import time
@@ -26,7 +42,7 @@ def _check_primitive_feasible(grid_map, agent_pos, prim_idx,
     Checks:
       1. Every cell along the path is in-bounds and obstacle-free.
       2. No (cell, timestep) is already reserved by another agent.
-      3. No edge conflict: at each transition t→t+1, no other agent is
+      3. No edge conflict: at each transition t->t+1, no other agent is
          moving in the opposite direction on the same edge at the same time.
 
     Parameters
@@ -34,8 +50,8 @@ def _check_primitive_feasible(grid_map, agent_pos, prim_idx,
     grid_map : (H, W) int array — 1 = obstacle
     agent_pos : (2,) int array — current (row, col)
     prim_idx : int — index into PRIMITIVE_PATHS / PRIMITIVE_STEPS
-    reserved_nodes : dict  (row, col, t) → agent_id
-    reserved_edges : dict  (r_from, c_from, r_to, c_to, t) → agent_id
+    reserved_nodes : dict  (row, col, t) -> agent_id
+    reserved_edges : dict  (r_from, c_from, r_to, c_to, t) -> agent_id
 
     Returns
     -------
@@ -45,9 +61,6 @@ def _check_primitive_feasible(grid_map, agent_pos, prim_idx,
     path = PRIMITIVE_PATHS[prim_idx] + agent_pos  # (D+1, 2)
     H, W = grid_map.shape
 
-    # Skip t=0: path[0] is always the agent's own current position, which is
-    # pre-reserved for itself and can never conflict with another agent's path.
-    # Checking it would block every primitive including WAIT.
     for t in range(1, PRIMITIVE_DURATION + 1):
         r, c = path[t]
         if r < 0 or r >= H or c < 0 or c >= W:
@@ -60,7 +73,6 @@ def _check_primitive_feasible(grid_map, agent_pos, prim_idx,
     for t in range(PRIMITIVE_DURATION):
         r0, c0 = path[t]
         r1, c1 = path[t + 1]
-        # Check reverse edge conflict (agent swaps)
         if (r1, c1, r0, c0, t) in reserved_edges:
             return False, None
 
@@ -68,11 +80,7 @@ def _check_primitive_feasible(grid_map, agent_pos, prim_idx,
 
 
 def _commit_primitive(agent_id, path, reserved_nodes, reserved_edges):
-    """Reserve space-time cells and edges for a committed primitive.
-
-    t=0 (starting cell) is already pre-reserved during lattice_pibt init and
-    is never modified by commit/uncommit — it persists for the full round.
-    """
+    """Reserve space-time cells and edges for a committed primitive."""
     for t in range(1, PRIMITIVE_DURATION + 1):
         r, c = path[t]
         reserved_nodes[(r, c, t)] = agent_id
@@ -83,11 +91,7 @@ def _commit_primitive(agent_id, path, reserved_nodes, reserved_edges):
 
 
 def _uncommit_primitive(agent_id, path, reserved_nodes, reserved_edges):
-    """Release reservations for a primitive (backtracking).
-
-    Only releases t>=1 entries committed by this agent; the t=0 entry is
-    left intact (it was set during init and never touched by commit).
-    """
+    """Release reservations for a primitive (backtracking)."""
     for t in range(1, PRIMITIVE_DURATION + 1):
         r, c = path[t]
         key = (r, c, t)
@@ -105,12 +109,17 @@ def _lattice_pibt_recursive(grid_map, agent_id, prim_preferences,
                             planned_agents, assigned_primitives,
                             assigned_paths, reserved_nodes, reserved_edges,
                             current_locs, current_locs_to_agent,
-                            start_time, time_limit):
+                            start_time, time_limit, _depth=0):
     """Recursive lattice-PIBT for a single agent.
 
     Tries primitives in preference order.  When a candidate primitive's
-    endpoint cell is occupied by an unplanned agent, recursively plan
-    that agent first (forcing it out of the way).
+    path cell is occupied by an unplanned agent, recursively plan that
+    agent first (forcing it out of the way).
+
+    When called recursively (_depth > 0) and all primitives including WAIT
+    fail, returns False WITHOUT marking the agent as planned.  This lets the
+    caller backtrack its own primitive, removing the reservation that blocked
+    WAIT, so the agent can be successfully planned later.
     """
     if time.time() - start_time > time_limit:
         return False
@@ -123,15 +132,11 @@ def _lattice_pibt_recursive(grid_map, agent_id, prim_preferences,
         if not feasible:
             continue
 
-        # Commit tentatively
         planned_agents[agent_id] = True
         assigned_primitives[agent_id] = prim_idx
         assigned_paths[agent_id] = path
         _commit_primitive(agent_id, path, reserved_nodes, reserved_edges)
 
-        # Check if any unplanned agent currently sits on a cell we need.
-        # The key conflict point is the final position — an agent sitting
-        # there at t=0 must move.  We also check intermediate cells.
         conflict_resolved = True
         for t in range(1, PRIMITIVE_DURATION + 1):
             r, c = path[t]
@@ -143,6 +148,7 @@ def _lattice_pibt_recursive(grid_map, agent_id, prim_preferences,
                     reserved_nodes, reserved_edges,
                     current_locs, current_locs_to_agent,
                     start_time, time_limit,
+                    _depth=_depth + 1,
                 )
                 if not ok:
                     conflict_resolved = False
@@ -151,13 +157,13 @@ def _lattice_pibt_recursive(grid_map, agent_id, prim_preferences,
         if conflict_resolved:
             return True
 
-        # Backtrack
+        # Backtrack this agent's primitive
         _uncommit_primitive(agent_id, path, reserved_nodes, reserved_edges)
         planned_agents[agent_id] = False
         assigned_primitives[agent_id] = -1
         assigned_paths[agent_id] = None
 
-    # Fallback: force WAIT (primitive 0)
+    # Fallback: WAIT (primitive 0)
     fallback_feasible, fallback_path = _check_primitive_feasible(
         grid_map, current_locs[agent_id], 0,
         reserved_nodes, reserved_edges,
@@ -169,7 +175,13 @@ def _lattice_pibt_recursive(grid_map, agent_id, prim_preferences,
         _commit_primitive(agent_id, fallback_path, reserved_nodes, reserved_edges)
         return True
 
-    # Even WAIT failed (extremely rare — blocked by another agent's reservation)
+    if _depth > 0:
+        # Recursive call: WAIT blocked by the caller's reservation.
+        # Return False WITHOUT marking as planned — the caller will
+        # backtrack its primitive, unblocking our WAIT for later.
+        return False
+
+    # Top-level only: force WAIT even though it conflicts (last resort).
     planned_agents[agent_id] = True
     assigned_primitives[agent_id] = 0
     wait_path = np.tile(current_locs[agent_id], (PRIMITIVE_DURATION + 1, 1))
@@ -211,7 +223,6 @@ def lattice_pibt(grid_map, prim_preferences, current_locs, agent_priorities,
     reserved_nodes = {}
     reserved_edges = {}
 
-    # Reserve t=0 positions for all agents
     current_locs_to_agent = np.full(grid_map.shape, -1, dtype=np.int32)
     for i in range(N):
         r, c = current_locs[i]
@@ -228,6 +239,7 @@ def lattice_pibt(grid_map, prim_preferences, current_locs, agent_priorities,
             reserved_nodes, reserved_edges,
             current_locs, current_locs_to_agent,
             start_time, time_limit,
+            _depth=0,
         )
         if not ok:
             success = False

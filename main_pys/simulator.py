@@ -423,17 +423,26 @@ def runNNOnState(cur_locs, bd, grid_map, k, m, model, device, goal_locations, ti
                         movement_logit_scale=movement_logit_scale,
                     ).cpu().numpy()
             elif getattr(args, 'latticeCardinalMode', False):
-                # Lattice-cardinal mode: score 17 primitives from velocity,
-                # then max-pool by first-step cardinal to get 5-class scores.
-                lattice_scores_t = lattice_action_logits_from_velocity(
-                    velocity_tensor,
-                    wait_logit=None,
-                    speed_bonus=getattr(args, 'latticeSpeedBonus', 0.3),
-                )
+                # Lattice-cardinal: score 17 primitives, max-pool to 5 cardinals.
+                lattice_mode = getattr(args, 'latticeScoreMode', 'velocity')
+                if lattice_mode == 'head':
+                    t_final = torch.full((n_agents, 1), 0.99, device=device)
+                    timer.start("forward_pass")
+                    _, lattice_logits = model(
+                        velocity_tensor, t_final, data,
+                        return_lattice_logits=True,
+                    )
+                    timer.stop("forward_pass")
+                    lattice_scores_t = lattice_logits
+                else:
+                    lattice_scores_t = lattice_action_logits_from_velocity(
+                        velocity_tensor,
+                        wait_logit=None,
+                        speed_bonus=getattr(args, 'latticeSpeedBonus', 0.3),
+                    )
                 scores = lattice_scores_to_cardinal_scores(
                     lattice_scores_t
                 ).cpu().numpy()
-                # Recompute wait/threshold on cardinal scores
                 magnitudes = np.linalg.norm(
                     velocity_tensor.cpu().numpy(), axis=1
                 )
