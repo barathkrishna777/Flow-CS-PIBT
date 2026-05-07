@@ -10,6 +10,7 @@ from main_pys.model_inputs import (
     discrete_action_labels_from_positions,
     normalize_graph_data,
 )
+from main_pys.lattice_primitives import lattice_action_labels_from_positions
 
 # --- OOM CRASH FIX: Reduced maxsize from 32 to 2 ---
 @lru_cache(maxsize=2)
@@ -116,8 +117,11 @@ class FlowMAPFDataset(Dataset):
         graph_data = create_data_object(cur_locs_discrete, bd, grid_map, self.k, self.m, dummy_goals)
         graph_data = normalize_graph_data(graph_data, self.k)
 
+        lattice_labels = lattice_action_labels_from_positions(discrete_positions, t_step)
+
         graph_data.y = torch.tensor(target_velocity, dtype=torch.float32)
         graph_data.action_y = torch.tensor(action_labels, dtype=torch.long)
+        graph_data.lattice_action_y = torch.tensor(lattice_labels, dtype=torch.long)
         graph_data.node_weights = torch.tensor(weights, dtype=torch.float32)
 
         return graph_data

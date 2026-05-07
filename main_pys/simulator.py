@@ -19,8 +19,18 @@ from main_pys.generative_model import (
     FlowGNNModel,
     binary_gate_action_probs_from_velocity,
     hybrid_action_logits_from_velocity,
+    lattice_action_logits_from_velocity,
 )
 from main_pys.rishi_like_model import RishiLikeClassifier
+from main_pys.lattice_primitives import (
+    NUM_PRIMITIVES,
+    PRIMITIVE_DURATION,
+    PRIMITIVE_STEPS,
+    PRIMITIVE_DISPLACEMENTS,
+    PRIMITIVE_VELOCITY_VECTORS_TORCH,
+    PRIMITIVE_SPEED_CLASS,
+)
+from main_pys.lattice_pibt import lattice_pibt
 
 def str2bool(v: str) -> bool:
     return v.lower() in ("yes", "true", "t", "1")
@@ -432,6 +442,68 @@ def runNNOnState(cur_locs, bd, grid_map, k, m, model, device, goal_locations, ti
 
     return probs
 
+
+def runNNOnStateLattice(cur_locs, bd, grid_map, k, m, model, device, goal_locations, timer):
+    """Produce ranked lattice primitive preferences (N, NUM_PRIMITIVES) int array."""
+    with torch.no_grad():
+        timer.start("create_nn_data")
+        data = create_data_object(cur_locs, bd, grid_map, k, m, goal_locations)
+        data = normalize_graph_data(data, k)
+        data = data.to(device)
+        timer.stop("create_nn_data")
+
+        n_agents = cur_locs.shape[0]
+        num_steps = args.numIntegrationSteps
+        dt = 1.0 / num_steps
+        num_samples = args.numConsensusSamples
+
+        all_velocities = torch.zeros(n_agents, 2, device=device)
+        for _ in range(num_samples):
+            v = torch.randn(n_agents, 2, device=device)
+            for step in range(num_steps):
+                t_val = torch.full((n_agents, 1), step * dt, device=device)
+                timer.start("forward_pass")
+                flow = model(v, t_val, data)
+                timer.stop("forward_pass")
+                v = v + flow * dt
+            all_velocities += v
+        velocity_tensor = all_velocities / num_samples
+
+        lattice_mode = getattr(args, 'latticeScoreMode', 'velocity')
+
+        if lattice_mode == 'head':
+            t_final = torch.full((n_agents, 1), 0.99, device=device)
+            timer.start("forward_pass")
+            _, lattice_logits = model(
+                velocity_tensor, t_final, data, return_lattice_logits=True,
+            )
+            timer.stop("forward_pass")
+            scores = lattice_logits.cpu().numpy()
+        else:
+            wait_logit = None
+            if args.waitMode in ("learned", "learned_gate"):
+                t_final = torch.full((n_agents, 1), 0.99, device=device)
+                timer.start("forward_pass")
+                _, wl = model(velocity_tensor, t_final, data, return_wait_logit=True)
+                timer.stop("forward_pass")
+                wait_logit = wl
+
+            scores = lattice_action_logits_from_velocity(
+                velocity_tensor,
+                wait_logit=wait_logit,
+                speed_bonus=getattr(args, 'latticeSpeedBonus', 0.3),
+            ).cpu().numpy()
+
+        scores = scores / args.tau
+        scores = scores - np.max(scores, axis=1, keepdims=True)
+        probs = np.exp(scores) / np.sum(np.exp(scores), axis=1, keepdims=True)
+        probs = np.clip(probs, 1e-8, 1.0)
+        probs = probs / probs.sum(axis=1, keepdims=True)
+
+    preferences = np.argsort(-probs, axis=1).astype(np.int32)
+    return preferences
+
+
 def load_flow_model(args, device, k):
     model = FlowGNNModel(k=k, hidden_dim=args.hiddenDim, num_layers=args.numLayers).to(device)
 
@@ -537,7 +609,7 @@ def _bd_flow_hybrid_merge(nn_probs, bd_prefs, at_goal, action_mask, override_thr
 
 def simulate(device, model, k, m, grid_map, bd, start_locations, goal_locations,
              max_steps, shield_type, lacam_lookahead, args, timer: CustomTimer):
-    if shield_type not in ["CS-PIBT", "CS-Freeze", "LaCAM", "Real-Time-LaCAM"]:
+    if shield_type not in ["CS-PIBT", "CS-Freeze", "LaCAM", "Real-Time-LaCAM", "Lattice-PIBT"]:
         raise KeyError('Invalid shield type: {}'.format(shield_type))
     
     wrapper_nn = WrapperNNWithCache(bd, grid_map, model, device, k, m, goal_locations, timer)
@@ -623,11 +695,42 @@ def simulate(device, model, k, m, grid_map, bd, start_locations, goal_locations,
             print("time limit hit")
             break
         
+        if shield_type == "Lattice-PIBT":
+            prim_prefs = runNNOnStateLattice(
+                cur_locs, bd, grid_map, k, m, model, device, goal_locations, timer,
+            )
+            timer.start("cs-time")
+            assigned_prims, move_seqs, lpibt_ok = lattice_pibt(
+                grid_map, prim_prefs, cur_locs, agent_priorities,
+                start_time, args.timeLimit,
+            )
+            timer.stop("cs-time")
+            if not lpibt_ok and (time.time() - start_time >= args.timeLimit):
+                print("time limit hit during Lattice-PIBT")
+                break
+
+            for sub_t in range(PRIMITIVE_DURATION):
+                sub_move = move_seqs[:, sub_t]
+                cur_locs = cur_locs + sub_move
+                solution_path.append(cur_locs.copy())
+                assert np.all(grid_map[cur_locs[:, 0], cur_locs[:, 1]] == 0), \
+                    f"Lattice-PIBT obstacle collision at sub-step {sub_t}"
+                if len(set(map(tuple, cur_locs))) != len(cur_locs):
+                    raise RuntimeError(
+                        f"Lattice-PIBT agent collision at sub-step {sub_t}"
+                    )
+                if np.all(np.equal(cur_locs, goal_locations)):
+                    success = True
+                    break
+            if success:
+                break
+            continue
+
         if shield_type in ["CS-PIBT", "CS-Freeze"]:
-            action_preferences = getActionPrefsFromLocs(cur_locs) 
+            action_preferences = getActionPrefsFromLocs(cur_locs)
             if shield_type == "CS-Freeze":
-                action_preferences = action_preferences[:,:2] 
-                action_preferences[:,1] = 0  
+                action_preferences = action_preferences[:,:2]
+                action_preferences[:,1] = 0
             timer.start("cs-time")
             new_move, cspibt_worked = pibt(grid_map, action_preferences, cur_locs, agent_priorities, [], start_time, args.timeLimit)
             timer.stop("cs-time")
@@ -637,25 +740,25 @@ def simulate(device, model, k, m, grid_map, bd, start_locations, goal_locations,
                 break
         else:
             scaled_lookahead = lacam_lookahead
-            next_locs, lacamFoundSolution, numNodesExpanded, numGenerated = lacamRunner.lacam(cur_locs, goal_locations, 
+            next_locs, lacamFoundSolution, numNodesExpanded, numGenerated = lacamRunner.lacam(cur_locs, goal_locations,
                                                     bd, grid_map, getActionPrefsFromLocs, scaled_lookahead, start_time, args.timeLimit)
 
             if lacamFoundSolution:
                 for t in range(1, len(next_locs)):
-                    assert(np.all(grid_map[next_locs[t][:,0], next_locs[t][:,1]] == 0)) 
+                    assert(np.all(grid_map[next_locs[t][:,0], next_locs[t][:,1]] == 0))
                 print("LaCAM found solution at step: {}".format(step))
-                solution_path.extend(next_locs[1:]) 
+                solution_path.extend(next_locs[1:])
                 success = True
                 break
             else:
                 if time.time()-start_time > args.timeLimit and args.timeLimit > 0:
                     print("time limit hit")
                     break
-                new_move = next_locs[1] - cur_locs 
+                new_move = next_locs[1] - cur_locs
 
-        cur_locs = cur_locs + new_move 
+        cur_locs = cur_locs + new_move
         solution_path.append(cur_locs.copy())
-        assert(np.all(grid_map[cur_locs[:,0], cur_locs[:,1]] == 0)) 
+        assert(np.all(grid_map[cur_locs[:,0], cur_locs[:,1]] == 0))
         if len(set(map(tuple, cur_locs))) != len(cur_locs):
             raise RuntimeError("Collision: Two or more agents are at the same location!")
 
@@ -784,7 +887,7 @@ if __name__ == '__main__':
     parser.add_argument('--useGPU', type=lambda x: bool(str2bool(x)), default=False)
     parser.add_argument('--maxSteps', type=str, help="int or [int]x, e.g. 100 or 2x to denote multiplicative factor", required=True)
     parser.add_argument('--seed', type=int, default=0)
-    parser.add_argument('--shieldType', type=str, default='CS-PIBT', choices=['CS-PIBT', 'CS-Freeze', 'LaCAM', 'Real-Time-LaCAM'])
+    parser.add_argument('--shieldType', type=str, default='CS-PIBT', choices=['CS-PIBT', 'CS-Freeze', 'LaCAM', 'Real-Time-LaCAM', 'Lattice-PIBT'])
     parser.add_argument('--lacamLookahead', type=int, help="LaCAM node expansion limit", default=0)
     parser.add_argument('--timeLimit', type=int, help="Time limit in seconds (default: 120, matching paper)", default=120)
     parser.add_argument('--outputCSVFile', type=str, help="where to output statistics", required=True)
@@ -825,6 +928,11 @@ if __name__ == '__main__':
                         help="BD distance threshold: agents within this distance get a persistent priority boost (default: 0 = disabled)")
     parser.add_argument('--nearGoalBoost', '--near-goal-boost', dest='nearGoalBoost', type=int, default=0,
                         help="Per-step priority boost for near-goal agents (default: 0 = disabled)")
+    parser.add_argument('--latticeScoreMode', '--lattice-score-mode', dest='latticeScoreMode', type=str,
+                        choices=['velocity', 'head'], default='velocity',
+                        help="Lattice primitive scoring: velocity=dot-product with flow output (default), head=learned lattice classifier head")
+    parser.add_argument('--latticeSpeedBonus', '--lattice-speed-bonus', dest='latticeSpeedBonus', type=float, default=0.3,
+                        help="Additive speed bonus for double-step lattice primitives (default: 0.3)")
     parser.add_argument('--hiddenDim', type=int, help="Model hidden dimension (default 1024)", default=1024)
     parser.add_argument('--numLayers', type=int, help="Number of GNN layers (default 6)", default=6)
     parser.add_argument('--classifierLinearDim', type=int, default=-1,

@@ -3,6 +3,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch_geometric.nn as pyg_nn
 
+from main_pys.lattice_primitives import (
+    NUM_PRIMITIVES,
+    PRIMITIVE_VELOCITY_VECTORS_TORCH,
+    PRIMITIVE_SPEED_CLASS,
+)
+
 
 CARDINAL_ACTION_VECTORS = torch.tensor(
     [[0, 1], [1, 0], [-1, 0], [0, -1]],
@@ -78,6 +84,39 @@ def binary_gate_action_probs_from_velocity(
     probs = torch.cat([wait_prob, (1.0 - wait_prob) * move_probs], dim=1)
     probs = probs.clamp_min(eps)
     return probs / probs.sum(dim=1, keepdim=True)
+
+
+def lattice_action_logits_from_velocity(
+    predicted_velocity,
+    wait_logit=None,
+    wait_logit_scale=1.0,
+    wait_logit_bias=0.0,
+    speed_bonus=0.3,
+):
+    """Score all lattice primitives from velocity + optional wait logit.
+
+    Movement primitives are scored by dot product with their characteristic
+    direction vector.  Double-step primitives get a speed bonus proportional
+    to velocity magnitude so that fast-moving agents prefer longer strides.
+    """
+    device = predicted_velocity.device
+    dtype = predicted_velocity.dtype
+    prim_vecs = PRIMITIVE_VELOCITY_VECTORS_TORCH.to(device=device, dtype=dtype)
+    speed_cls = torch.tensor(PRIMITIVE_SPEED_CLASS, device=device, dtype=dtype)
+
+    dir_scores = predicted_velocity @ prim_vecs.T  # (N, NUM_PRIMITIVES)
+
+    vel_mag = predicted_velocity.norm(dim=1, keepdim=True)
+    speed_mod = speed_bonus * vel_mag * (speed_cls.unsqueeze(0) - 1.0)
+    scores = dir_scores + speed_mod
+
+    if wait_logit is not None:
+        calibrated = wait_logit_scale * wait_logit.view(-1, 1) + wait_logit_bias
+        scores[:, 0] = calibrated.squeeze(1)
+    else:
+        scores[:, 0] = -vel_mag.squeeze(1)
+
+    return scores
 
 
 class FlowGNNModel(nn.Module):
@@ -166,6 +205,14 @@ class FlowGNNModel(nn.Module):
             nn.Linear(action_head_dim, 1)
         )
 
+        # --- 6. Lattice Primitive Head (NUM_PRIMITIVES-class) ---
+        self.lattice_head = nn.Sequential(
+            nn.Linear(hidden_dim, action_head_dim),
+            nn.SiLU(),
+            nn.Dropout(0.15),
+            nn.Linear(action_head_dim, NUM_PRIMITIVES),
+        )
+
         # Scalar calibration for the learned wait-logit inference interface.
         # Old checkpoints load with strict=False and keep these identity values.
         self.wait_logit_scale = nn.Parameter(torch.tensor(1.0))
@@ -213,6 +260,7 @@ class FlowGNNModel(nn.Module):
         hybrid_velocity_for_logits=None,
         return_wait_ranking_logits=False,
         wait_ranking_velocity_for_logits=None,
+        return_lattice_logits=False,
     ):
         x, edge_index = data.x, data.edge_index
         aux_features = getattr(data, "aux_features", None)
@@ -267,6 +315,9 @@ class FlowGNNModel(nn.Module):
             if wait_ranking_velocity_for_logits is None:
                 wait_ranking_velocity_for_logits = v_t + (1 - t) * flow_output
             outputs.append(self.wait_ranking_logits(wait_ranking_velocity_for_logits, wait_logit))
+
+        if return_lattice_logits:
+            outputs.append(self.lattice_head(node_features))
 
         if len(outputs) == 1:
             return flow_output

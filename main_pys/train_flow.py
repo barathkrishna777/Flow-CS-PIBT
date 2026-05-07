@@ -19,6 +19,7 @@ import random
 from main_pys.dataset import FlowMAPFDataset
 from main_pys.dataset_preprocessed import PreprocessedFlowMAPFDataset, build_weighted_sampler
 from main_pys.generative_model import FlowGNNModel
+from main_pys.lattice_primitives import CARDINAL_TO_LATTICE, NUM_PRIMITIVES
 
 PREPROCESSED_DIRS = [
     "/media/anushree_mattlab/Seagate Por/preprocessed_data",  # external drive (primary)
@@ -208,6 +209,7 @@ def compute_flow_loss(
     unweighted_action_loss=False,
     unweighted_flow_loss=False,
     discrete_forward_mode="both",
+    lattice_loss_weight=0.0,
 ):
     """Shared flow matching loss computation for train and val."""
     batch = batch.to(device)
@@ -435,12 +437,33 @@ def compute_flow_loss(
                 wait_ranking_loss = ranking_loss_x1
             # else "shared": keep losses from the noisy forward
 
+        # ── Lattice primitive head loss ──
+        lattice_loss = zero
+        if lattice_loss_weight > 0:
+            if hasattr(batch, "lattice_action_y") and batch.lattice_action_y is not None:
+                lattice_targets = batch.lattice_action_y.view(-1).long().to(device)
+            else:
+                cardinal_labels = (
+                    batch.action_y.view(-1).long().to(device)
+                    if hasattr(batch, "action_y") and batch.action_y is not None
+                    else velocity_to_action_labels(x_1, device)
+                )
+                _c2l = torch.from_numpy(CARDINAL_TO_LATTICE).long().to(device)
+                lattice_targets = _c2l[cardinal_labels]
+
+            _, lattice_logits = model(
+                x_t, t, batch, return_lattice_logits=True,
+            )
+            lattice_ce = F.cross_entropy(lattice_logits, lattice_targets, reduction='none')
+            lattice_loss = _reduce_node_loss(lattice_ce, node_weights, unweighted_action_loss)
+
         loss = (
             flow_loss
             + action_loss_weight * action_loss
             + wait_head_loss_weight * wait_head_loss
             + hybrid_action_loss_weight * hybrid_action_loss
             + wait_ranking_loss_weight * wait_ranking_loss
+            + lattice_loss_weight * lattice_loss
         )
 
     return loss
@@ -463,6 +486,7 @@ def validate(
     unweighted_action_loss,
     unweighted_flow_loss,
     discrete_forward_mode="both",
+    lattice_loss_weight=0.0,
     ddp_info=None,
 ):
     """Run validation and return average loss."""
@@ -488,6 +512,7 @@ def validate(
                 unweighted_action_loss=unweighted_action_loss,
                 unweighted_flow_loss=unweighted_flow_loss,
                 discrete_forward_mode=discrete_forward_mode,
+                lattice_loss_weight=lattice_loss_weight,
             )
             total_loss += loss.item()
             num_batches += 1
@@ -511,6 +536,7 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
           reset_best_val_loss=False, action_head_only=False, action_head_lr=5e-4,
           wait_head_only=False, wait_head_lr=5e-4, calibration_only=False,
           freeze_movement_logit_scale=False,
+          lattice_loss_weight=0.0,
           distributed=False, local_rank=None, seed=42,
           batch_size=None):
     ddp_info = setup_distributed(distributed=distributed, local_rank=local_rank)
@@ -885,6 +911,7 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
                 unweighted_action_loss=unweighted_action_loss,
                 unweighted_flow_loss=unweighted_flow_loss,
                 discrete_forward_mode=discrete_forward_mode,
+                lattice_loss_weight=lattice_loss_weight,
             )
 
             optimizer.zero_grad()
@@ -943,6 +970,7 @@ def train(run_name="", quick=False, use_wandb=True, wandb_project="flow-mapf", w
                 unweighted_action_loss=unweighted_action_loss,
                 unweighted_flow_loss=unweighted_flow_loss,
                 discrete_forward_mode=discrete_forward_mode,
+                lattice_loss_weight=lattice_loss_weight,
                 ddp_info=ddp_info,
             )
             val_str = f" | Val Loss: {val_loss:.4f}"
@@ -1142,6 +1170,8 @@ if __name__ == "__main__":
                         help="Freeze all model params except wait/movement calibration scalars")
     parser.add_argument("--freeze-movement-logit-scale", action="store_true",
                         help="Keep movement_logit_scale fixed at its checkpoint/default value during training")
+    parser.add_argument("--lattice-loss-weight", type=float, default=0.0,
+                        help="Weight for lattice primitive classification CE loss (17-class). Default 0 disables it")
     parser.add_argument("--batch-size", type=int, default=None,
                         help="Per-GPU batch size (default: 256 on GPU). With DDP, set to 64 for effective batch=256 matching single-GPU.")
     parser.add_argument("--distributed", action="store_true",
@@ -1178,6 +1208,7 @@ if __name__ == "__main__":
           wait_head_lr=args.wait_head_lr,
           calibration_only=args.calibration_only,
           freeze_movement_logit_scale=args.freeze_movement_logit_scale,
+          lattice_loss_weight=args.lattice_loss_weight,
           distributed=args.distributed,
           local_rank=args.local_rank,
           seed=args.seed,
