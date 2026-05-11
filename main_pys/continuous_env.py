@@ -125,6 +125,13 @@ def compute_smoothness(velocities: np.ndarray) -> float:
     return float(np.mean(np.linalg.norm(accel, axis=2)))
 
 
+def compute_speed_variance(velocities: np.ndarray) -> float:
+    if len(velocities) == 0:
+        return 0.0
+    speeds = np.linalg.norm(velocities, axis=2)
+    return float(np.mean(np.var(speeds, axis=0)))
+
+
 def compute_path_length(positions: np.ndarray) -> float:
     if len(positions) < 2:
         return 0.0
@@ -859,8 +866,8 @@ class ORCAStyleShield:
         return adjusted
 
 
-class EPIBTShield:
-    """Enhanced PIBT collision shield for continuous MAPF.
+class CVPIBTShield:
+    """CV-PIBT collision shield for continuous MAPF.
 
     Implements priority-based local coordination with backtracking in
     continuous space.  Agents are processed in descending priority order.
@@ -905,8 +912,9 @@ class EPIBTShield:
         preferred_velocities: np.ndarray,
         obstacle_map: np.ndarray,
         priorities: Optional[np.ndarray] = None,
+        prev_velocities: Optional[np.ndarray] = None,
     ) -> np.ndarray:
-        """Return collision-free velocities using EPIBT coordination.
+        """Return collision-free velocities using CV-PIBT coordination.
 
         Args:
             positions: (N, 2) agent positions.
@@ -914,10 +922,18 @@ class EPIBTShield:
             obstacle_map: (H, W) binary obstacle grid.
             priorities: (N,) priority values (higher = processed first).
                 If None, agents are processed in index order.
+            prev_velocities: Optional (N, 2) previous committed velocities.
+                Base CV-PIBT ignores this; kinematic subclasses can use it.
         """
         n = len(positions)
         positions = np.asarray(positions, dtype=np.float32)
         preferred_velocities = np.asarray(preferred_velocities, dtype=np.float32)
+        if prev_velocities is not None:
+            prev_velocities = np.asarray(prev_velocities, dtype=np.float32)
+            if prev_velocities.shape != preferred_velocities.shape:
+                raise ValueError(
+                    "prev_velocities must have the same shape as preferred_velocities"
+                )
 
         sdf, grad_r, grad_c = self._get_sdf(obstacle_map)
 
@@ -929,7 +945,14 @@ class EPIBTShield:
 
         # Pre-generate all candidate velocity sets
         all_candidates = [
-            self._generate_candidates(preferred_velocities[i], positions[i], sdf, grad_r, grad_c)
+            self._generate_candidates(
+                preferred_velocities[i],
+                positions[i],
+                sdf,
+                grad_r,
+                grad_c,
+                prev_velocity=None if prev_velocities is None else prev_velocities[i],
+            )
             for i in range(n)
         ]
 
@@ -946,14 +969,19 @@ class EPIBTShield:
             committed,
             committed_vel,
             obstacle_map,
+            prev_velocities=prev_velocities,
             depth=0,
         )
 
         # Any agents still unassigned get their preferred velocity clipped
         for i in range(n):
             if committed[i] < 0:
-                v = preferred_velocities[i].copy()
-                committed_vel[i] = self._clip(v)
+                prev_velocity = None if prev_velocities is None else prev_velocities[i]
+                committed_vel[i] = self._fallback_velocity(
+                    all_candidates[i],
+                    preferred_velocities[i],
+                    prev_velocity,
+                )
 
         return committed_vel
 
@@ -970,6 +998,7 @@ class EPIBTShield:
         committed,
         committed_vel,
         obstacle_map,
+        prev_velocities,
         depth: int,
     ) -> bool:
         """Recursively assign actions to agents in priority order.
@@ -987,14 +1016,27 @@ class EPIBTShield:
             placed = False
             for c_idx, cand in enumerate(candidates):
                 # Check obstacle collision
-                if self._hits_obstacle(positions[idx], cand, obstacle_map):
+                if self._candidate_hits_obstacle(
+                    idx,
+                    positions,
+                    cand,
+                    obstacle_map,
+                    prev_velocities,
+                ):
                     continue
                 # Check collision with all already-committed agents
                 conflict = False
                 for j in range(len(positions)):
                     if j == idx or committed[j] < 0:
                         continue
-                    if self._agents_collide(positions[idx], cand, positions[j], committed_vel[j]):
+                    if self._candidates_collide(
+                        idx,
+                        j,
+                        positions,
+                        cand,
+                        committed_vel[j],
+                        prev_velocities,
+                    ):
                         conflict = True
                         break
                 if not conflict:
@@ -1004,9 +1046,14 @@ class EPIBTShield:
                     break
 
             if not placed:
-                # Backtrack: commit zero velocity for this agent
-                committed[idx] = len(candidates) - 1  # last candidate is always zero
-                committed_vel[idx] = np.zeros(2, dtype=np.float32)
+                # Backtrack/fallback: base CV-PIBT waits; kinodynamic variants brake.
+                prev_velocity = None if prev_velocities is None else prev_velocities[idx]
+                committed[idx] = len(candidates) - 1
+                committed_vel[idx] = self._fallback_velocity(
+                    candidates,
+                    preferred[idx],
+                    prev_velocity,
+                )
 
         return True
 
@@ -1017,6 +1064,7 @@ class EPIBTShield:
         sdf: np.ndarray,
         grad_r: np.ndarray,
         grad_c: np.ndarray,
+        prev_velocity: Optional[np.ndarray] = None,
     ) -> list:
         """Generate ordered list of candidate velocities for one agent.
 
@@ -1044,6 +1092,40 @@ class EPIBTShield:
         scores = [self._score_candidate(c, preferred) for c in candidates]
         sorted_pairs = sorted(zip(scores, candidates), key=lambda p: -p[0])
         return [c for _, c in sorted_pairs]
+
+    def _fallback_velocity(
+        self,
+        candidates: list,
+        preferred: np.ndarray,
+        prev_velocity: Optional[np.ndarray],
+    ) -> np.ndarray:
+        return np.zeros(2, dtype=np.float32)
+
+    def _candidate_hits_obstacle(
+        self,
+        agent_idx: int,
+        positions: np.ndarray,
+        candidate: np.ndarray,
+        obstacle_map: np.ndarray,
+        prev_velocities: Optional[np.ndarray],
+    ) -> bool:
+        return self._hits_obstacle(positions[agent_idx], candidate, obstacle_map)
+
+    def _candidates_collide(
+        self,
+        idx_i: int,
+        idx_j: int,
+        positions: np.ndarray,
+        candidate_i: np.ndarray,
+        candidate_j: np.ndarray,
+        prev_velocities: Optional[np.ndarray],
+    ) -> bool:
+        return self._agents_collide(
+            positions[idx_i],
+            candidate_i,
+            positions[idx_j],
+            candidate_j,
+        )
 
     def _score_candidate(self, candidate: np.ndarray, preferred: np.ndarray) -> float:
         """Score by alignment with preferred velocity."""
@@ -1098,7 +1180,14 @@ class EPIBTShield:
         negatives on obstacle maps.
         """
         proposed = position + velocity * self.dt
-        r, c = float(proposed[0]), float(proposed[1])
+        return self._position_hits_obstacle(proposed, obstacle_map)
+
+    def _position_hits_obstacle(
+        self,
+        position: np.ndarray,
+        obstacle_map: np.ndarray,
+    ) -> bool:
+        r, c = float(position[0]), float(position[1])
         h, w = obstacle_map.shape
         if (
             r < self.agent_radius
@@ -1140,6 +1229,207 @@ class EPIBTShield:
         return sdf, grad_r, grad_c
 
 
+class EPIBTShieldKinematic(CVPIBTShield):
+    """Kinodynamic CV-PIBT variant with bounded-acceleration candidates."""
+
+    def __init__(
+        self,
+        *args,
+        max_accel: float = 0.5,
+        trajectory_samples: int = 5,
+        **kwargs,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        if max_accel <= 0.0:
+            raise ValueError("max_accel must be positive")
+        self.max_accel = float(max_accel)
+        self.trajectory_samples = max(2, int(trajectory_samples))
+
+    def _generate_candidates(
+        self,
+        preferred: np.ndarray,
+        position: np.ndarray,
+        sdf: np.ndarray,
+        grad_r: np.ndarray,
+        grad_c: np.ndarray,
+        prev_velocity: Optional[np.ndarray] = None,
+    ) -> list:
+        if prev_velocity is None:
+            prev_velocity = np.zeros(2, dtype=np.float32)
+
+        prev_velocity = np.asarray(prev_velocity, dtype=np.float32)
+        prev_velocity = self._clip(prev_velocity)
+        preferred = np.asarray(preferred, dtype=np.float32)
+
+        candidates = []
+        self._add_unique_candidate(candidates, self._reachable_velocity_toward(preferred, prev_velocity))
+        self._add_unique_candidate(candidates, self._reachable_velocity_toward(0.5 * preferred, prev_velocity))
+        self._add_unique_candidate(candidates, prev_velocity.copy())
+        self._add_unique_candidate(candidates, self.braking_velocity(prev_velocity))
+
+        max_delta_v = self._max_delta_v()
+        angles = np.linspace(0, 2 * math.pi, self.num_candidate_directions, endpoint=False)
+        for scale in (1.0, 0.5):
+            for angle in angles:
+                delta_v = (
+                    np.array([math.sin(angle), math.cos(angle)], dtype=np.float32)
+                    * max_delta_v
+                    * scale
+                )
+                self._add_unique_candidate(
+                    candidates,
+                    self._clip(prev_velocity + delta_v),
+                )
+
+        scores = [self._score_candidate(candidate, preferred) for candidate in candidates]
+        sorted_pairs = sorted(zip(scores, candidates), key=lambda p: -p[0])
+        return [candidate for _, candidate in sorted_pairs]
+
+    def _fallback_velocity(
+        self,
+        candidates: list,
+        preferred: np.ndarray,
+        prev_velocity: Optional[np.ndarray],
+    ) -> np.ndarray:
+        if prev_velocity is None:
+            return np.zeros(2, dtype=np.float32)
+        return self.braking_velocity(np.asarray(prev_velocity, dtype=np.float32))
+
+    def _candidate_hits_obstacle(
+        self,
+        agent_idx: int,
+        positions: np.ndarray,
+        candidate: np.ndarray,
+        obstacle_map: np.ndarray,
+        prev_velocities: Optional[np.ndarray],
+    ) -> bool:
+        if prev_velocities is None:
+            return super()._candidate_hits_obstacle(
+                agent_idx,
+                positions,
+                candidate,
+                obstacle_map,
+                prev_velocities,
+            )
+        prev_velocity = prev_velocities[agent_idx]
+        samples = self._trajectory_sample_count(prev_velocity, candidate)
+        for sample_idx in range(1, samples + 1):
+            tau = self.dt * sample_idx / samples
+            position = self._trajectory_position(
+                positions[agent_idx],
+                prev_velocity,
+                candidate,
+                tau,
+            )
+            if self._position_hits_obstacle(position, obstacle_map):
+                return True
+        return False
+
+    def _candidates_collide(
+        self,
+        idx_i: int,
+        idx_j: int,
+        positions: np.ndarray,
+        candidate_i: np.ndarray,
+        candidate_j: np.ndarray,
+        prev_velocities: Optional[np.ndarray],
+    ) -> bool:
+        if prev_velocities is None:
+            return super()._candidates_collide(
+                idx_i,
+                idx_j,
+                positions,
+                candidate_i,
+                candidate_j,
+                prev_velocities,
+            )
+        prev_i = prev_velocities[idx_i]
+        prev_j = prev_velocities[idx_j]
+        samples = max(
+            self._trajectory_sample_count(prev_i, candidate_i),
+            self._trajectory_sample_count(prev_j, candidate_j),
+        )
+        min_dist = 2.0 * self.agent_radius
+        for sample_idx in range(1, samples + 1):
+            tau = self.dt * sample_idx / samples
+            pos_i = self._trajectory_position(positions[idx_i], prev_i, candidate_i, tau)
+            pos_j = self._trajectory_position(positions[idx_j], prev_j, candidate_j, tau)
+            if float(np.linalg.norm(pos_i - pos_j)) < min_dist:
+                return True
+        return False
+
+    def _max_delta_v(self) -> float:
+        return self.max_accel * self.dt
+
+    def _reachable_velocity_toward(
+        self,
+        target_velocity: np.ndarray,
+        prev_velocity: np.ndarray,
+    ) -> np.ndarray:
+        target_velocity = self._clip(np.asarray(target_velocity, dtype=np.float32))
+        prev_velocity = self._clip(np.asarray(prev_velocity, dtype=np.float32))
+        max_delta_v = self._max_delta_v()
+        delta = target_velocity - prev_velocity
+        delta_norm = float(np.linalg.norm(delta))
+        if delta_norm > max_delta_v:
+            target_velocity = prev_velocity + delta * (max_delta_v / max(delta_norm, 1e-6))
+        clipped = self._clip(target_velocity)
+        delta = clipped - prev_velocity
+        delta_norm = float(np.linalg.norm(delta))
+        if delta_norm > max_delta_v + 1e-6:
+            clipped = prev_velocity + delta * (max_delta_v / max(delta_norm, 1e-6))
+        return self._clip(clipped).astype(np.float32)
+
+    def braking_velocity(self, prev_velocity: np.ndarray) -> np.ndarray:
+        prev_velocity = self._clip(np.asarray(prev_velocity, dtype=np.float32))
+        speed = float(np.linalg.norm(prev_velocity))
+        max_delta_v = self._max_delta_v()
+        if speed <= max_delta_v:
+            return np.zeros(2, dtype=np.float32)
+        return (prev_velocity * ((speed - max_delta_v) / max(speed, 1e-6))).astype(np.float32)
+
+    def _add_unique_candidate(self, candidates: list, candidate: np.ndarray) -> None:
+        candidate = np.asarray(candidate, dtype=np.float32)
+        if any(float(np.linalg.norm(candidate - existing)) < 1e-5 for existing in candidates):
+            return
+        candidates.append(candidate)
+
+    def _trajectory_position(
+        self,
+        position: np.ndarray,
+        prev_velocity: np.ndarray,
+        next_velocity: np.ndarray,
+        tau: float,
+    ) -> np.ndarray:
+        tau = max(0.0, min(float(self.dt), float(tau)))
+        accel = (next_velocity - prev_velocity) / max(self.dt, 1e-6)
+        return position + prev_velocity * tau + 0.5 * accel * tau * tau
+
+    def integrate_positions(
+        self,
+        positions: np.ndarray,
+        prev_velocities: np.ndarray,
+        next_velocities: np.ndarray,
+    ) -> np.ndarray:
+        return positions + 0.5 * (prev_velocities + next_velocities) * self.dt
+
+    def _trajectory_sample_count(
+        self,
+        prev_velocity: np.ndarray,
+        next_velocity: np.ndarray,
+    ) -> int:
+        max_speed = max(
+            float(np.linalg.norm(prev_velocity)),
+            float(np.linalg.norm(next_velocity)),
+        )
+        max_distance = max_speed * self.dt
+        spacing = max(0.05, 0.5 * self.agent_radius)
+        return max(self.trajectory_samples, int(math.ceil(max_distance / spacing)))
+
+
+CVPIBTShieldKinematic = EPIBTShieldKinematic
+
+
 class ContinuousMAPFEnv:
     """Continuous-space MAPF environment with priority-ordered collision shielding.
 
@@ -1149,12 +1439,14 @@ class ContinuousMAPFEnv:
     - ``"orca"``: Standard symmetric ORCA (heuristic or rvo2).
     - ``"heuristic-orca"``: Force heuristic path (no rvo2).
     - ``"po-orca"``: Priority-Ordered ORCA with sequential processing.
-    - ``"epibt"``: Enhanced PIBT priority-based shield with backtracking.
+    - ``"cv-pibt"``: CV-PIBT priority-based shield with backtracking.
+    - ``"epibt-kinematic"``: CV-PIBT with bounded-acceleration candidates.
     - ``"picbf-cs"``: CBF shield from the external picbf-cs package.
     """
 
     DEADLOCK_CHECK_INTERVAL = 30
     DEADLOCK_PRIORITY_BOOST = 10.0
+    KINODYNAMIC_SHIELD_TYPES = {"cv-pibt-kinematic", "epibt-kinematic"}
 
     def __init__(
         self,
@@ -1164,23 +1456,35 @@ class ContinuousMAPFEnv:
         agent_radius: float = 0.3,
         goal_tolerance: float = 0.25,
         picbf_communication_radius: Optional[float] = None,
+        kinematic_accel_limit: float = 0.5,
     ) -> None:
         if picbf_communication_radius is not None and picbf_communication_radius <= 0.0:
             raise ValueError("picbf_communication_radius must be positive")
+        if kinematic_accel_limit <= 0.0:
+            raise ValueError("kinematic_accel_limit must be positive")
         self.obstacle_map = np.asarray(obstacle_map, dtype=np.int8)
         self.dt = dt
         self.max_speed = max_speed
         self.agent_radius = agent_radius
         self.goal_tolerance = goal_tolerance
         self.picbf_communication_radius = picbf_communication_radius
+        self.kinematic_accel_limit = float(kinematic_accel_limit)
         self._shield = ORCAStyleShield(agent_radius=agent_radius, max_speed=max_speed, dt=dt)
-        self._epibt_shield = EPIBTShield(agent_radius=agent_radius, max_speed=max_speed, dt=dt)
+        self._cv_pibt_shield = CVPIBTShield(agent_radius=agent_radius, max_speed=max_speed, dt=dt)
+        self._cv_pibt_kinematic_shield = EPIBTShieldKinematic(
+            agent_radius=agent_radius,
+            max_speed=max_speed,
+            dt=dt,
+            max_accel=self.kinematic_accel_limit,
+        )
         self._picbf_shield = None
         self.last_shield_debug_info: Optional[Dict[str, object]] = None
         self.positions = None
+        self.velocities = None
         self.goals = None
         self.history_positions = []
         self.history_velocities = []
+        self.history_preferred_velocities = []
         self.metrics = StepMetrics()
         self.arrival_steps = None
         self.step_count = 0
@@ -1196,8 +1500,10 @@ class ContinuousMAPFEnv:
     def reset(self, starts: np.ndarray, goals: np.ndarray) -> np.ndarray:
         self.positions = np.asarray(starts, dtype=np.float32).copy()
         self.goals = np.asarray(goals, dtype=np.float32).copy()
+        self.velocities = np.zeros((len(self.positions), 2), dtype=np.float32)
         self.history_positions = [self.positions.copy()]
         self.history_velocities = []
+        self.history_preferred_velocities = []
         self.metrics = StepMetrics()
         self.arrival_steps = np.full(len(self.positions), -1, dtype=np.int32)
         self.step_count = 0
@@ -1302,12 +1608,23 @@ class ContinuousMAPFEnv:
                 self.obstacle_map,
                 use_true_orca=True,
             )
-        if shield_type == "epibt":
-            return self._epibt_shield.project(
+        if shield_type in {"cv-pibt", "epibt"}:
+            return self._cv_pibt_shield.project(
                 self.positions,
                 preferred_velocities,
                 self.obstacle_map,
                 priorities=self.priorities,
+            )
+        if shield_type in self.KINODYNAMIC_SHIELD_TYPES:
+            prev_velocities = self.velocities
+            if prev_velocities is None:
+                prev_velocities = np.zeros_like(preferred_velocities)
+            return self._cv_pibt_kinematic_shield.project(
+                self.positions,
+                preferred_velocities,
+                self.obstacle_map,
+                priorities=self.priorities,
+                prev_velocities=prev_velocities,
             )
         if shield_type in {"picbf-cs", "picbf"}:
             if self._picbf_shield is None:
@@ -1348,15 +1665,46 @@ class ContinuousMAPFEnv:
             self._goal_dist_snapshot = current_dists.copy()
 
     def step(self, velocities: np.ndarray, shield_type: str = "orca") -> Tuple[np.ndarray, bool, Dict[str, float]]:
-        safe_velocities = self.apply_shield(velocities, shield_type=shield_type)
-        proposed = self.positions + safe_velocities * self.dt
+        preferred_velocities = np.asarray(velocities, dtype=np.float32)
+        self.history_preferred_velocities.append(preferred_velocities.copy())
+        prev_velocities = self.velocities
+        if prev_velocities is None:
+            prev_velocities = np.zeros_like(preferred_velocities)
+        else:
+            prev_velocities = np.asarray(prev_velocities, dtype=np.float32).copy()
+        safe_velocities = self.apply_shield(preferred_velocities, shield_type=shield_type)
+        kinodynamic = self._uses_kinodynamic_integration(shield_type)
+        if kinodynamic:
+            proposed = self._cv_pibt_kinematic_shield.integrate_positions(
+                self.positions,
+                prev_velocities,
+                safe_velocities,
+            )
+        else:
+            proposed = self.positions + safe_velocities * self.dt
 
         obstacle_hits = 0
         for i, candidate in enumerate(proposed):
             if self._position_hits_obstacle(candidate):
                 obstacle_hits += 1
-                proposed[i] = self.positions[i]
-                safe_velocities[i] = 0.0
+                if kinodynamic:
+                    brake_velocity = self._cv_pibt_kinematic_shield.braking_velocity(
+                        prev_velocities[i]
+                    )
+                    brake_position = self._cv_pibt_kinematic_shield.integrate_positions(
+                        self.positions[i:i + 1],
+                        prev_velocities[i:i + 1],
+                        brake_velocity.reshape(1, 2),
+                    )[0]
+                    if self._position_hits_obstacle(brake_position):
+                        proposed[i] = self.positions[i]
+                        safe_velocities[i] = prev_velocities[i]
+                    else:
+                        proposed[i] = brake_position
+                        safe_velocities[i] = brake_velocity
+                else:
+                    proposed[i] = self.positions[i]
+                    safe_velocities[i] = 0.0
 
         collisions, near_collisions = self._count_agent_interactions(proposed)
         self.metrics.collisions += collisions
@@ -1364,6 +1712,7 @@ class ContinuousMAPFEnv:
         self.metrics.obstacle_hits += obstacle_hits
 
         self.positions = proposed
+        self.velocities = safe_velocities.copy()
         self.history_positions.append(self.positions.copy())
         self.history_velocities.append(safe_velocities.copy())
         self.step_count += 1
@@ -1375,6 +1724,9 @@ class ContinuousMAPFEnv:
         newly_done = (self.arrival_steps < 0) & done_mask
         self.arrival_steps[newly_done] = self.step_count
         return self.positions.copy(), self.is_done(), self.current_metrics()
+
+    def _uses_kinodynamic_integration(self, shield_type: str) -> bool:
+        return shield_type in self.KINODYNAMIC_SHIELD_TYPES
 
     def current_metrics(self) -> Dict[str, float]:
         at_goal = self.agents_at_goal()
@@ -1407,11 +1759,26 @@ class ContinuousMAPFEnv:
             "path_length_ratio": float(path_length / max(direct, 1e-6)),
             "arrived_path_length_ratio": arrived_plr,
             "smoothness": compute_smoothness(velocities),
+            "speed_variance": compute_speed_variance(velocities),
             "collisions": float(self.metrics.collisions),
             "near_collisions": float(self.metrics.near_collisions),
             "obstacle_hits": float(self.metrics.obstacle_hits),
             "mean_arrival_step": float(np.mean(np.where(self.arrival_steps >= 0, self.arrival_steps, self.step_count))),
         }
+
+    @property
+    def velocity_history(self) -> np.ndarray:
+        if self.history_velocities:
+            return np.asarray(self.history_velocities, dtype=np.float32)
+        n = 0 if self.positions is None else len(self.positions)
+        return np.zeros((0, n, 2), dtype=np.float32)
+
+    @property
+    def preferred_velocity_history(self) -> np.ndarray:
+        if self.history_preferred_velocities:
+            return np.asarray(self.history_preferred_velocities, dtype=np.float32)
+        n = 0 if self.positions is None else len(self.positions)
+        return np.zeros((0, n, 2), dtype=np.float32)
 
     def is_done(self) -> bool:
         return bool(np.all(self.agents_at_goal()))

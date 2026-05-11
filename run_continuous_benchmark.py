@@ -535,7 +535,13 @@ def build_eval_command(
         str(args.agent_radius),
         "--goal-tolerance",
         str(args.goal_tolerance),
+        "--kinematic-a-max",
+        str(args.kinematic_a_max),
     ]
+    if args.save_velocity_history:
+        cmd.append("--save-velocity-history")
+    if args.velocity_history_dir is not None:
+        cmd.extend(["--velocity-history-dir", str(args.velocity_history_dir)])
     if args.picbf_communication_radius is not None:
         cmd.extend(["--picbf-communication-radius", str(args.picbf_communication_radius)])
     if args.test_scenario_start is not None:
@@ -754,7 +760,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument(
         "--shield-type",
-        choices=["orca", "heuristic-orca", "po-orca", "epibt", "picbf-cs", "simple", "none"],
+        choices=[
+            "orca",
+            "heuristic-orca",
+            "po-orca",
+            "cv-pibt",
+            "epibt",
+            "cv-pibt-kinematic",
+            "epibt-kinematic",
+            "picbf-cs",
+            "simple",
+            "none",
+        ],
         default="orca",
     )
     parser.add_argument(
@@ -786,6 +803,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-speed", type=float, default=1.0)
     parser.add_argument("--agent-radius", type=float, default=0.3)
     parser.add_argument("--goal-tolerance", type=float, default=0.25)
+    parser.add_argument("--kinematic-a-max", type=float, default=0.5)
+    parser.add_argument("--save-velocity-history", action="store_true")
+    parser.add_argument("--velocity-history-dir", default=None)
 
     parser.add_argument("--make-viz", action="store_true")
     parser.add_argument("--viz-agent-counts", nargs="+", type=int, default=[32, 128])
@@ -802,6 +822,8 @@ def main() -> None:
     args = parser.parse_args()
     if args.picbf_communication_radius is not None and args.picbf_communication_radius <= 0.0:
         parser.error("--picbf-communication-radius must be positive")
+    if args.kinematic_a_max <= 0.0:
+        parser.error("--kinematic-a-max must be positive")
     apply_funnel_stage_defaults(args)
     stages = set(args.stages)
     python_bin = sys.executable

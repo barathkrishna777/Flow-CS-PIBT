@@ -309,6 +309,8 @@ def write_rows(output_csv: str, rows: List[Dict[str, object]]) -> None:
         "num_consensus_samples",
         "tau",
         "flow_aggregation",
+        "velocity_history_path",
+        "preferred_velocity_history_path",
         "success",
         "agents_at_goal",
         "agent_fraction_at_goal",
@@ -316,19 +318,67 @@ def write_rows(output_csv: str, rows: List[Dict[str, object]]) -> None:
         "path_length_ratio",
         "arrived_path_length_ratio",
         "smoothness",
+        "speed_variance",
         "collisions",
         "near_collisions",
         "obstacle_hits",
         "mean_arrival_step",
         "runtime",
     ]
-    write_header = not os.path.exists(output_csv)
+    write_header = not os.path.exists(output_csv) or os.path.getsize(output_csv) == 0
+    if not write_header:
+        with open(output_csv, newline="") as f:
+            existing_header = next(csv.reader(f), [])
+        if existing_header != fieldnames:
+            raise RuntimeError(
+                f"Existing CSV header does not match current eval schema: {output_csv}. "
+                "Write to a new CSV or regenerate the existing one."
+            )
     with open(output_csv, "a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         if write_header:
             writer.writeheader()
         for row in rows:
             writer.writerow(row)
+
+
+def sanitize_filename_part(value: object) -> str:
+    text = str(value).strip() if value is not None else ""
+    if not text:
+        text = "na"
+    return "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "-" for ch in text)
+
+
+def save_velocity_histories(
+    env: ContinuousMAPFEnv,
+    output_csv: str,
+    row: Dict[str, object],
+    history_dir: Optional[str] = None,
+) -> Dict[str, str]:
+    csv_dir = os.path.dirname(output_csv) or "."
+    csv_stem = os.path.splitext(os.path.basename(output_csv))[0]
+    base_dir = history_dir or os.path.join(csv_dir, f"{csv_stem}_velocity_histories")
+    os.makedirs(base_dir, exist_ok=True)
+
+    stem_parts = [
+        row.get("map", ""),
+        row.get("scenario_id", "") or row.get("scenario", ""),
+        f"N{row.get('agents', '')}",
+        row.get("policy", ""),
+        row.get("nav", ""),
+        row.get("shield_type", ""),
+        row.get("run_name", ""),
+        f"seed{row.get('eval_seed', '')}",
+    ]
+    stem = "_".join(sanitize_filename_part(part) for part in stem_parts)
+    velocity_path = os.path.abspath(os.path.join(base_dir, f"{stem}_committed.npy"))
+    preferred_path = os.path.abspath(os.path.join(base_dir, f"{stem}_preferred.npy"))
+    np.save(velocity_path, env.velocity_history)
+    np.save(preferred_path, env.preferred_velocity_history)
+    return {
+        "velocity_history_path": velocity_path,
+        "preferred_velocity_history_path": preferred_path,
+    }
 
 
 def main():
@@ -341,9 +391,9 @@ def main():
     parser.add_argument("--scenario-ids", nargs="*", type=int, default=None)
     parser.add_argument("--scenario-start", type=int, default=None)
     parser.add_argument("--scenario-end", type=int, default=None)
-    parser.add_argument("--policy", choices=["flow", "discrete", "orca"], default="orca")
-    parser.add_argument("--nav", choices=["straight", "bd"], default="straight",
-                        help="Preferred velocity source for orca policy: straight=goal-directed, bd=BD-guided")
+    parser.add_argument("--policy", choices=["flow", "discrete", "orca", "heuristic"], default="orca")
+    parser.add_argument("--nav", choices=["straight", "goal", "bd"], default="straight",
+                        help="Preferred velocity source for heuristic/orca policy: straight/goal=goal-directed, bd=BD-guided")
     parser.add_argument("--model-path", default=None)
     parser.add_argument("--run-name", default="")
     parser.add_argument("--train-seed", type=int, default=None)
@@ -352,7 +402,18 @@ def main():
     parser.add_argument("--viz-dir", default=None)
     parser.add_argument(
         "--shield-type",
-        choices=["orca", "heuristic-orca", "po-orca", "epibt", "picbf-cs", "simple", "none"],
+        choices=[
+            "orca",
+            "heuristic-orca",
+            "po-orca",
+            "cv-pibt",
+            "epibt",
+            "cv-pibt-kinematic",
+            "epibt-kinematic",
+            "picbf-cs",
+            "simple",
+            "none",
+        ],
         default="orca",
     )
     parser.add_argument(
@@ -375,6 +436,17 @@ def main():
     parser.add_argument("--max-speed", type=float, default=1.0)
     parser.add_argument("--agent-radius", type=float, default=0.3)
     parser.add_argument("--goal-tolerance", type=float, default=0.25)
+    parser.add_argument("--kinematic-a-max", type=float, default=0.5)
+    parser.add_argument(
+        "--save-velocity-history",
+        action="store_true",
+        help="Save per-episode committed and preferred velocity histories as .npy files.",
+    )
+    parser.add_argument(
+        "--velocity-history-dir",
+        default=None,
+        help="Directory for --save-velocity-history outputs. Defaults beside --output-csv.",
+    )
     parser.add_argument(
         "--log-interval",
         type=int,
@@ -383,13 +455,17 @@ def main():
     )
     parser.add_argument("--cpu", action="store_true")
     args = parser.parse_args()
+    if args.nav == "goal":
+        args.nav = "straight"
     if args.picbf_communication_radius is not None and args.picbf_communication_radius <= 0.0:
         parser.error("--picbf-communication-radius must be positive")
+    if args.kinematic_a_max <= 0.0:
+        parser.error("--kinematic-a-max must be positive")
 
     set_seed(args.eval_seed)
     device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
     model = None
-    if args.policy != "orca":
+    if args.policy not in {"orca", "heuristic"}:
         if not args.model_path:
             raise ValueError("--model-path is required for learned policies")
         model, _ = load_model(args.model_path, device)
@@ -450,11 +526,12 @@ def main():
                     agent_radius=args.agent_radius,
                     goal_tolerance=args.goal_tolerance,
                     picbf_communication_radius=args.picbf_communication_radius,
+                    kinematic_accel_limit=args.kinematic_a_max,
                 )
                 starts = starts_all[:agent_num]
                 goals = goals_all[:agent_num]
                 log_progress(f"{case_label} setup={time.time() - setup_start:.2f}s")
-                if args.policy == "orca":
+                if args.policy in {"orca", "heuristic"}:
                     metrics = run_orca_baseline(
                         env,
                         starts,
@@ -490,7 +567,7 @@ def main():
                     "scenario_id": scen_id,
                     "agents": agent_num,
                     "policy": args.policy,
-                    "nav": args.nav if args.policy == "orca" else "",
+                    "nav": args.nav if args.policy in {"orca", "heuristic"} else "",
                     "shield_type": args.shield_type,
                     "run_name": args.run_name,
                     "model_name": os.path.basename(args.model_path) if args.model_path else "",
@@ -501,8 +578,19 @@ def main():
                     "num_consensus_samples": args.num_consensus_samples,
                     "tau": args.tau,
                     "flow_aggregation": args.flow_aggregation if args.policy == "flow" else "",
+                    "velocity_history_path": "",
+                    "preferred_velocity_history_path": "",
                     **metrics,
                 }
+                if args.save_velocity_history:
+                    row.update(
+                        save_velocity_histories(
+                            env,
+                            args.output_csv,
+                            row,
+                            history_dir=args.velocity_history_dir,
+                        )
+                    )
                 write_rows(args.output_csv, [row])
                 log_progress(
                     f"done {case_label} success={metrics['success']:.0f} "
