@@ -603,6 +603,8 @@ def simulate(device, model, k, m, grid_map, bd, start_locations, goal_locations,
     stuck_agents_set = set()
     for step in tqdm(range(max_steps)):
         agents_at_goal = np.all(np.equal(cur_locs, goal_locations), axis=1)
+        if np.all(agents_at_goal):
+            break
         agent_priorities = updatePriorities(agent_priorities, agents_at_goal)
 
         if near_goal_bd_thresh > 0 and near_goal_boost > 0:

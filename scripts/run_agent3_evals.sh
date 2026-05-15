@@ -44,7 +44,7 @@ for SEED in 42 123 456; do
     --max-scenarios "$N" \
     --policy flow \
     --model-path "$MODEL" \
-    --shield-type epibt \
+    --shield-type cv-pibt \
     --max-steps 512 \
     --run-name "$RUN_NAME" \
     --train-seed "$SEED" \

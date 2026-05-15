@@ -18,7 +18,7 @@ python eval_parallel.py \
   --map-dir $MAPDIR --scen-dir $SCENDIR \
   --maps random-32-32-10 empty-48-48 \
   --agent-counts 50 100 --max-scenarios $N \
-  --policy flow --model-path $MODEL --shield-type epibt \
+  --policy flow --model-path $MODEL --shield-type cv-pibt \
   --max-steps 512 --num-integration-steps 5 \
   --output-csv evals/ablations/flow_epibt_512_setA_steps5.csv \
   --num-gpus "$NUM_GPUS"
@@ -27,7 +27,7 @@ python eval_parallel.py \
   --map-dir $MAPDIR --scen-dir $SCENDIR \
   --maps random-32-32-10 empty-48-48 \
   --agent-counts 50 100 --max-scenarios $N \
-  --policy flow --model-path $MODEL --shield-type epibt \
+  --policy flow --model-path $MODEL --shield-type cv-pibt \
   --max-steps 512 --num-integration-steps 10 \
   --output-csv evals/ablations/flow_epibt_512_setA_steps10.csv \
   --num-gpus "$NUM_GPUS"
@@ -36,7 +36,7 @@ python eval_parallel.py \
   --map-dir $MAPDIR --scen-dir $SCENDIR \
   --maps random-32-32-10 empty-48-48 \
   --agent-counts 50 100 --max-scenarios $N \
-  --policy flow --model-path $MODEL --shield-type epibt \
+  --policy flow --model-path $MODEL --shield-type cv-pibt \
   --max-steps 512 --num-integration-steps 20 \
   --output-csv evals/ablations/flow_epibt_512_setA_steps20.csv \
   --num-gpus "$NUM_GPUS"

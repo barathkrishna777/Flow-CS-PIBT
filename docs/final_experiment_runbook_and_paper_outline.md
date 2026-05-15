@@ -82,26 +82,26 @@ Primary Set A result on `random-32-32-10`, `N=100`, 512 steps:
 |---|---:|---:|---:|
 | ORCA | 16.8% | 4169 | - |
 | PO-ORCA | 14.9% | 2626 | - |
-| Straight + EPIBTShield | 77.4% | 1307 | 1.122 |
+| Straight + CV-PIBT | 77.4% | 1307 | 1.122 |
 | Flow v4b + ORCA | 48.3% | about 0 | - |
-| Flow v4b + EPIBTShield | 87.2% | 653 | 1.469 |
+| Flow v4b + CV-PIBT | 87.2% | 653 | 1.469 |
 
 The clean decomposition:
 
-- Shield matters: same flow policy with ORCA gets 48.3%, while EPIBTShield gets 87.2%.
-- Learning helps: straight preferred velocities with EPIBTShield get 77.4%, while learned flow guidance reaches 87.2%.
+- Shield matters: same flow policy with ORCA gets 48.3%, while CV-PIBT gets 87.2%.
+- Learning helps: straight preferred velocities with CV-PIBT get 77.4%, while learned flow guidance reaches 87.2%.
 - PO-ORCA is not enough: priority ordering alone does not solve the structured deadlock regime.
 - arrPLR reframes efficiency: arrived agents take roughly 1.2x to 1.5x optimal paths, while all-agent PLR is inflated by agents that do not arrive.
 
 Generalization:
 
-- Set B `random-64-64-10`, `N=50`: ORCA 4.8% -> Straight+EPIBT 50.5% -> Flow+EPIBT 61.5%.
-- Set B `room-32-32-4`, `N=50`: ORCA 1.2% -> Straight+EPIBT 11.4% -> Flow+EPIBT 26.5%.
-- Set C warehouse, `N=50`: ORCA 13.2% -> Straight+EPIBT 41.1% -> Flow+EPIBT 25.4%.
+- Set B `random-64-64-10`, `N=50`: ORCA 4.8% -> Straight+CV-PIBT 50.5% -> Flow+CV-PIBT 61.5%.
+- Set B `room-32-32-4`, `N=50`: ORCA 1.2% -> Straight+CV-PIBT 11.4% -> Flow+CV-PIBT 26.5%.
+- Set C warehouse, `N=50`: ORCA 13.2% -> Straight+CV-PIBT 41.1% -> Flow+CV-PIBT 25.4%.
 
 Warehouse framing:
 
-> EPIBTShield generalizes strongly out-of-domain, improving warehouse completion from 13.2% to 41.1% without learning. Learned flow guidance adds clear gains on in-distribution and near-distribution maps, but does not improve over the shield-only policy on fully OOD warehouse maps, which is expected because warehouse layouts are absent from training data.
+> CV-PIBT generalizes strongly out-of-domain, improving warehouse completion from 13.2% to 41.1% without learning. Learned flow guidance adds clear gains on in-distribution and near-distribution maps, but does not improve over the shield-only policy on fully OOD warehouse maps, which is expected because warehouse layouts are absent from training data.
 
 ## Paper Structure
 
@@ -111,9 +111,9 @@ Working title:
 
 Recommended contribution order:
 
-1. A continuous-space EPIBTShield that takes arbitrary preferred velocities and resolves conflicts with priority inheritance and backtracking.
+1. A continuous-space CV-PIBT that takes arbitrary preferred velocities and resolves conflicts with priority inheritance and backtracking.
 2. A rectified-flow GNN policy that generates congestion-aware preferred velocities from EECBS expert demonstrations.
-3. An empirical study showing that shielding and learning contribute separately: EPIBTShield resolves the deadlock regime, and flow guidance further improves goal completion and collision reduction.
+3. An empirical study showing that shielding and learning contribute separately: CV-PIBT resolves the deadlock regime, and flow guidance further improves goal completion and collision reduction.
 
 Main sections:
 
@@ -124,12 +124,12 @@ Main sections:
    Define continuous positions, radii, velocity bounds, timestep dynamics, goals, obstacles, completion metrics, and collision metrics.
 
 3. Method
-   Present the system as `preferred velocity policy -> EPIBTShield -> executed velocity`.
+   Present the system as `preferred velocity policy -> CV-PIBT -> executed velocity`.
 
 4. Learned Flow Policy
    Explain FlowGNNModel, rectified flow target, 3 Euler integration steps, EECBS supervision, and training maps.
 
-5. EPIBTShield
+5. CV-PIBT
    Describe priority inheritance, candidate velocity search, backtracking, and how the shield is policy-agnostic.
 
 6. Experiments
@@ -142,11 +142,11 @@ Main sections:
 
 Minimum paper figures:
 
-- Method diagram: FlowGNNModel preferred velocities feeding EPIBTShield.
-- Main Set A table: ORCA, PO-ORCA, Straight+EPIBT, Flow+ORCA, Flow+EPIBT.
+- Method diagram: FlowGNNModel preferred velocities feeding CV-PIBT.
+- Main Set A table: ORCA, PO-ORCA, Straight+CV-PIBT, Flow+ORCA, Flow+CV-PIBT.
 - Generalization bar chart: Set B and Set C by map.
 - Integration-step ablation: 3, 5, 10, 20 Euler steps with AtGoal and arrPLR.
-- Qualitative trajectory figure: same scenario under ORCA, Straight+EPIBT, Flow+EPIBT.
+- Qualitative trajectory figure: same scenario under ORCA, Straight+CV-PIBT, Flow+CV-PIBT.
 - Multi-seed table: seed 42, 123, 456 plus mean and std.
 
 ## Submission Gates

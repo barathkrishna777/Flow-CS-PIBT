@@ -10,7 +10,7 @@
 
 The two-sentence version of the paper:
 
-> We extend PIBT's priority-inheritance collision shield to continuous 2D space (EPIBTShield) and show it dramatically outperforms ORCA. A flow matching GNN trained on EECBS expert trajectories further improves upon straight preferred velocities under EPIBTShield, achieving 91.4% agent completion vs ORCA's 58.4% at N=50.
+> We extend PIBT's priority-inheritance collision shield to continuous 2D space (CV-PIBT) and show it dramatically outperforms ORCA. A flow matching GNN trained on EECBS expert trajectories further improves upon straight preferred velocities under CV-PIBT, achieving 91.4% agent completion vs ORCA's 58.4% at N=50.
 
 **Target venue**: ICRA 2026 (or RA-L with ICRA option).
 
@@ -31,11 +31,11 @@ The two-sentence version of the paper:
 
 ### This paper's contributions
 
-1. **EPIBTShield** — a novel extension of PIBT's priority-inheritance backtracking mechanism from discrete grids to continuous 2D space with circular agents. Agents are ordered by priority; each resolves its velocity to avoid all higher-priority agents' projected positions, recursing down the priority queue. This is not defined in any prior work. **This is the dominant contribution** (see Section 9).
+1. **CV-PIBT** — a novel extension of PIBT's priority-inheritance backtracking mechanism from discrete grids to continuous 2D space with circular agents. Agents are ordered by priority; each resolves its velocity to avoid all higher-priority agents' projected positions, recursing down the priority queue. This is not defined in any prior work. **This is the dominant contribution** (see Section 9).
 
-2. **Flow matching policy for continuous MAPF** — a GNN-based Rectified Flow model (`FlowGNNModel`) trained on EECBS expert trajectories that predicts preferred velocities for EPIBTShield. Secondary contribution; improves upon straight goal-directed preferences.
+2. **Flow matching policy for continuous MAPF** — a GNN-based Rectified Flow model (`FlowGNNModel`) trained on EECBS expert trajectories that predicts preferred velocities for CV-PIBT. Secondary contribution; improves upon straight goal-directed preferences.
 
-3. **Empirical finding** — EPIBTShield with even naive straight preferred velocities dramatically outperforms ORCA, reframing the role of the learned policy as an improvement on top of an already-strong shield rather than a replacement for ORCA.
+3. **Empirical finding** — CV-PIBT with even naive straight preferred velocities dramatically outperforms ORCA, reframing the role of the learned policy as an improvement on top of an already-strong shield rather than a replacement for ORCA.
 
 ### What is NOT a contribution: PO-ORCA
 
@@ -91,15 +91,15 @@ The ablation table has four rows, each adding exactly one ingredient:
 |---|---|
 | ORCA + straight | Standard reactive baseline; widely used in MAPF literature |
 | PO-ORCA + straight | Priority ordering alone, without PIBT backtracking |
-| EPIBTShield + straight | PIBT inheritance alone, without learning |
-| EPIBTShield + Flow (ours) | Full method: PIBT inheritance + learned preferred velocity |
+| CV-PIBT + straight | PIBT inheritance alone, without learning |
+| CV-PIBT + Flow (ours) | Full method: PIBT inheritance + learned preferred velocity |
 
 The gaps tell the story cleanly:
 - **ORCA → PO-ORCA**: benefit of static priority ordering
-- **PO-ORCA → EPIBTShield + straight**: benefit of PIBT recursive backtracking (the key novel contribution)
-- **EPIBTShield + straight → EPIBTShield + flow**: benefit of learned preferred velocity
+- **PO-ORCA → CV-PIBT + straight**: benefit of PIBT recursive backtracking (the key novel contribution)
+- **CV-PIBT + straight → CV-PIBT + flow**: benefit of learned preferred velocity
 
-Optional fifth row: **ORCA + flow** (already run as v2) — shows the learned model cannot rescue a weak shield, motivating EPIBTShield.
+Optional fifth row: **ORCA + flow** (already run as v2) — shows the learned model cannot rescue a weak shield, motivating CV-PIBT.
 
 ---
 
@@ -148,7 +148,7 @@ python eval_parallel.py \
   --agent-counts 50 100 --max-scenarios 25 \
   --policy flow \
   --model-path checkpoints/continuous_v4/continuous_flow_v4_best.pt \
-  --shield-type epibt --num-integration-steps 3 --max-steps 512 \
+  --shield-type cv-pibt --num-integration-steps 3 --max-steps 512 \
   --output-csv evals/v4/flow_epibt_512_setA.csv --num-gpus 4
 ```
 
@@ -171,7 +171,7 @@ python eval_parallel.py \
   --agent-counts 50 100 --max-scenarios 25 \
   --policy flow \
   --model-path checkpoints/continuous_v4/continuous_flow_v4_best.pt \
-  --shield-type epibt --num-integration-steps 3 --max-steps 512 \
+  --shield-type cv-pibt --num-integration-steps 3 --max-steps 512 \
   --output-csv evals/v4/flow_epibt_512_setB_r64.csv --num-gpus 4
 
 python eval_parallel.py \
@@ -180,7 +180,7 @@ python eval_parallel.py \
   --agent-counts 50 --max-scenarios 25 \
   --policy flow \
   --model-path checkpoints/continuous_v4/continuous_flow_v4_best.pt \
-  --shield-type epibt --num-integration-steps 3 --max-steps 512 \
+  --shield-type cv-pibt --num-integration-steps 3 --max-steps 512 \
   --output-csv evals/v4/flow_epibt_512_setB_room.csv --num-gpus 4
 ```
 
@@ -205,11 +205,11 @@ python eval_parallel.py \
   --agent-counts 50 100 --max-scenarios 25 \
   --policy flow \
   --model-path checkpoints/continuous_v4/continuous_flow_v4_best.pt \
-  --shield-type epibt --num-integration-steps 3 --max-steps 512 \
+  --shield-type cv-pibt --num-integration-steps 3 --max-steps 512 \
   --output-csv evals/v4/flow_epibt_512_setC_warehouse.csv --num-gpus 4
 ```
 
-Also run all three baselines (ORCA, PO-ORCA, EPIBTShield+straight) on Set A at minimum, and Set C for OOD generalization. Set B baselines are optional (space permitting in the paper).
+Also run all three baselines (ORCA, PO-ORCA, CV-PIBT+straight) on Set A at minimum, and Set C for OOD generalization. Set B baselines are optional (space permitting in the paper).
 
 ---
 
@@ -218,7 +218,7 @@ Also run all three baselines (ORCA, PO-ORCA, EPIBTShield+straight) on Set A at m
 ### Environment (`main_pys/continuous_env.py`)
 
 - `ContinuousMAPFEnv`: circular agents (radius 0.3), continuous 2D positions/velocities, `dt=0.2`, `max_speed=1.0`, grid obstacle maps as boundaries represented as SDF
-- `EPIBTShield`: priority-ordered collision resolver with recursive PIBT backtracking. Takes preferred velocities → outputs safe velocities respecting agent-agent and agent-obstacle geometry
+- `CV-PIBT`: priority-ordered collision resolver with recursive PIBT backtracking. Takes preferred velocities → outputs safe velocities respecting agent-agent and agent-obstacle geometry
 - `ORCAStyleShield`: ORCA-based shield. Modes: `orca` (symmetric RVO2, true rvo2 library if installed), `po-orca` (priority-ordered, one-sided), `heuristic-orca` (force heuristic path, no rvo2), `none`
 - `ContinuousMAPFEnv` instantiates shield once at construction; `step(preferred, shield_type=...)` dispatches at step time
 
@@ -240,7 +240,7 @@ Expert cascade: EECBS → LaCAM3 → ORCA (when `--expert-source hybrid`).
 
 - Converts discrete EECBS/LaCAM3 paths to continuous via linear interpolation
 - Saves `.npz` per scenario: `positions (T,N,2)`, `velocities (T-1,N,2)`, `goals (N,2)`, `action_labels (T-1,N)`, `expert_source_used`, `fraction_moving`, etc.
-- Flag `--rollout-shield-type {orca,po-orca,epibt,none}`: overrides shield during ORCA/fallback rollouts
+- Flag `--rollout-shield-type {orca,po-orca,cv-pibt,none}`: overrides shield during ORCA/fallback rollouts
 
 ### Graph construction (`main_pys/model_inputs.py`)
 
@@ -311,7 +311,7 @@ Metrics: `success` (all agents at goal), `agent_fraction_at_goal`, `collisions`,
 | `v1/` | EECBS | — | random-32-32-10, empty-48-48 | 25 each | 50, 100 | 100 | Clean training data |
 | `lacam3_smoke/` | LaCAM3 | — | random-32-32-10 | 3 | 50 | 3 | Verified LaCAM3 binary |
 | `v2/` | EECBS (hybrid → all EECBS) | — | random-32-32-10, empty-48-48 | 25 each | 50, 100 | 100 | EECBS won cascade every time |
-| `v3_epibt_rollouts/` | ORCA | EPIBTShield | random-32-32-10, empty-48-48 | 25 each | 50, 100 | ~100 | Used new `--rollout-shield-type epibt` |
+| `v3_epibt_rollouts/` | ORCA | CV-PIBT | random-32-32-10, empty-48-48 | 25 each | 50, 100 | ~100 | Used new `--rollout-shield-type cv-pibt` |
 | **`v4/`** | EECBS | — | 9 maps (see below) | 25 each | 50, 100 | ~380 | Maze N=100 mostly skipped; **primary training set** |
 
 v4 maps: `random-32-32-10`, `random-32-32-20`, `random-64-64-10`, `empty-32-32`, `empty-48-48`, `room-32-32-4`, `room-64-64-8`, `maze-32-32-2`, `maze-32-32-4`.
@@ -337,9 +337,9 @@ v4 results: will be over **25 scenarios**, 2+ maps (Set A).
 |---|---|---|---|---|---|
 | straight | ORCA | 0.584 | 191.8 | 0.582 | 764.7 |
 | straight | PO-ORCA | *running* | *running* | *running* | *running* |
-| straight | EPIBTShield | 0.882 | 69.3 | 0.875 | 338.4 |
-| Flow v1 | EPIBTShield | **0.914** | **54.0** | **0.879** | **320.9** |
-| Flow v2 | EPIBTShield | 0.470 | 85.2 | 0.499 | 384.8 |
+| straight | CV-PIBT | 0.882 | 69.3 | 0.875 | 338.4 |
+| Flow v1 | CV-PIBT | **0.914** | **54.0** | **0.879** | **320.9** |
+| Flow v2 | CV-PIBT | 0.470 | 85.2 | 0.499 | 384.8 |
 | Flow v2 | ORCA | 0.586 | 220.6 | 0.583 | 888.7 |
 
 #### Step budget comparison (v1, N=50)
@@ -357,30 +357,30 @@ Flow v1 underperforms straight at 256 steps but exceeds it at 512. Hypothesis: m
 
 ## 8. Key Findings
 
-### Finding 1: EPIBTShield >> ORCA (dominant result)
+### Finding 1: CV-PIBT >> ORCA (dominant result)
 
 With identical straight preferred velocities:
-- `straight + EPIBTShield`: at_goal=0.882, collisions=69.3 at N=50
+- `straight + CV-PIBT`: at_goal=0.882, collisions=69.3 at N=50
 - `straight + ORCA`: at_goal=0.584, collisions=191.8 at N=50
 
-EPIBTShield achieves **51% more agents at goal** and **2.8× fewer collisions** than ORCA. This holds at N=100. ORCA's reactive velocity-obstacle geometry cannot coordinate 50–100 agents; PIBT's priority inheritance is fundamentally more powerful. **EPIBTShield itself is the primary contribution.**
+CV-PIBT achieves **51% more agents at goal** and **2.8× fewer collisions** than ORCA. This holds at N=100. ORCA's reactive velocity-obstacle geometry cannot coordinate 50–100 agents; PIBT's priority inheritance is fundamentally more powerful. **CV-PIBT itself is the primary contribution.**
 
-### Finding 2: Flow v1 + EPIBTShield is best at 512 steps
+### Finding 2: Flow v1 + CV-PIBT is best at 512 steps
 
 At 512 steps, 3 integration steps:
-- N=50: at_goal=0.914 (vs straight+EPIBTShield 0.882, straight+ORCA 0.584)
+- N=50: at_goal=0.914 (vs straight+CV-PIBT 0.882, straight+ORCA 0.584)
 - N=50: collisions=54.0 (vs 69.3 and 191.8)
-- N=100: matches straight+EPIBTShield on at_goal (0.879 vs 0.875), fewer collisions (320.9 vs 338.4)
+- N=100: matches straight+CV-PIBT on at_goal (0.879 vs 0.875), fewer collisions (320.9 vs 338.4)
 
 ### Finding 3: Flow model needs 512 steps, not 256 (v1)
 
 At 256 steps, Flow v1 underperforms straight (0.810 vs 0.882 at_goal). Root cause: v1 trained on 2 maps / 25 scenarios — model is somewhat conservative in novel configurations. v4 (9 maps) is the fix.
 
-### Finding 4: Only EECBS data works for EPIBTShield training
+### Finding 4: Only EECBS data works for CV-PIBT training
 
 Three data mixing experiments failed:
-- **v2 (EECBS + ORCA rollouts)**: at_goal 0.914 → 0.470. ORCA velocities assume ORCA collision avoidance context; EPIBTShield resolves conflicts differently.
-- **v3 (EECBS + EPIBTShield rollouts)**: at_goal 0.479, collisions 137.6. EPIBTShield rollout data is NOT collision-free (shield itself causes ~69 collisions at N=50), contaminating training targets.
+- **v2 (EECBS + ORCA rollouts)**: at_goal 0.914 → 0.470. ORCA velocities assume ORCA collision avoidance context; CV-PIBT resolves conflicts differently.
+- **v3 (EECBS + CV-PIBT rollouts)**: at_goal 0.479, collisions 137.6. CV-PIBT rollout data is NOT collision-free (shield itself causes ~69 collisions at N=50), contaminating training targets.
 - **v2 + ORCA eval**: at_goal=0.586 — matches plain ORCA. ORCA's ceiling (~58%) is the bottleneck; better preferred velocities cannot overcome a weak shield.
 
 **Conclusion**: EECBS provides provably collision-free paths — the gold standard training signal. Never mix in continuous-space rollout data.
@@ -391,7 +391,7 @@ Slight improvement in at_goal (0.810 vs 0.790) and collisions (32.2 vs 37.3) at 
 
 ### Finding 6: BD-guided baseline is broken
 
-`BD + EPIBTShield` gets at_goal=0.018. Root cause: polygon inflation in obstacle map for BD heuristic precomputation makes the map inaccessible. Not fixed; omit BD from paper unless fixed.
+`BD + CV-PIBT` gets at_goal=0.018. Root cause: polygon inflation in obstacle map for BD heuristic precomputation makes the map inaccessible. Not fixed; omit BD from paper unless fixed.
 
 ### Finding 7: ORCA evaluation is fair (confirmed)
 
@@ -414,9 +414,9 @@ maze-32-32-2: 2-cell corridors (2.0 units wide) leave ~0.2 units margin for two 
 
 ### Claim hierarchy
 
-1. **(Primary)** EPIBTShield, a novel continuous-space extension of PIBT's priority-inheritance mechanism, dramatically outperforms ORCA in continuous 2D MAPF — 51% more agents at goal, 3× fewer collisions at N=50, using only straight preferred velocities.
+1. **(Primary)** CV-PIBT, a novel continuous-space extension of PIBT's priority-inheritance mechanism, dramatically outperforms ORCA in continuous 2D MAPF — 51% more agents at goal, 3× fewer collisions at N=50, using only straight preferred velocities.
 
-2. **(Secondary)** A GNN-based Rectified Flow model trained on EECBS expert trajectories further improves upon straight preferred velocities under EPIBTShield: 91.4% vs 88.2% at_goal, 54 vs 69 collisions at N=50.
+2. **(Secondary)** A GNN-based Rectified Flow model trained on EECBS expert trajectories further improves upon straight preferred velocities under CV-PIBT: 91.4% vs 88.2% at_goal, 54 vs 69 collisions at N=50.
 
 3. **(Ablation/insight)** Learned preferred velocities cannot rescue ORCA — Flow + ORCA matches plain ORCA (0.586 vs 0.584), confirming shield choice dominates policy choice.
 
@@ -426,8 +426,8 @@ maze-32-32-2: 2-cell corridors (2.0 units wide) leave ~0.2 units margin for two 
 
 1. Discrete MAPF is solved by PIBT and its variants. Continuous-space MAPF remains open.
 2. ORCA is the standard continuous baseline but deadlocks in dense obstacle maps.
-3. We extend PIBT's priority inheritance to continuous space (EPIBTShield). Even with naive straight preferred velocities, EPIBTShield dramatically outperforms ORCA.
-4. A flow matching GNN trained on EECBS expert trajectories learns better preferred velocities for EPIBTShield. The learned policy adds a meaningful improvement on top of an already-strong shield.
+3. We extend PIBT's priority inheritance to continuous space (CV-PIBT). Even with naive straight preferred velocities, CV-PIBT dramatically outperforms ORCA.
+4. A flow matching GNN trained on EECBS expert trajectories learns better preferred velocities for CV-PIBT. The learned policy adds a meaningful improvement on top of an already-strong shield.
 5. Ablations confirm: (a) the shield is the dominant factor, (b) EECBS-only training data is necessary, (c) 3 integration steps is sufficient for flow inference.
 
 ### Full paper comparison table (target: after v4 evals with 25 scenarios)
@@ -436,8 +436,8 @@ maze-32-32-2: 2-cell corridors (2.0 units wide) leave ~0.2 units margin for two 
 |---|---|---|---|---|---|
 | straight | ORCA | 0.584 | 191.8 | 0.582 | 764.7 |
 | straight | PO-ORCA | TBD | TBD | TBD | TBD |
-| straight | EPIBTShield | 0.882 | 69.3 | 0.875 | 338.4 |
-| **Flow v4 (ours)** | **EPIBTShield** | **TBD** | **TBD** | **TBD** | **TBD** |
+| straight | CV-PIBT | 0.882 | 69.3 | 0.875 | 338.4 |
+| **Flow v4 (ours)** | **CV-PIBT** | **TBD** | **TBD** | **TBD** | **TBD** |
 
 *Primary: Set A (random-32-32-10 + empty-48-48), 25 scenarios, 512-step budget, 3 integration steps.*
 *Supplemental: Set B (random-64-64-10, room-32-32-4), Set C (warehouse-10-20-10-2-1).*
@@ -452,7 +452,7 @@ maze-32-32-2: 2-cell corridors (2.0 units wide) leave ~0.2 units margin for two 
 - [ ] **v4 training** — currently running (single GPU, batch=256, workers=96)
 - [ ] **PO-ORCA eval** — currently running on Lambda
 - [ ] **v4 eval at 256 AND 512 steps** (Eval Set A, 25 scenarios) — critical: does v4 close the 256-step gap?
-- [ ] **Full baseline evals at 25 scenarios** — ORCA, PO-ORCA, straight+EPIBTShield on Set A
+- [ ] **Full baseline evals at 25 scenarios** — ORCA, PO-ORCA, straight+CV-PIBT on Set A
 - [ ] **Eval Set B** (random-64-64-10, room-32-32-4) for all baselines + Flow v4
 - [ ] **Eval Set C** (warehouse OOD) for all baselines + Flow v4
 - [ ] **Multi-seed runs (3 seeds)** on final model for statistical significance
@@ -461,7 +461,7 @@ maze-32-32-2: 2-cell corridors (2.0 units wide) leave ~0.2 units margin for two 
 ### Medium priority
 
 - [ ] **Fix BD-guided baseline** or formally drop it (omit from paper)
-- [ ] **DAgger experiment** if v4 still has a 256-step gap: roll out current model + EPIBTShield, label with straight+EPIBTShield oracle, aggregate and retrain
+- [ ] **DAgger experiment** if v4 still has a 256-step gap: roll out current model + CV-PIBT, label with straight+CV-PIBT oracle, aggregate and retrain
 - [ ] **Trajectory visualizations** (`--viz-dir` in eval_continuous.py)
 - [ ] **Collision breakdown** — are collisions agent-agent, agent-obstacle, or both?
 
@@ -477,24 +477,24 @@ maze-32-32-2: 2-cell corridors (2.0 units wide) leave ~0.2 units margin for two 
 Run after v4 training completes. All use `--num-gpus 4`.
 
 ```bash
-# Flow v4 + EPIBTShield, 512 steps
+# Flow v4 + CV-PIBT, 512 steps
 python eval_parallel.py --map-dir data/mapf-map --scen-dir data/mapf-scen-random \
   --maps random-32-32-10 empty-48-48 --agent-counts 50 100 --max-scenarios 25 \
   --policy flow --model-path checkpoints/continuous_v4/continuous_flow_v4_best.pt \
-  --shield-type epibt --num-integration-steps 3 --max-steps 512 \
+  --shield-type cv-pibt --num-integration-steps 3 --max-steps 512 \
   --output-csv evals/v4/flow_epibt_512_setA.csv --num-gpus 4
 
-# Flow v4 + EPIBTShield, 256 steps (critical: does v4 close the gap?)
+# Flow v4 + CV-PIBT, 256 steps (critical: does v4 close the gap?)
 python eval_parallel.py --map-dir data/mapf-map --scen-dir data/mapf-scen-random \
   --maps random-32-32-10 empty-48-48 --agent-counts 50 100 --max-scenarios 25 \
   --policy flow --model-path checkpoints/continuous_v4/continuous_flow_v4_best.pt \
-  --shield-type epibt --num-integration-steps 3 --max-steps 256 \
+  --shield-type cv-pibt --num-integration-steps 3 --max-steps 256 \
   --output-csv evals/v4/flow_epibt_256_setA.csv --num-gpus 4
 
-# Straight + EPIBTShield baseline
+# Straight + CV-PIBT baseline
 python eval_parallel.py --map-dir data/mapf-map --scen-dir data/mapf-scen-random \
   --maps random-32-32-10 empty-48-48 --agent-counts 50 100 --max-scenarios 25 \
-  --policy orca --nav straight --shield-type epibt --max-steps 512 \
+  --policy orca --nav straight --shield-type cv-pibt --max-steps 512 \
   --output-csv evals/v4/straight_epibt_512_setA.csv --num-gpus 4
 
 # PO-ORCA baseline (currently running)
@@ -516,7 +516,7 @@ python eval_parallel.py --map-dir data/mapf-map --scen-dir data/mapf-scen-random
 
 | File | Change | Commit |
 |---|---|---|
-| `generate_continuous_data.py` | Added `--rollout-shield-type {orca,po-orca,epibt,none}` flag | `1ce5995` |
+| `generate_continuous_data.py` | Added `--rollout-shield-type {orca,po-orca,cv-pibt,none}` flag | `1ce5995` |
 | `main_pys/train_continuous.py` | Fix DDP `find_unused_parameters` — always True for FlowGNNModel (wait_head and calibration scalars are inference-only) | `7af80ca` |
 
 ---

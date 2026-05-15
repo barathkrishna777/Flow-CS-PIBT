@@ -21,7 +21,7 @@ python eval_parallel.py \
   --maps random-64-64-10 room-32-32-4 \
   --agent-counts 50 --max-scenarios "$N" \
   --policy flow --model-path "$MODEL" \
-  --shield-type epibt --max-steps 512 \
+  --shield-type cv-pibt --max-steps 512 \
   --output-csv evals/v4b/flow_epibt_512_setB.csv \
   --num-gpus "$NUM_GPUS"
 
@@ -31,7 +31,7 @@ python eval_parallel.py \
   --maps warehouse-10-20-10-2-1 \
   --agent-counts 50 100 --max-scenarios "$N" \
   --policy flow --model-path "$MODEL" \
-  --shield-type epibt --max-steps 512 \
+  --shield-type cv-pibt --max-steps 512 \
   --output-csv evals/v4b/flow_epibt_512_setC.csv \
   --num-gpus "$NUM_GPUS"
 

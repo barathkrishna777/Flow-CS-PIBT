@@ -92,7 +92,7 @@ Three shields are already implemented:
 
 2. **`PICBFCSShield`** — CBF-based shield (requires external `continuous_collision_shield` package). Most principled but has external dependency.
 
-3. **`EPIBTShield`** — **Priority-ordered PIBT-style shield in continuous space.** This is the most relevant one. It:
+3. **`CV-PIBT`** — **Priority-ordered PIBT-style shield in continuous space.** This is the most relevant one. It:
    - Takes continuous positions `(N, 2)` and preferred velocities `(N, 2)`
    - Processes agents in descending priority order (same principle as discrete PIBT)
    - Each agent picks the best candidate velocity that avoids collisions with already-committed higher-priority agents
@@ -106,7 +106,7 @@ Three shields are already implemented:
 - Flow + ORCA on `empty-48-48`: ~85% agent completion, 0 obstacle hits, 28–78 collisions at 96–128 agents
 - ORCA baseline on `empty-48-48`: ~98% completion, 24–77 collisions at high density
 - On `random-32-32-10` (obstacle map): **all methods catastrophically fail** (~3% completion, thousands of obstacle hits) — due to the rvo2 polygon inflation bug
-- The EPIBTShield (SDF-based) was not fully evaluated yet at last check; it was being built
+- The CV-PIBT (SDF-based) was not fully evaluated yet at last check; it was being built
 
 ---
 
@@ -119,7 +119,7 @@ Three shields are already implemented:
 3. The model never has to commit to a discrete action; it just suggests a preferred velocity
 4. Corridor bottleneck behavior (yield vs. advance) can be learned as a continuous control policy
 
-The target shield is **`EPIBTShield`** with priority updates matching the discrete simulator's CS-PIBT logic.
+The target shield is **`CV-PIBT`** with priority updates matching the discrete simulator's CS-PIBT logic.
 
 ### Key design questions to answer
 
@@ -127,9 +127,9 @@ The target shield is **`EPIBTShield`** with priority updates matching the discre
 
 2. **Agent radius and max_speed:** Currently hardcoded. What values match the discrete grid semantics (1 cell = 1 unit, max 1 cell/step)?
 
-3. **Candidate generation:** EPIBTShield currently samples N directions at max_speed + half-speed + zero. Should the preferred velocity be included as a candidate with higher weight? Should the BD-gradient direction be a candidate?
+3. **Candidate generation:** CV-PIBT currently samples N directions at max_speed + half-speed + zero. Should the preferred velocity be included as a candidate with higher weight? Should the BD-gradient direction be a candidate?
 
-4. **Obstacle map:** The SDF-based approach should work for obstacle maps (unlike rvo2). Verify EPIBTShield correctly rejects wall-intersecting velocities on obstacle maps before training.
+4. **Obstacle map:** The SDF-based approach should work for obstacle maps (unlike rvo2). Verify CV-PIBT correctly rejects wall-intersecting velocities on obstacle maps before training.
 
 5. **Training data:** `generate_continuous_data.py` generates continuous trajectories. How are they generated — ORCA expert? Smoothed discrete expert? This determines what the model learns to imitate.
 
@@ -151,7 +151,7 @@ The target shield is **`EPIBTShield`** with priority updates matching the discre
 python eval_continuous.py \
   --map empty-48-48 \
   --policy flow \
-  --shield epibt \
+  --shield cv-pibt \
   --model CHECKPOINT.pt \
   --agents 50 100 200 \
   --scenarios 5 \
@@ -175,16 +175,16 @@ python eval_continuous.py \
 
 ## Lambda Commands
 
-### Verify EPIBTShield works on obstacle maps (first thing to do)
+### Verify CV-PIBT works on obstacle maps (first thing to do)
 ```bash
 cd ~/barath/Flow-CS-PIBT
 conda activate 3dposehsx_env
 
-# Smoke test: ORCA baseline (goal-directed velocities) with EPIBTShield on both map types
+# Smoke test: ORCA baseline (goal-directed velocities) with CV-PIBT on both map types
 python eval_continuous.py \
   --map empty-48-48 \
   --policy goal_directed \
-  --shield epibt \
+  --shield cv-pibt \
   --agents 50 100 \
   --scenarios 3 \
   --output evals/continuous_evals/epibt_smoke_empty.csv
@@ -192,20 +192,20 @@ python eval_continuous.py \
 python eval_continuous.py \
   --map random-32-32-10 \
   --policy goal_directed \
-  --shield epibt \
+  --shield cv-pibt \
   --agents 20 50 \
   --scenarios 3 \
   --output evals/continuous_evals/epibt_smoke_obstacles.csv
 ```
 
-Check: zero obstacle hits on obstacle map? If not, fix SDF-velocity projection in `EPIBTShield._hits_obstacle()`.
+Check: zero obstacle hits on obstacle map? If not, fix SDF-velocity projection in `CV-PIBT._hits_obstacle()`.
 
 ### Training continuous model (once data is verified)
 ```bash
 python main_pys/train_continuous.py \
   --data-dir data/continuous_training_data/ \
   --output-dir checkpoints/continuous_epibt_v1/ \
-  --shield-type epibt \
+  --shield-type cv-pibt \
   --epochs 100 \
   --batch-size 256 \
   --gpus 0 1 2 3 \
@@ -220,7 +220,7 @@ python eval_continuous.py \
   --model checkpoints/continuous_epibt_v1/best.pt \
   --map empty-48-48 random-32-32-10 maze-128-128-2 \
   --policy flow \
-  --shield epibt \
+  --shield cv-pibt \
   --agents 50 100 200 400 \
   --scenarios 5 \
   --output evals/continuous_evals/epibt_v1_medium.csv
@@ -230,7 +230,7 @@ python eval_continuous.py \
 
 ## Key Code Locations
 
-### `EPIBTShield.project()` — main entry point
+### `CV-PIBT.project()` — main entry point
 `main_pys/continuous_env.py:901`
 
 Input: `positions (N,2)`, `preferred_velocities (N,2)`, `obstacle_map (H,W)`, `priorities (N,)`  
@@ -276,5 +276,5 @@ The continuous system removes that bottleneck. If it works, the result is a MAPF
 
 Key baselines to beat:
 1. ORCA (reactive, no learning) on continuous maps
-2. Goal-directed EPIBT (greedy, no learning) on continuous maps
+2. Goal-directed CV-PIBT (greedy, no learning) on continuous maps
 3. If possible: the discrete FLOMAP/SSIL results translated to the continuous benchmark

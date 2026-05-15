@@ -3,14 +3,14 @@
 Use this prompt with a strong LLM to draft paper sections, LaTeX tables, figure plans, captions, and visualization code/design guidance.
 
 ```text
-You are helping write an ICRA-level robotics/AI paper about continuous-space Multi-Agent Path Finding (MAPF). The method combines a learned rectified-flow GNN velocity policy with a continuous extension of PIBT called EPIBTShield.
+You are helping write an ICRA-level robotics/AI paper about continuous-space Multi-Agent Path Finding (MAPF). The method combines a learned rectified-flow GNN velocity policy with a continuous extension of PIBT called CV-PIBT.
 
 System:
 - FlowGNNModel predicts preferred velocities.
-- At evaluation time, preferred velocities are passed to EPIBTShield.
-- EPIBTShield resolves conflicts using priority inheritance and backtracking in continuous velocity space.
+- At evaluation time, preferred velocities are passed to CV-PIBT.
+- CV-PIBT resolves conflicts using priority inheritance and backtracking in continuous velocity space.
 - Default learned policy uses 3 Euler integration steps.
-- Main eval flags: --policy flow --shield-type epibt.
+- Main eval flags: --policy flow --shield-type cv-pibt.
 - Metrics:
   - AtGoal: fraction of agents reaching goals.
   - Coll: cumulative pair-timestep collision count.
@@ -28,27 +28,27 @@ Evaluation sets:
 Core Set A hard-case result, random-32-32-10, N=100, 512 steps:
 - ORCA: AtGoal 0.168, Coll 4168.9, ArrPLR 1.010, ArrStep 434.1.
 - PO-ORCA: AtGoal 0.149, Coll 2626.3, ArrPLR 1.096, ArrStep 443.0.
-- Straight+EPIBTShield: AtGoal 0.774, Coll 1306.9, ArrPLR 1.122, ArrStep 187.5.
+- Straight+CV-PIBT: AtGoal 0.774, Coll 1306.9, ArrPLR 1.122, ArrStep 187.5.
 - Flow v4b + ORCA: AtGoal 0.486, Coll 3996.0, ArrPLR 1.380, ArrStep 330.6.
-- Flow v4b + EPIBTShield: AtGoal 0.874, Coll 633.4, ArrPLR 1.462, ArrStep 167.6.
+- Flow v4b + CV-PIBT: AtGoal 0.874, Coll 633.4, ArrPLR 1.462, ArrStep 167.6.
 
 Main interpretation:
 - ORCA fails in dense/cluttered random maps.
 - PO-ORCA reduces collisions somewhat but does not improve completion.
-- Straight+EPIBTShield demonstrates that priority inheritance and backtracking are the core mechanism: 16.8% -> 77.4% AtGoal on random N=100.
+- Straight+CV-PIBT demonstrates that priority inheritance and backtracking are the core mechanism: 16.8% -> 77.4% AtGoal on random N=100.
 - Flow+ORCA demonstrates learned preferred velocities alone are insufficient with a weak shield: only 48.6% AtGoal.
-- Flow+EPIBT demonstrates the combination is strongest: 87.4% AtGoal, 84.8% fewer collisions than ORCA, and +10.0 percentage points over Straight+EPIBT.
+- Flow+CV-PIBT demonstrates the combination is strongest: 87.4% AtGoal, 84.8% fewer collisions than ORCA, and +10.0 percentage points over Straight+CV-PIBT.
 
 Set A average summary:
 - ORCA: N50 AtGoal 0.579, Coll 492.9; N100 AtGoal 0.584, Coll 2101.4.
 - PO-ORCA: N50 0.576, Coll 334.7; N100 0.575, Coll 1462.6.
-- Straight+EPIBT: N50 0.889, Coll 105.7; N100 0.886, Coll 675.8.
-- Flow+EPIBT 256: N50 0.842, Coll 49.4; N100 0.813, Coll 290.1.
-- Flow+EPIBT 512: N50 0.927, Coll 98.4; N100 0.921, Coll 354.9.
+- Straight+CV-PIBT: N50 0.889, Coll 105.7; N100 0.886, Coll 675.8.
+- Flow+CV-PIBT 256: N50 0.842, Coll 49.4; N100 0.813, Coll 290.1.
+- Flow+CV-PIBT 512: N50 0.927, Coll 98.4; N100 0.921, Coll 354.9.
 
 Integration-step ablation:
 - 3 steps is the default and best overall.
-- AtGoal for Flow+EPIBT at 3/5/10/20 steps:
+- AtGoal for Flow+CV-PIBT at 3/5/10/20 steps:
   - empty N50: 0.989 / 0.984 / 0.982 / 0.984
   - empty N100: 0.968 / 0.961 / 0.941 / 0.956
   - random N50: 0.866 / 0.893 / 0.856 / 0.870
@@ -62,28 +62,28 @@ Multi-seed robustness, Set A 512:
 - empty N100: 0.981, 0.948, 0.926, mean 0.952, std 0.023.
 - random N50: 0.868, 0.781, 0.801, mean 0.817, std 0.037.
 - random N100: 0.866, 0.789, 0.782, mean 0.812, std 0.038.
-- Caveat: seed42 is strongest. Seeds 123/456 still slightly beat Straight+EPIBT on random N=100, but the learned gain is modest for retrained seeds.
+- Caveat: seed42 is strongest. Seeds 123/456 still slightly beat Straight+CV-PIBT on random N=100, but the learned gain is modest for retrained seeds.
 
 Set B generalization:
 - random-64-64-10 N50:
   - ORCA AtGoal 0.048, Coll 383.3, ArrPLR 0.992.
-  - Straight+EPIBT AtGoal 0.505, Coll 267.2, ArrPLR 1.051.
-  - Flow+EPIBT AtGoal 0.614, Coll 106.0, ArrPLR 1.391.
+  - Straight+CV-PIBT AtGoal 0.505, Coll 267.2, ArrPLR 1.051.
+  - Flow+CV-PIBT AtGoal 0.614, Coll 106.0, ArrPLR 1.391.
 - room-32-32-4 N50:
   - ORCA AtGoal 0.012, Coll 1028.4.
-  - Straight+EPIBT AtGoal 0.114, Coll 2019.6.
-  - Flow+EPIBT AtGoal 0.262, Coll 1113.1.
+  - Straight+CV-PIBT AtGoal 0.114, Coll 2019.6.
+  - Flow+CV-PIBT AtGoal 0.262, Coll 1113.1.
 
 Set C OOD warehouse:
 - warehouse N50:
   - ORCA AtGoal 0.132, Coll 855.3.
-  - Straight+EPIBT AtGoal 0.411, Coll 29.8.
-  - Flow+EPIBT AtGoal 0.255, Coll 57.4.
+  - Straight+CV-PIBT AtGoal 0.411, Coll 29.8.
+  - Flow+CV-PIBT AtGoal 0.255, Coll 57.4.
 - warehouse N100:
   - ORCA AtGoal 0.125, Coll 3495.9.
-  - Straight+EPIBT AtGoal 0.394, Coll 167.7.
-  - Flow+EPIBT AtGoal 0.217, Coll 320.0.
-- Interpretation: EPIBTShield generalizes strongly OOD, but the learned flow prior does not improve warehouse behavior because warehouse layouts were absent from training. Frame this as a domain adaptation limitation and a motivation for future training data expansion.
+  - Straight+CV-PIBT AtGoal 0.394, Coll 167.7.
+  - Flow+CV-PIBT AtGoal 0.217, Coll 320.0.
+- Interpretation: CV-PIBT generalizes strongly OOD, but the learned flow prior does not improve warehouse behavior because warehouse layouts were absent from training. Frame this as a domain adaptation limitation and a motivation for future training data expansion.
 
 v4 vs v4b at 256 steps:
 - v4b beats v4 on all Set A map/N combinations:
@@ -95,7 +95,7 @@ v4 vs v4b at 256 steps:
 Please produce:
 1. A concise ICRA-style experimental results section.
 2. A main ablation table and a generalization table in LaTeX.
-3. A paragraph explaining why EPIBTShield is the primary algorithmic contribution.
+3. A paragraph explaining why CV-PIBT is the primary algorithmic contribution.
 4. A paragraph explaining the learned flow contribution.
 5. A limitations paragraph that honestly discusses warehouse OOD degradation and multi-seed variance.
 6. A publication-quality visualization plan and, if code is requested, plotting code that can produce the figures.
@@ -107,9 +107,9 @@ Visualization requirements:
 - Use restrained, colorblind-safe palettes. Suggested semantic color mapping:
   - ORCA: neutral gray.
   - PO-ORCA: muted slate.
-  - Straight+EPIBTShield: teal or blue-green.
+  - Straight+CV-PIBT: teal or blue-green.
   - Flow+ORCA: amber or muted orange.
-  - Flow+EPIBT: deep blue or high-emphasis indigo.
+  - Flow+CV-PIBT: deep blue or high-emphasis indigo.
 - Keep backgrounds white, gridlines subtle, labels direct, and legends minimal. Prefer direct labeling when possible.
 - Avoid 3D plots, gradient fills, glossy effects, unnecessary icons, oversized titles, and decorative shapes.
 - Use consistent scales across comparable panels so gains are visually honest.
@@ -125,24 +125,24 @@ Recommended figures:
 Figure 1: Mechanism Decomposition on Set A Hard Case
 - Question: What contributes what?
 - Data: random-32-32-10, N=100, 512 steps.
-- Recommended design: horizontal connected dot/slope plot for AtGoal, ordered ORCA -> PO-ORCA -> Straight+EPIBT -> Flow+ORCA -> Flow+EPIBT. Add collision count as a second aligned panel below, preferably log-scaled or annotated directly.
+- Recommended design: horizontal connected dot/slope plot for AtGoal, ordered ORCA -> PO-ORCA -> Straight+CV-PIBT -> Flow+ORCA -> Flow+CV-PIBT. Add collision count as a second aligned panel below, preferably log-scaled or annotated directly.
 - Must show:
   - ORCA 0.168
-  - Straight+EPIBT 0.774
+  - Straight+CV-PIBT 0.774
   - Flow+ORCA 0.486
-  - Flow+EPIBT 0.874
+  - Flow+CV-PIBT 0.874
 - Key annotation: "Shield: +60.6 pp over ORCA; learning on shield: +10.0 pp; ORCA shield with learned flow remains poor."
 
 Figure 2: Generalization and OOD Behavior
 - Question: Where does learning help, and where does the shield alone generalize?
 - Data: random64 N50, room N50, warehouse N50, warehouse N100.
-- Recommended design: small-multiple slope charts or dumbbell charts per map, comparing ORCA, Straight+EPIBT, and Flow+EPIBT. Each panel should share a 0-1 AtGoal scale.
+- Recommended design: small-multiple slope charts or dumbbell charts per map, comparing ORCA, Straight+CV-PIBT, and Flow+CV-PIBT. Each panel should share a 0-1 AtGoal scale.
 - Must make the warehouse reversal obvious without looking like a failure of the whole method:
   - random64: 0.048 -> 0.505 -> 0.614
   - room: 0.012 -> 0.114 -> 0.262
   - warehouse N50: 0.132 -> 0.411 -> 0.255
   - warehouse N100: 0.125 -> 0.394 -> 0.217
-- Key annotation: "EPIBTShield transfers OOD; learned flow needs warehouse-like training data."
+- Key annotation: "CV-PIBT transfers OOD; learned flow needs warehouse-like training data."
 
 Figure 3: Integration Steps Tradeoff
 - Question: Why use 3 Euler steps?
@@ -159,7 +159,7 @@ Figure 4: Multi-Seed Robustness
 
 Figure 5: Qualitative Trajectory Figure
 - Question: What does the behavior look like?
-- Recommended design: same scenario shown across ORCA, Straight+EPIBT, Flow+EPIBT. Use map obstacles in light gray, trajectories in transparent lines, starts/goals with subtle markers, and collisions/deadlock region annotated sparingly.
+- Recommended design: same scenario shown across ORCA, Straight+CV-PIBT, Flow+CV-PIBT. Use map obstacles in light gray, trajectories in transparent lines, starts/goals with subtle markers, and collisions/deadlock region annotated sparingly.
 - Avoid spaghetti: choose a representative scenario, draw at most a manageable subset of agents or use opacity and endpoint emphasis.
 - Caption should explain behavior, not just describe colors.
 

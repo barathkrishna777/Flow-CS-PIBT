@@ -23,12 +23,12 @@ if [[ ! -f "$MODEL" ]]; then
   exit 1
 fi
 
-# ── 1. ORCA vel + EPIBTShield  (new ablation, Set A) ────────────────────────
+# ── 1. ORCA vel + CV-PIBT  (new ablation, Set A) ────────────────────────
 python eval_parallel.py \
   --map-dir $MAPDIR --scen-dir $SCENDIR \
   --maps random-32-32-10 empty-48-48 \
   --agent-counts 50 100 --max-scenarios $N \
-  --policy orca --nav straight --shield-type epibt \
+  --policy orca --nav straight --shield-type cv-pibt \
   --max-steps 512 \
   --output-csv evals/ablations/orca_epibt_512_setA.csv
 
@@ -68,12 +68,12 @@ python eval_parallel.py \
   --max-steps 512 \
   --output-csv evals/baselines/straight_po-orca_512_setB.csv
 
-# ── 6. ORCA vel + EPIBTShield on Set B ───────────────────────────────────────
+# ── 6. ORCA vel + CV-PIBT on Set B ───────────────────────────────────────
 python eval_parallel.py \
   --map-dir $MAPDIR --scen-dir $SCENDIR \
   --maps random-64-64-10 room-32-32-4 \
   --agent-counts 50 --max-scenarios $N \
-  --policy orca --nav straight --shield-type epibt \
+  --policy orca --nav straight --shield-type cv-pibt \
   --max-steps 512 \
   --output-csv evals/ablations/orca_epibt_512_setB.csv
 
@@ -95,12 +95,12 @@ python eval_parallel.py \
   --max-steps 512 \
   --output-csv evals/baselines/straight_po-orca_512_setC.csv
 
-# ── 9. ORCA vel + EPIBTShield on Set C ───────────────────────────────────────
+# ── 9. ORCA vel + CV-PIBT on Set C ───────────────────────────────────────
 python eval_parallel.py \
   --map-dir $MAPDIR --scen-dir $SCENDIR \
   --maps warehouse-10-20-10-2-1 \
   --agent-counts 50 100 --max-scenarios $N \
-  --policy orca --nav straight --shield-type epibt \
+  --policy orca --nav straight --shield-type cv-pibt \
   --max-steps 512 \
   --output-csv evals/ablations/orca_epibt_512_setC.csv
 
